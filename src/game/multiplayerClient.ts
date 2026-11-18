@@ -1,3 +1,4 @@
+import type { EmoteId } from '../data/emotes';
 import { soundEngine } from './audio';
 import {
   ClientMessage,
@@ -13,6 +14,8 @@ import { RenderableSimulation } from './scene3d';
 import {
   AbilityId,
   CarcassEntity,
+  DamageImpulse,
+  DeathCamState,
   HudSnapshot,
   KeliEntity,
   LobbySize,
@@ -65,6 +68,7 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     dewTimer: r?.dewTimer ?? 0,
     stormFinTimer: r?.stormFinTimer ?? 0,
     thunderRoeTimer: r?.thunderRoeTimer ?? 0,
+    evoBoostTimer: r?.evoBoostTimer ?? 0,
     sonarTimer: r?.sonarTimer ?? 0,
     sonarIsHunter: r?.sonarIsHunter ?? false,
     feedingTargetId: r?.feedingTargetId ?? null,
@@ -77,7 +81,10 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
       electroshock: 0,
       maelstrom: 0,
     },
+    activeEmote: r?.activeEmote ?? null,
     kills: r?.kills ?? 0,
+    rivalsConsumed: r?.rivalsConsumed ?? 0,
+    bountyReward: r?.bountyReward ?? 0,
     damageDealt: 0,
     lastAttackerId: null,
     lastAttackerName: null,
@@ -123,6 +130,7 @@ export class RemoteSimulationView implements RenderableSimulation {
     visibilityRange: 1.0,
   };
   public cameraShake = 0;
+  public damageImpulse: DamageImpulse | null = null;
 
   private targetsById = new Map<string, RemoteKeliState>();
   private entityById = new Map<string, KeliEntity>();
@@ -130,6 +138,7 @@ export class RemoteSimulationView implements RenderableSimulation {
   private latestHud: HudSnapshot | null = null;
   private lastPacketTime = 0;
   private speakingPeers = new Set<string>();
+  private seenDamageHitIds = new Set<string>();
 
   constructor(localPlayerId: string) {
     this.localPlayerId = localPlayerId;
@@ -143,11 +152,30 @@ export class RemoteSimulationView implements RenderableSimulation {
     this.latestHud = packet.hud;
     this.zone = packet.zone;
     this.weather = packet.weather;
-    this.cameraShake = packet.cameraShake;
+    this.cameraShake = Math.max(this.cameraShake, packet.cameraShake);
     this.carcasses = packet.carcasses;
     this.pickups = packet.pickups;
     this.effects = packet.effects;
     this.lastPacketTime = performance.now();
+
+    const hits = packet.hud.recentDamageHits;
+    if (hits && hits.length > 0) {
+      for (const h of hits) {
+        if (this.seenDamageHitIds.has(h.id)) continue;
+        this.seenDamageHitIds.add(h.id);
+        if (this.seenDamageHitIds.size > 40) {
+          const oldest = this.seenDamageHitIds.values().next().value;
+          if (oldest) this.seenDamageHitIds.delete(oldest);
+        }
+        this.damageImpulse = {
+          x: -Math.cos(h.directionAngle),
+          z: -Math.sin(h.directionAngle),
+          strength: h.intensity,
+          seq: (this.damageImpulse?.seq ?? 0) + 1,
+        };
+        this.cameraShake = Math.max(this.cameraShake, 0.48 + h.intensity * 0.45);
+      }
+    }
 
     const activeIds = new Set<string>();
     const nextList: KeliEntity[] = [];
@@ -197,13 +225,17 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.dewTimer = remote.dewTimer;
         ent.stormFinTimer = remote.stormFinTimer;
         ent.thunderRoeTimer = remote.thunderRoeTimer;
+        ent.evoBoostTimer = remote.evoBoostTimer ?? 0;
         ent.sonarTimer = remote.sonarTimer;
         ent.sonarIsHunter = remote.sonarIsHunter;
         ent.kills = remote.kills;
+        ent.rivalsConsumed = remote.rivalsConsumed ?? 0;
+        ent.bountyReward = remote.bountyReward ?? 0;
         ent.feedingTargetId = remote.feedingTargetId;
         ent.feedingProgress = remote.feedingProgress;
         ent.feedingDuration = remote.feedingDuration;
         ent.cooldowns = remote.cooldowns;
+        ent.activeEmote = remote.activeEmote ?? null;
       }
       nextList.push(ent);
     }
@@ -271,6 +303,24 @@ export class RemoteSimulationView implements RenderableSimulation {
       case 'weather_fog':
         soundEngine.playWeatherCue('basin_fog');
         break;
+      case 'emote_signal':
+        soundEngine.playEmoteCue(false);
+        break;
+      case 'emote_taunt':
+        soundEngine.playEmoteCue(true);
+        break;
+      case 'damage_hit':
+        soundEngine.playDamageHit(false);
+        break;
+      case 'damage_hit_heavy':
+        soundEngine.playDamageHit(true);
+        break;
+      case 'bounty_marked':
+        soundEngine.playBountyCue(false);
+        break;
+      case 'bounty_claimed':
+        soundEngine.playBountyCue(true);
+        break;
       case 'whistle':
         soundEngine.playShiftWhistle();
         break;
@@ -278,8 +328,13 @@ export class RemoteSimulationView implements RenderableSimulation {
   }
 
   public advance(dt: number) {
-    const blend = 1 - Math.exp(-18 * dt);
+    if (this.cameraShake > 0) {
+      this.cameraShake = Math.max(0, this.cameraShake - dt * 2.5);
+    }
+    const deathCamActive = Boolean(this.getDeathCam()?.active);
+    const blend = 1 - Math.exp((deathCamActive ? -11 : -18) * dt);
     const deadReckonDt = Math.min(0.06, (performance.now() - this.lastPacketTime) / 1000) * 0.45;
+    const fxDt = dt * (deathCamActive ? 0.3 : 1);
 
     for (const ent of this.kelis) {
       ent.isSpeaking = this.speakingPeers.has(ent.id);
@@ -293,13 +348,13 @@ export class RemoteSimulationView implements RenderableSimulation {
     }
 
     for (const fx of this.effects) {
-      fx.elapsed += dt;
+      fx.elapsed += fxDt;
     }
     for (const c of this.carcasses) {
-      c.bobPhase += dt * 2.4;
+      c.bobPhase += fxDt * 2.4;
     }
     for (const pk of this.pickups) {
-      pk.bobPhase += dt * 3.1;
+      pk.bobPhase += fxDt * 3.1;
     }
   }
 
@@ -328,6 +383,12 @@ export class RemoteSimulationView implements RenderableSimulation {
       if (found) return found;
     }
     return this.kelis[0] ?? null;
+  }
+
+  public getDeathCam(): DeathCamState | null {
+    const dc = this.latestHud?.deathCam;
+    if (!dc || !dc.active || dc.remaining <= 0) return null;
+    return dc;
   }
 }
 
@@ -707,7 +768,11 @@ export class MultiplayerClient {
     this.send({ type: 'player:ability', ability });
   }
 
-  public sendSpectateAction(action: 'prev' | 'next' | 'leader') {
+  public triggerEmote(emoteId: EmoteId) {
+    this.send({ type: 'player:emote', emoteId });
+  }
+
+  public sendSpectateAction(action: 'prev' | 'next' | 'leader' | 'skip_death_cam') {
     this.send({ type: 'player:spectate', action });
   }
 

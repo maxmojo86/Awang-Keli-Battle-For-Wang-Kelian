@@ -1,4 +1,4 @@
-import { ArenaZoneId, HazardTileKind, TerrainType, WeatherKind } from './types';
+import { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType, WeatherKind } from './types';
 
 export interface AmbientEnvironmentState {
   dt: number;
@@ -8,7 +8,125 @@ export interface AmbientEnvironmentState {
   hazard: HazardTileKind | null;
   weather?: WeatherKind;
   weatherIntensity?: number;
+  form?: EvolutionForm;
+  level?: number;
+  deathCamActive?: boolean;
   paused?: boolean;
+}
+
+export interface EvolutionAudioProfile {
+  form: EvolutionForm;
+  layerCount: number;
+  tempoBpm: number;
+  pulseIntervalSec: number;
+  baseFreqHz: number;
+  subFreqHz: number;
+  droneGain: number;
+  fifthGain: number;
+  shimmerGain: number;
+  droneCutoffHz: number;
+  pulseGain: number;
+  subGain: number;
+  harmonicGain: number;
+  bassCutoffHz: number;
+  accentEvery: number;
+  percussiveWeight: number;
+}
+
+export function getEvolutionAudioProfile(
+  form: EvolutionForm,
+  level = 1
+): EvolutionAudioProfile {
+  const clampedLevel = Math.max(1, Math.min(100, level));
+
+  if (form === 1) {
+    const p = Math.max(0, Math.min(1, (clampedLevel - 1) / 38));
+    const tempoBpm = 54 + p * 6;
+    return {
+      form: 1,
+      layerCount: 1,
+      tempoBpm,
+      pulseIntervalSec: 60 / tempoBpm,
+      baseFreqHz: 55.0,
+      subFreqHz: 27.5,
+      droneGain: 0.042 + p * 0.008,
+      fifthGain: 0,
+      shimmerGain: 0,
+      droneCutoffHz: 155 + p * 20,
+      pulseGain: 0.068 + p * 0.01,
+      subGain: 0.024 + p * 0.006,
+      harmonicGain: 0.016 + p * 0.004,
+      bassCutoffHz: 155 + p * 25,
+      accentEvery: 4,
+      percussiveWeight: 0,
+    };
+  }
+
+  if (form === 2) {
+    const p = Math.max(0, Math.min(1, (clampedLevel - 40) / 39));
+    const tempoBpm = 72 + p * 8;
+    return {
+      form: 2,
+      layerCount: 2,
+      tempoBpm,
+      pulseIntervalSec: 60 / tempoBpm,
+      baseFreqHz: 61.74,
+      subFreqHz: 30.87,
+      droneGain: 0.056 + p * 0.008,
+      fifthGain: 0.022 + p * 0.005,
+      shimmerGain: 0.008 + p * 0.004,
+      droneCutoffHz: 235 + p * 30,
+      pulseGain: 0.095 + p * 0.012,
+      subGain: 0.044 + p * 0.008,
+      harmonicGain: 0.032 + p * 0.006,
+      bassCutoffHz: 245 + p * 35,
+      accentEvery: 2,
+      percussiveWeight: 0.16,
+    };
+  }
+
+  if (form === 3) {
+    const p = Math.max(0, Math.min(1, (clampedLevel - 80) / 19));
+    const tempoBpm = 92 + p * 8;
+    return {
+      form: 3,
+      layerCount: 3,
+      tempoBpm,
+      pulseIntervalSec: 60 / tempoBpm,
+      baseFreqHz: 73.42,
+      subFreqHz: 36.71,
+      droneGain: 0.068 + p * 0.008,
+      fifthGain: 0.032 + p * 0.004,
+      shimmerGain: 0.024 + p * 0.006,
+      droneCutoffHz: 345 + p * 40,
+      pulseGain: 0.122 + p * 0.01,
+      subGain: 0.068 + p * 0.008,
+      harmonicGain: 0.048 + p * 0.006,
+      bassCutoffHz: 365 + p * 45,
+      accentEvery: 4,
+      percussiveWeight: 0.48,
+    };
+  }
+
+  const tempoBpm = 112;
+  return {
+    form: 4,
+    layerCount: 4,
+    tempoBpm,
+    pulseIntervalSec: 60 / tempoBpm,
+    baseFreqHz: 82.41,
+    subFreqHz: 41.2,
+    droneGain: 0.084,
+    fifthGain: 0.044,
+    shimmerGain: 0.042,
+    droneCutoffHz: 460,
+    pulseGain: 0.145,
+    subGain: 0.088,
+    harmonicGain: 0.064,
+    bassCutoffHz: 490,
+    accentEvery: 4,
+    percussiveWeight: 0.8,
+  };
 }
 
 export interface AmbientAcousticProfile {
@@ -205,6 +323,13 @@ class SoundEngine {
   private ambientFilter: BiquadFilterNode | null = null;
   private rainGain: GainNode | null = null;
   private rainFilter: BiquadFilterNode | null = null;
+  private droneFilter: BiquadFilterNode | null = null;
+  private droneGain: GainNode | null = null;
+  private fifthGain: GainNode | null = null;
+  private shimmerGain: GainNode | null = null;
+  private droneOscRoot: OscillatorNode | null = null;
+  private droneOscFifth: OscillatorNode | null = null;
+  private shimmerOsc: OscillatorNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private ambientStarted = false;
   private ambientActive = false;
@@ -214,9 +339,12 @@ class SoundEngine {
   private rippleTimer = 0.35;
   private bubbleTimer = 0.7;
   private rainDropTimer = 0.2;
+  private bassPulseTimer = 0.25;
+  private bassBeatIndex = 0;
   private lastZoneId: ArenaZoneId | null = null;
   private lastTerrain: TerrainType | null = null;
   private lastHazard: HazardTileKind | null = null;
+  private lastForm: EvolutionForm | null = null;
 
   private ensureContext(): AudioContext | null {
     if (this.muted) return null;
@@ -278,6 +406,8 @@ class SoundEngine {
       if (this.ambientGain) {
         this.ambientGain.gain.setTargetAtTime(0.14, ctx.currentTime, 0.18);
       }
+      this.bassPulseTimer = 0.25;
+      this.bassBeatIndex = 0;
       return;
     }
 
@@ -320,6 +450,43 @@ class SoundEngine {
       this.rainFilter.connect(this.rainGain);
       this.rainGain.connect(this.masterGain);
       rainNoise.start(0, 0.7);
+
+      // Evolution-synced harmonic drone bus (root -> fifth -> upper mist shimmer)
+      this.droneFilter = ctx.createBiquadFilter();
+      this.droneFilter.type = 'lowpass';
+      this.droneFilter.frequency.value = 160;
+      this.droneFilter.Q.value = 0.9;
+      this.droneFilter.connect(this.masterGain);
+
+      this.droneGain = ctx.createGain();
+      this.droneGain.gain.value = 0.0001;
+      this.droneGain.connect(this.droneFilter);
+
+      this.fifthGain = ctx.createGain();
+      this.fifthGain.gain.value = 0.0001;
+      this.fifthGain.connect(this.droneFilter);
+
+      this.shimmerGain = ctx.createGain();
+      this.shimmerGain.gain.value = 0.0001;
+      this.shimmerGain.connect(this.droneFilter);
+
+      this.droneOscRoot = ctx.createOscillator();
+      this.droneOscRoot.type = 'sine';
+      this.droneOscRoot.frequency.value = 55;
+      this.droneOscRoot.connect(this.droneGain);
+      this.droneOscRoot.start();
+
+      this.droneOscFifth = ctx.createOscillator();
+      this.droneOscFifth.type = 'triangle';
+      this.droneOscFifth.frequency.value = 82.4;
+      this.droneOscFifth.connect(this.fifthGain);
+      this.droneOscFifth.start();
+
+      this.shimmerOsc = ctx.createOscillator();
+      this.shimmerOsc.type = 'sine';
+      this.shimmerOsc.frequency.value = 165;
+      this.shimmerOsc.connect(this.shimmerGain);
+      this.shimmerOsc.start();
     } catch {
       // Ignore audio autoplay blocks cleanly
     }
@@ -330,18 +497,27 @@ class SoundEngine {
     this.lastHazard = null;
     this.lastZoneId = null;
     this.lastTerrain = null;
+    this.lastForm = null;
+    this.bassPulseTimer = 0.25;
+    this.bassBeatIndex = 0;
     if (this.ambientGain && this.ctx) {
       this.ambientGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2);
     }
     if (this.rainGain && this.ctx) {
       this.rainGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2);
     }
+    if (this.ctx) {
+      const now = this.ctx.currentTime;
+      if (this.droneGain) this.droneGain.gain.setTargetAtTime(0, now, 0.2);
+      if (this.fifthGain) this.fifthGain.gain.setTargetAtTime(0, now, 0.2);
+      if (this.shimmerGain) this.shimmerGain.gain.setTargetAtTime(0, now, 0.2);
+    }
   }
 
   /**
    * Modulates the ambient lake bed and triggers procedural water-rippling,
-   * cavern droplet, whitewater rush, and hazard bubbling effects based on
-   * the player's current region, terrain depth, hazard tile, and swim speed.
+   * cavern droplet, whitewater rush, hazard bubbling, and evolution-synced
+   * harmonic drone & organic bass pulse layers.
    */
   public updateAmbientEnvironment(state: AmbientEnvironmentState) {
     if (this.muted || !this.ambientActive) return;
@@ -353,12 +529,20 @@ class SoundEngine {
     if (state.paused) {
       this.ambientGain.gain.setTargetAtTime(0, now, 0.12);
       if (this.rainGain) this.rainGain.gain.setTargetAtTime(0, now, 0.12);
+      if (this.droneGain) this.droneGain.gain.setTargetAtTime(0, now, 0.12);
+      if (this.fifthGain) this.fifthGain.gain.setTargetAtTime(0, now, 0.12);
+      if (this.shimmerGain) this.shimmerGain.gain.setTargetAtTime(0, now, 0.12);
       return;
     }
 
     const profile = getAmbientProfile(state.zoneId, state.terrain, state.hazard, state.speed);
     const weather = state.weather ?? 'clear';
     const wInt = Math.max(0, Math.min(1, state.weatherIntensity ?? 0));
+    const form: EvolutionForm = state.form ?? 1;
+    const level =
+      state.level ?? (form === 4 ? 100 : form === 3 ? 80 : form === 2 ? 40 : 1);
+    const deathCamActive = Boolean(state.deathCamActive);
+    const evoProfile = getEvolutionAudioProfile(form, level);
 
     // Fog dampens upper frequencies for a hushed atmospheric mist; rain adds crisp patter bed
     const fogCutoffFactor = weather === 'basin_fog' ? 1 - 0.34 * wInt : 1;
@@ -374,6 +558,40 @@ class SoundEngine {
         weather === 'light_rain' ? (state.terrain === 'shore' ? 0.085 : 0.115) * wInt : 0;
       this.rainGain.gain.setTargetAtTime(targetRainGain, now, 0.35);
       this.rainFilter.frequency.setTargetAtTime(state.terrain === 'shore' ? 1950 : 1480, now, 0.3);
+    }
+
+    // Morph continuous evolution harmonic drone layers
+    const slowMoGainFactor = deathCamActive ? 0.72 : 1;
+    const slowMoCutoffFactor = deathCamActive ? 0.65 : 1;
+    const fogDroneCutoffFactor = weather === 'basin_fog' ? 1 - 0.25 * wInt : 1;
+
+    if (this.droneFilter) {
+      this.droneFilter.frequency.setTargetAtTime(
+        evoProfile.droneCutoffHz * slowMoCutoffFactor * fogDroneCutoffFactor,
+        now,
+        0.35
+      );
+    }
+    if (this.droneOscRoot && this.droneGain) {
+      this.droneOscRoot.frequency.setTargetAtTime(evoProfile.baseFreqHz, now, 0.4);
+      this.droneGain.gain.setTargetAtTime(evoProfile.droneGain * slowMoGainFactor, now, 0.35);
+    }
+    if (this.droneOscFifth && this.fifthGain) {
+      this.droneOscFifth.frequency.setTargetAtTime(evoProfile.baseFreqHz * 1.498, now, 0.4);
+      this.fifthGain.gain.setTargetAtTime(evoProfile.fifthGain * slowMoGainFactor, now, 0.4);
+    }
+    if (this.shimmerOsc && this.shimmerGain) {
+      const shimmerRatio = form >= 4 ? 3.0 : 2.996;
+      this.shimmerOsc.frequency.setTargetAtTime(evoProfile.baseFreqHz * shimmerRatio, now, 0.45);
+      this.shimmerGain.gain.setTargetAtTime(evoProfile.shimmerGain * slowMoGainFactor, now, 0.45);
+    }
+
+    if (form !== this.lastForm) {
+      if (this.lastForm !== null && form > this.lastForm) {
+        // Pull the next rhythmic pulse closer so the evolved cadence locks in right after evolution
+        this.bassPulseTimer = Math.min(this.bassPulseTimer, 0.24);
+      }
+      this.lastForm = form;
     }
 
     // Immediate audio cue when crossing into a hazard tile or switching aquatic zones
@@ -415,6 +633,133 @@ class SoundEngine {
         this.rainDropTimer = (0.14 + Math.random() * 0.22) / Math.max(0.35, wInt);
         this.triggerRainPatter(wInt);
       }
+    }
+
+    this.bassPulseTimer -= dt;
+    if (this.bassPulseTimer <= 0) {
+      const beatIdx = this.bassBeatIndex;
+      const swingFactor =
+        form === 2 || form === 3 ? (beatIdx % 2 === 1 ? 0.92 : 1.08) : 1.0;
+      const interval = evoProfile.pulseIntervalSec * (deathCamActive ? 1.65 : 1.0) * swingFactor;
+      this.bassPulseTimer = Math.max(0.22, interval);
+      this.bassBeatIndex = (beatIdx + 1) % 16;
+      this.triggerOrganicBassPulse(evoProfile, beatIdx, deathCamActive);
+    }
+  }
+
+  private triggerOrganicBassPulse(
+    profile: EvolutionAudioProfile,
+    beatIdx: number,
+    deathCamActive: boolean
+  ) {
+    const ctx = this.ctx;
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const isDownbeat = beatIdx % profile.accentEvery === 0;
+    const isSubAccent = profile.layerCount >= 2 && beatIdx % 2 === 1;
+    const slowScale = deathCamActive ? 0.68 : 1;
+
+    // Gentle Nusantara-inspired root / fourth / fifth anchor cycling in higher evolutions
+    let pitchRatio = 1.0;
+    if (profile.form >= 3) {
+      const step = beatIdx % 8;
+      if (step === 6) pitchRatio = 1.122; // whole step / second
+      else if (step === 7) pitchRatio = 1.189; // minor third / warm return
+      else if (step === 4) pitchRatio = 0.891; // subtle lower fifth-like dip
+    } else if (profile.form === 2 && beatIdx % 4 === 3) {
+      pitchRatio = 1.122;
+    }
+
+    const bodyFreq = profile.baseFreqHz * pitchRatio;
+    const subFreq = profile.subFreqHz * pitchRatio;
+    const pulseDur = Math.min(0.62, Math.max(0.28, profile.pulseIntervalSec * 0.66));
+
+    // Layer 1: Organic membrane sub-thump (warm pitch settle)
+    const subOsc = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(subFreq * 1.32, now);
+    subOsc.frequency.exponentialRampToValueAtTime(Math.max(22, subFreq), now + 0.11);
+
+    const subAmp = (profile.subGain + profile.pulseGain * 0.45) * (isDownbeat ? 1.15 : 0.86) * slowScale;
+    subGain.gain.setValueAtTime(0.0008, now);
+    subGain.gain.linearRampToValueAtTime(subAmp, now + 0.032);
+    subGain.gain.exponentialRampToValueAtTime(0.0005, now + pulseDur);
+
+    subOsc.connect(subGain);
+    subGain.connect(this.masterGain);
+    subOsc.start(now);
+    subOsc.stop(now + pulseDur + 0.03);
+
+    // Layer 2: Filtered organic triangle bass body
+    const bodyOsc = ctx.createOscillator();
+    const bodyFilter = ctx.createBiquadFilter();
+    const bodyGain = ctx.createGain();
+
+    bodyOsc.type = 'triangle';
+    bodyOsc.frequency.setValueAtTime(bodyFreq * 1.03, now);
+    bodyOsc.frequency.exponentialRampToValueAtTime(bodyFreq, now + 0.09);
+
+    bodyFilter.type = 'lowpass';
+    bodyFilter.Q.value = profile.form >= 3 ? 2.1 : 1.3;
+    const peakCutoff =
+      profile.bassCutoffHz * (isDownbeat ? 1.25 : 0.95) * (deathCamActive ? 0.68 : 1);
+    bodyFilter.frequency.setValueAtTime(Math.max(90, bodyFreq * 1.4), now);
+    bodyFilter.frequency.exponentialRampToValueAtTime(Math.max(110, peakCutoff), now + 0.045);
+    bodyFilter.frequency.exponentialRampToValueAtTime(Math.max(85, bodyFreq * 1.55), now + pulseDur * 0.92);
+
+    const bodyAmp =
+      (profile.pulseGain * 0.62 + profile.harmonicGain * 0.55) *
+      (isDownbeat ? 1.12 : 0.85) *
+      slowScale;
+    bodyGain.gain.setValueAtTime(0.0008, now);
+    bodyGain.gain.linearRampToValueAtTime(bodyAmp, now + 0.04);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0005, now + pulseDur);
+
+    bodyOsc.connect(bodyFilter);
+    bodyFilter.connect(bodyGain);
+    bodyGain.connect(this.masterGain);
+    bodyOsc.start(now);
+    bodyOsc.stop(now + pulseDur + 0.03);
+
+    // Layer 3+: Form 2+ organic water-drum / caklempong accent tap
+    if (profile.percussiveWeight > 0 && (isDownbeat || (profile.layerCount >= 3 && isSubAccent))) {
+      const tapOsc = ctx.createOscillator();
+      const tapGain = ctx.createGain();
+      const tapFreq = bodyFreq * (isDownbeat ? 4.0 : 3.0);
+      const tapAmp =
+        0.042 * profile.percussiveWeight * (isDownbeat ? 1.0 : 0.62) * slowScale;
+
+      tapOsc.type = profile.form >= 4 ? 'triangle' : 'sine';
+      tapOsc.frequency.setValueAtTime(tapFreq * 1.04, now);
+      tapOsc.frequency.exponentialRampToValueAtTime(tapFreq, now + 0.04);
+
+      tapGain.gain.setValueAtTime(0.0006, now);
+      tapGain.gain.linearRampToValueAtTime(tapAmp, now + 0.012);
+      tapGain.gain.exponentialRampToValueAtTime(0.0004, now + 0.16);
+
+      tapOsc.connect(tapGain);
+      tapGain.connect(this.masterGain);
+      tapOsc.start(now);
+      tapOsc.stop(now + 0.18);
+    }
+
+    // Layer 4: Majestic Keli King fifth swell on downbeats
+    if (profile.form >= 4 && isDownbeat) {
+      const fifthOsc = ctx.createOscillator();
+      const fifthPulseGain = ctx.createGain();
+      fifthOsc.type = 'sine';
+      fifthOsc.frequency.setValueAtTime(bodyFreq * 1.498, now);
+
+      fifthPulseGain.gain.setValueAtTime(0.0006, now);
+      fifthPulseGain.gain.linearRampToValueAtTime(0.034 * slowScale, now + 0.06);
+      fifthPulseGain.gain.exponentialRampToValueAtTime(0.0004, now + pulseDur * 0.95);
+
+      fifthOsc.connect(fifthPulseGain);
+      fifthPulseGain.connect(this.masterGain);
+      fifthOsc.start(now);
+      fifthOsc.stop(now + pulseDur + 0.02);
     }
   }
 
@@ -834,6 +1179,42 @@ class SoundEngine {
     osc.stop(now + 0.6);
   }
 
+  public playDamageHit(heavy = false) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Low chest thump
+    const thump = ctx.createOscillator();
+    const thumpGain = ctx.createGain();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(heavy ? 128 : 155, now);
+    thump.frequency.exponentialRampToValueAtTime(42, now + 0.14);
+    thumpGain.gain.setValueAtTime(heavy ? 0.28 : 0.2, now);
+    thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    thump.connect(thumpGain);
+    thumpGain.connect(this.masterGain);
+    thump.start(now);
+    thump.stop(now + 0.17);
+
+    // Filtered water/scale impact crunch
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(heavy ? 480 : 640, now);
+    filter.frequency.exponentialRampToValueAtTime(190, now + 0.12);
+    filter.Q.value = 1.4;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(heavy ? 0.16 : 0.11, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    noise.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(this.masterGain);
+    noise.start(now, Math.random() * 0.5);
+    noise.stop(now + 0.14);
+  }
+
   public playPickup(isHealing: boolean) {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
@@ -919,6 +1300,64 @@ class SoundEngine {
       osc.start(now);
       osc.stop(now + 0.95);
     }
+  }
+
+  public playEmoteCue(isTaunt: boolean) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const notes = isTaunt ? [392, 311.13] : [587.33, 880];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = isTaunt ? 'sawtooth' : 'triangle';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.065);
+      if (isTaunt) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 950;
+        osc.connect(filter);
+        filter.connect(gain);
+      } else {
+        osc.connect(gain);
+      }
+      gain.gain.setValueAtTime(0.001, now + idx * 0.065);
+      gain.gain.linearRampToValueAtTime(isTaunt ? 0.11 : 0.12, now + idx * 0.065 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.065 + 0.22);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.065);
+      osc.stop(now + idx * 0.065 + 0.24);
+    });
+  }
+
+  public playBountyCue(claimed: boolean) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const notes = claimed ? [523.25, 659.25, 783.99, 1046.5] : [329.63, 293.66, 440];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = claimed ? 'triangle' : 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+      if (!claimed) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 880;
+        osc.connect(filter);
+        filter.connect(gain);
+      } else {
+        osc.connect(gain);
+      }
+      gain.gain.setValueAtTime(0.001, now + idx * 0.07);
+      gain.gain.linearRampToValueAtTime(claimed ? 0.14 : 0.095, now + idx * 0.07 + 0.018);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.07 + 0.34);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.07);
+      osc.stop(now + idx * 0.07 + 0.36);
+    });
   }
 }
 

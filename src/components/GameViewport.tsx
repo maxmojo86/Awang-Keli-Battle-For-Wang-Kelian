@@ -20,13 +20,28 @@ import {
   CloudRain,
   CloudFog,
   Sun,
+  Heart,
+  Sparkles,
+  Zap,
+  Droplets,
+  Wind,
+  Shield,
+  Skull,
+  AlertTriangle,
+  Users,
+  Timer,
+  Gauge,
+  BatteryLow,
+  MessageCircle,
 } from 'lucide-react';
 import {
   ACTIVE_ABILITIES,
+  getEvolutionForm,
   getFormLabel,
   getMilestoneTier,
   getNextMilestone,
 } from '../data/abilities';
+import { EMOTE_SPECS, EmoteId, getEmoteSpec } from '../data/emotes';
 import { getTerrainAt, getZoneAt } from '../game/arena';
 import { soundEngine } from '../game/audio';
 import { multiplayerClient, RemoteSimulationView } from '../game/multiplayerClient';
@@ -42,6 +57,9 @@ import {
   LobbySize,
   MatchMode,
 } from '../game/types';
+import { DamageHitOverlay } from './DamageHitOverlay';
+import { EmoteWheel, pickEmoteIndexFromDelta } from './EmoteWheel';
+import { EvolutionFormToast, EvolutionToastEvent } from './EvolutionFormToast';
 import { EvolutionOverlay, EvolutionOverlayEvent } from './EvolutionOverlay';
 import { Minimap } from './Minimap';
 
@@ -186,24 +204,61 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   spectateSpeedRef.current = spectateSpeed;
 
   const [evolutionEvent, setEvolutionEvent] = useState<EvolutionOverlayEvent | null>(null);
+  const [evolutionToast, setEvolutionToast] = useState<EvolutionToastEvent | null>(null);
   const prevPlayerFormRef = useRef<number>(1);
   const evoSeqRef = useRef<number>(0);
 
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+    height: typeof window !== 'undefined' ? window.innerHeight : 720,
+  }));
   const [joyOffset, setJoyOffset] = useState({ x: 0, y: 0 });
   const [bitePressed, setBitePressed] = useState(false);
   const [voiceSnap, setVoiceSnap] = useState<SpatialVoiceSnapshot>(() =>
     spatialVoice.getSnapshot()
   );
+  const [emoteWheelOpen, setEmoteWheelOpen] = useState(false);
+  const [emoteHoverIdx, setEmoteHoverIdx] = useState<number | null>(null);
+  const [emoteCooldownLeft, setEmoteCooldownLeft] = useState(0);
+  const emoteWheelOpenRef = useRef(false);
+  emoteWheelOpenRef.current = emoteWheelOpen;
+  const emoteHoverIdxRef = useRef<number | null>(null);
+  emoteHoverIdxRef.current = emoteHoverIdx;
+  const emoteHoldStartRef = useRef(0);
+  const emoteOpenedThisKeyRef = useRef(false);
+  const emoteLastUsedAtRef = useRef(0);
+
   const joyOriginRef = useRef<{ x: number; y: number } | null>(null);
   const joyPointerIdRef = useRef<number | null>(null);
   const bitePointerIdRef = useRef<number | null>(null);
+  const hudJoltRef = useRef<HTMLDivElement | null>(null);
+
+  const handleDamageJolt = (jolt: { x: number; y: number }) => {
+    const el = hudJoltRef.current;
+    if (!el) return;
+    if (Math.abs(jolt.x) < 0.05 && Math.abs(jolt.y) < 0.05) {
+      el.style.transform = '';
+    } else {
+      el.style.transform = `translate3d(${jolt.x.toFixed(1)}px, ${jolt.y.toFixed(1)}px, 0)`;
+    }
+  };
 
   useEffect(() => {
     if (!isMultiplayer) return;
     return spatialVoice.subscribe(setVoiceSnap);
   }, [isMultiplayer]);
+
+  useEffect(() => {
+    if (emoteCooldownLeft <= 0) return;
+    const id = window.setInterval(() => {
+      const rem = Math.max(0, 1.1 - (performance.now() - emoteLastUsedAtRef.current) / 1000);
+      setEmoteCooldownLeft(rem);
+      if (rem <= 0) window.clearInterval(id);
+    }, 80);
+    return () => window.clearInterval(id);
+  }, [emoteCooldownLeft]);
 
   const pushPlayerInput = (patch: Partial<PlayerInputState>, force = false) => {
     Object.assign(inputRef.current, patch);
@@ -222,6 +277,25 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     }
   };
 
+  const dispatchEmote = (emoteId: EmoteId) => {
+    const now = performance.now();
+    const elapsed = (now - emoteLastUsedAtRef.current) / 1000;
+    if (elapsed < 1.1) {
+      setEmoteCooldownLeft(1.1 - elapsed);
+      return;
+    }
+    soundEngine.startAmbient();
+    emoteLastUsedAtRef.current = now;
+    setEmoteCooldownLeft(1.1);
+    setEmoteWheelOpen(false);
+    setEmoteHoverIdx(null);
+    if (isMultiplayer) {
+      multiplayerClient.triggerEmote(emoteId);
+    } else {
+      simRef.current?.triggerPlayerEmote(emoteId);
+    }
+  };
+
   const finishWithReplay = (finalHud: HudSnapshot) => {
     soundEngine.stopAmbient();
     const liveEntity = isMultiplayer
@@ -233,8 +307,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
   useEffect(() => {
     const checkViewport = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
       setIsTouchDevice('ontouchstart' in window || navigator.maxTouchPoints > 0);
-      setIsMobileViewport(window.innerWidth < 768);
+      setIsMobileViewport(w < 768);
+      setViewportSize({ width: w, height: h });
     };
     checkViewport();
     window.addEventListener('resize', checkViewport);
@@ -295,6 +372,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
     soundEngine.startAmbient();
     setEvolutionEvent(null);
+    setEvolutionToast(null);
     const replayRecorder = replayRecorderRef.current;
     replayRecorder.reset();
 
@@ -335,6 +413,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               level: snap.player.level,
               key: evoSeqRef.current,
             });
+            setEvolutionToast({
+              form: snap.player.form,
+              level: snap.player.level,
+              key: evoSeqRef.current,
+              durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
+            });
+          } else if (!snap.player.alive) {
+            setEvolutionToast(null);
           }
 
           if (packet.status !== 'playing' && snap.player.alive && !finishedSent) {
@@ -377,6 +463,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Escape') {
         e.preventDefault();
+        if (emoteWheelOpenRef.current) {
+          setEmoteWheelOpen(false);
+          setEmoteHoverIdx(null);
+          return;
+        }
         setPaused((prev) => !prev);
         return;
       }
@@ -397,8 +488,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       }
       if (pausedRef.current) return;
 
-      // Spectator keyboard controls when player is eliminated
+      // Spectator & Death Cam keyboard controls when player is eliminated
       if (!getActiveRenderable().getPlayer().alive) {
+        if (emoteWheelOpenRef.current) {
+          setEmoteWheelOpen(false);
+          setEmoteHoverIdx(null);
+        }
+        if (getActiveRenderable().getDeathCam?.()?.active && (e.code === 'Space' || e.code === 'Enter')) {
+          e.preventDefault();
+          if (isMultiplayer) multiplayerClient.sendSpectateAction('skip_death_cam');
+          else sim?.skipDeathCam();
+          return;
+        }
         if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
           e.preventDefault();
           if (isMultiplayer) multiplayerClient.sendSpectateAction('prev');
@@ -434,6 +535,30 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         return;
       }
 
+      if (e.code === 'KeyG' && !e.repeat) {
+        e.preventDefault();
+        if (emoteWheelOpenRef.current) {
+          emoteOpenedThisKeyRef.current = false;
+          setEmoteWheelOpen(false);
+          setEmoteHoverIdx(null);
+        } else {
+          emoteOpenedThisKeyRef.current = true;
+          emoteHoldStartRef.current = performance.now();
+          setEmoteHoverIdx(null);
+          setEmoteWheelOpen(true);
+        }
+        return;
+      }
+
+      if (emoteWheelOpenRef.current && e.code.startsWith('Digit')) {
+        const idx = Number(e.code.slice(5)) - 1;
+        if (idx >= 0 && idx < EMOTE_SPECS.length) {
+          e.preventDefault();
+          dispatchEmote(EMOTE_SPECS[idx].id);
+          return;
+        }
+      }
+
       soundEngine.startAmbient();
       keysDown.add(e.code);
       syncMoveFromKeys();
@@ -457,6 +582,20 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'KeyG' && emoteWheelOpenRef.current && emoteOpenedThisKeyRef.current) {
+        emoteOpenedThisKeyRef.current = false;
+        const heldMs = performance.now() - emoteHoldStartRef.current;
+        if (heldMs >= 180) {
+          const idx = emoteHoverIdxRef.current;
+          if (idx !== null && idx >= 0 && idx < EMOTE_SPECS.length) {
+            dispatchEmote(EMOTE_SPECS[idx].id);
+          } else {
+            setEmoteWheelOpen(false);
+            setEmoteHoverIdx(null);
+          }
+        }
+        return;
+      }
       if (isMultiplayer && e.code === 'KeyV') {
         spatialVoice.setPttActive(false);
       }
@@ -468,9 +607,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     };
 
     const isUiControlTarget = (target: EventTarget | null) =>
-      Boolean((target as HTMLElement | null)?.closest('button, [data-mobile-control="true"]'));
+      Boolean((target as HTMLElement | null)?.closest('button, [data-mobile-control="true"], [data-emote-wheel="true"]'));
 
     const onPointerMove = (e: PointerEvent) => {
+      if (emoteWheelOpenRef.current && e.pointerType !== 'touch') {
+        const dx = e.clientX - window.innerWidth / 2;
+        const dy = e.clientY - window.innerHeight / 2;
+        setEmoteHoverIdx(pickEmoteIndexFromDelta(dx, dy, 28));
+        return;
+      }
       if (e.pointerType === 'touch' || joyPointerIdRef.current !== null || bitePointerIdRef.current !== null) return;
       if (isUiControlTarget(e.target)) return;
       mouseClientX = e.clientX;
@@ -482,6 +627,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       if (e.pointerType === 'touch') return;
       if (isUiControlTarget(e.target)) return;
       if (pausedRef.current) return;
+      if (emoteWheelOpenRef.current) {
+        setEmoteWheelOpen(false);
+        setEmoteHoverIdx(null);
+        return;
+      }
       soundEngine.startAmbient();
       if (isMultiplayer) spatialVoice.unlockAudioContext();
       mouseClientX = e.clientX;
@@ -537,9 +687,20 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             updateMouseAim();
             sim.step(dt);
           } else {
-            const steps = spectateSpeedRef.current;
-            for (let s = 0; s < steps && sim.status === 'playing'; s++) {
-              sim.step(dt);
+            const dc = sim.getDeathCam();
+            if (dc && dc.active) {
+              // 3-second slow-motion Death Cam: 0.26x speed ramping cleanly back to 1.0x in the final 0.5s
+              const baseSlow = settingsRef.current.reducedMotion ? 0.45 : 0.26;
+              const rampOut =
+                dc.remaining < 0.5
+                  ? baseSlow + (1 - baseSlow) * (1 - dc.remaining / 0.5)
+                  : baseSlow;
+              sim.step(dt * rampOut, dt);
+            } else {
+              const steps = spectateSpeedRef.current;
+              for (let s = 0; s < steps && sim.status === 'playing'; s++) {
+                sim.step(dt);
+              }
             }
           }
         }
@@ -568,12 +729,16 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         hazard: trackedEntity.activeHazard,
         weather: activeView.weather?.kind,
         weatherIntensity: activeView.weather?.intensity ?? 0,
+        form: getEvolutionForm(trackedEntity.level),
+        level: trackedEntity.level,
+        deathCamActive: Boolean(!playerAlive && activeView.getDeathCam?.()?.active),
         paused: pausedRef.current || !matchPlaying,
       });
 
       if (sim) {
         hudTimer += dt;
-        if (hudTimer >= 0.065 || sim.status !== 'playing') {
+        const hudInterval = sim.getDeathCam()?.active ? 0.045 : 0.065;
+        if (hudTimer >= hudInterval || sim.status !== 'playing') {
           hudTimer = 0;
           const snap = sim.getHudSnapshot();
           replayRecorder.record(snap, sim.getPlayer());
@@ -587,6 +752,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               level: snap.player.level,
               key: evoSeqRef.current,
             });
+            setEvolutionToast({
+              form: snap.player.form,
+              level: snap.player.level,
+              key: evoSeqRef.current,
+              durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
+            });
+          } else if (!snap.player.alive) {
+            setEvolutionToast(null);
           }
 
           if (sim.status !== 'playing' && playerAlive && !finishedSent) {
@@ -649,7 +822,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     e.stopPropagation();
     const dx = e.clientX - joyOriginRef.current.x;
     const dy = e.clientY - joyOriginRef.current.y;
-    const maxR = 42;
+    const maxR =
+      viewportSize.width < 768 ||
+      (viewportSize.height < 520 && (isTouchDevice || viewportSize.width < 960))
+        ? 28
+        : 42;
     const dist = Math.hypot(dx, dy);
     const clamped = Math.min(dist, maxR);
     const ang = Math.atan2(dy, dx);
@@ -702,16 +879,29 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     pushPlayerInput({ biteHeld: false }, true);
   };
 
+  const isShortLandscape =
+    viewportSize.height < 520 && (isTouchDevice || viewportSize.width < 960);
+  const isCompactMode = isMobileViewport || isShortLandscape || settings.hudScale === 'compact';
+  const canPlaceControlsBesideBar = viewportSize.width >= 540;
+
   const scaleClass =
-    settings.hudScale === 'compact'
-      ? 'scale-90'
-      : settings.hudScale === 'large'
-      ? 'scale-105'
-      : 'scale-100';
+    isMobileViewport || isShortLandscape
+      ? 'scale-100'
+      : settings.hudScale === 'compact'
+        ? 'scale-90'
+        : settings.hudScale === 'large'
+          ? 'scale-105'
+          : 'scale-100';
 
   const p = hud?.player;
   const spec = hud?.spectating;
   const isSpectating = Boolean(spec?.active);
+  const rawDeathCam = hud?.deathCam;
+  const deathCam =
+    isSpectating && rawDeathCam && rawDeathCam.active && rawDeathCam.remaining > 0
+      ? rawDeathCam
+      : null;
+  const isDeathCam = Boolean(deathCam);
   const displayLevel = isSpectating && spec ? spec.targetLevel : p?.level ?? 1;
   const displayHp = isSpectating && spec ? spec.targetHp : p?.hp ?? 0;
   const displayMaxHp = isSpectating && spec ? spec.targetMaxHp : p?.maxHp ?? 1;
@@ -730,6 +920,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const reservePct = p ? Math.max(0, Math.min(100, (p.shoreReserve / p.maxShoreReserve) * 100)) : 100;
 
   const sonarSpec = ACTIVE_ABILITIES.find((a) => a.id === 'sonar')!;
+  const selfBounty = hud?.bountyTargets?.find((b) => b.isSelf) ?? null;
   const showMobileControls = !isSpectating && (isTouchDevice || isMobileViewport);
   const hotbarAbilities = ACTIVE_ABILITIES.filter(
     (a) => a.id !== 'sonar' && !(showMobileControls && a.id === 'bite')
@@ -753,6 +944,31 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           }}
         />
       )}
+
+      {/* Death Cam Cinematic Letterbox & Subtle Red Edge Tint (no backdrop-filter over WebGL) */}
+      {isDeathCam && hud?.matchResult.status === 'playing' && (
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-[5]">
+          <div className="absolute top-0 inset-x-0 h-6 sm:h-10 bg-[#050a0f]/92 border-b border-[#8a6a31]/65" />
+          <div className="absolute bottom-0 inset-x-0 h-6 sm:h-10 bg-[#050a0f]/92 border-t border-[#8a6a31]/65" />
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                'radial-gradient(circle at 50% 48%, rgba(127,29,29,0) 56%, rgba(127,29,29,0.28) 100%)',
+            }}
+          />
+        </div>
+      )}
+
+      {/* Directional Damage-Hit & Perimeter Blood Flare Overlay */}
+      <DamageHitOverlay
+        hits={hud?.recentDamageHits}
+        viewportWidth={viewportSize.width}
+        viewportHeight={viewportSize.height}
+        compactMode={isCompactMode}
+        reducedMotion={settings.reducedMotion}
+        onJoltChange={handleDamageJolt}
+      />
 
       {/* Metamorphosis Particle Overlay (non-blocking above WebGL) */}
       <EvolutionOverlay
@@ -780,291 +996,531 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       )}
 
       {hud && p && (
-        <div className="pointer-events-none absolute inset-0 z-10">
-          {/* Top-Left: Compendium Circular Brass Medallion + Beveled Vitals Plaque */}
-          <div className={`pointer-events-auto absolute top-3 left-3 flex items-start gap-2.5 origin-top-left ${scaleClass}`}>
-            {/* Double-Beveled Circular Brass Portrait + Droplet Form Crest */}
-            <div className="relative shrink-0">
-              <div
-                className={`compendium-medallion relative w-16 h-16 sm:w-[74px] sm:h-[74px] rounded-full overflow-hidden ${
-                  isSpectating ? 'border-[#fbbf24]' : ''
-                }`}
-              >
-                <canvas ref={portraitRef} width={74} height={74} className="w-full h-full block" />
-                <div className="absolute bottom-0 inset-x-0 bg-[#081016]/92 text-center text-[10px] font-mono-num font-bold text-[#f3d285] border-t border-[#8a6a31] py-0.5">
-                  Lv.{displayLevel}
+        <div
+          ref={hudJoltRef}
+          data-hud-mode={isCompactMode ? 'compact' : 'full'}
+          className="pointer-events-none absolute inset-0 z-10 will-change-transform"
+        >
+          {/* Top-Left: Compendium Circular Brass Medallion + Vitals Plaque (Full or Compact Mode) */}
+          {isCompactMode ? (
+            <div className="pointer-events-auto absolute top-2 left-2 flex items-start gap-1.5 origin-top-left">
+              {/* Compact Circular Medallion */}
+              <div className="relative shrink-0">
+                <div
+                  className={`compendium-medallion relative w-11 h-11 rounded-full overflow-hidden ${
+                    isSpectating ? 'border-[#fbbf24]' : ''
+                  }`}
+                >
+                  <canvas ref={portraitRef} width={74} height={74} className="w-full h-full block" />
+                  <div className="absolute bottom-0 inset-x-0 bg-[#081016]/95 text-center text-[8.5px] font-mono-num font-bold text-[#f3d285] border-t border-[#8a6a31] leading-tight py-px">
+                    {displayLevel}
+                  </div>
+                </div>
+                <div
+                  title={getFormLabel(displayForm)}
+                  className="absolute -bottom-0.5 -left-0.5 w-4 h-4 rounded-full border border-[#d4a64e] bg-[#0a1821] flex items-center justify-center"
+                >
+                  <svg viewBox="0 0 16 16" className="w-2.5 h-2.5" aria-hidden="true">
+                    <path
+                      d="M8 1.5 C8 1.5 3.5 6.8 3.5 10 A4.5 4.5 0 0 0 12.5 10 C12.5 6.8 8 1.5 8 1.5 Z"
+                      fill={displayForm >= 4 ? '#fbbf24' : displayForm === 3 ? '#38bdf8' : displayForm === 2 ? '#5eead4' : '#60a5fa'}
+                      stroke="#e0f2fe"
+                      strokeWidth="0.9"
+                    />
+                  </svg>
                 </div>
               </div>
-              {/* Aquatic Form Crest Badge (Plate 2 water-droplet jewel) */}
-              <div
-                title={getFormLabel(displayForm)}
-                className="absolute -bottom-0.5 -left-0.5 w-6 h-6 rounded-full border border-[#d4a64e] bg-[#0a1821] flex items-center justify-center shadow-lg"
-              >
-                <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" aria-hidden="true">
-                  <path
-                    d="M8 1.5 C8 1.5 3.5 6.8 3.5 10 A4.5 4.5 0 0 0 12.5 10 C12.5 6.8 8 1.5 8 1.5 Z"
-                    fill={displayForm >= 4 ? '#fbbf24' : displayForm === 3 ? '#38bdf8' : displayForm === 2 ? '#5eead4' : '#60a5fa'}
-                    stroke="#e0f2fe"
-                    strokeWidth="0.9"
-                  />
-                </svg>
-              </div>
-            </div>
 
-            {/* Ornate Beveled Dark-Iron & Gold Status Plaque */}
-            <div className="compendium-plaque w-60 sm:w-72 rounded-sm overflow-hidden">
-              {/* Header Ribbon */}
-              <div className="compendium-ribbon flex items-center justify-between gap-2 px-2.5 py-1">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-[9px] text-[#c99c4a]" aria-hidden="true">◆</span>
-                  <span className="font-display text-sm font-semibold text-[#f7f0dc] truncate drop-shadow-sm">
-                    {isSpectating ? `Spectating · ${displayName}` : `Lv.${displayLevel} ${displayName}`}
+              {/* Condensed Icon-Driven Progress Bars Plaque */}
+              <div className="compendium-plaque w-32 sm:w-36 rounded-sm overflow-hidden">
+                <div className="compendium-ribbon flex items-center justify-between gap-1 px-1.5 py-0.5 text-[9.5px]">
+                  <span className="font-mono-num font-semibold text-[#f7f0dc] truncate">
+                    {isSpectating ? `Spec · ${displayName.slice(0, 7)}` : `Lv.${displayLevel}`}
+                  </span>
+                  <span className="inline-flex items-center gap-0.5 font-mono-num text-[#f3d285] shrink-0">
+                    <Swords className="w-2.5 h-2.5 text-[#c99c4a]" />
+                    {displayKills}
                   </span>
                 </div>
-                <span className="text-[10px] font-medium text-[#d9b25f] truncate shrink-0">
-                  {displayZone}
-                </span>
-              </div>
 
-              <div className="p-2.5 space-y-1.5">
-                {isSpectating && (
-                  <div className="flex items-center justify-between gap-2 text-[10px] font-semibold text-[#fbbf24] pb-1 border-b border-[#3a2f1c]">
-                    <span className="flex items-center gap-1">
-                      <Eye className="w-3 h-3" />
-                      Spectator Feed
-                    </span>
-                    <span className="font-mono-num text-[#9cb0ba]">
-                      Your Run: Lv.{hud.matchResult.finalLevel}
-                    </span>
-                  </div>
-                )}
-
-                {/* Metallic Beveled Crimson HP Gauge */}
-                <div className="flex items-center gap-1.5">
-                  <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#fca5a5] shrink-0">
-                    HP
-                  </span>
-                  <div className="compendium-track relative flex-1 h-4 rounded-[2px] overflow-hidden">
-                    <div
-                      className="h-full transition-all duration-100"
-                      style={{
-                        width: `${hpPct}%`,
-                        background: 'linear-gradient(180deg, #ef4444 0%, #b91c1c 65%, #7f1d1d 100%)',
-                      }}
-                    />
-                    <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
-                    <span className="absolute inset-0 flex items-center justify-center text-[10px] font-mono-num font-semibold text-white drop-shadow">
-                      {Math.max(0, Math.round(displayHp))} / {displayMaxHp}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Metallic Beveled Cerulean Fragments / EXP Gauge */}
-                <div className="flex items-center gap-1.5">
-                  <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
-                    EXP
-                  </span>
-                  <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
-                    <div
-                      className="h-full transition-all duration-150"
-                      style={{
-                        width: `${displayLevel}%`,
-                        background: 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
-                      }}
-                    />
-                    <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
-                    <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
-                      FRAGMENTS {displayLevel} / 100
-                    </span>
-                  </div>
-                </div>
-
-                {/* Emerald / Amber Stamina Gauge */}
-                <div className="flex items-center gap-1.5">
-                  <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#6ee7b7] shrink-0">
-                    STM
-                  </span>
-                  <div className="compendium-track relative flex-1 h-3 rounded-[2px] overflow-hidden">
-                    <div
-                      className="h-full transition-all duration-100"
-                      style={{
-                        width: `${stamPct}%`,
-                        background: displayFatigued
-                          ? 'linear-gradient(180deg, #f59e0b 0%, #b45309 75%)'
-                          : 'linear-gradient(180deg, #34d399 0%, #059669 70%, #065f46 100%)',
-                      }}
-                    />
-                    <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
-                    <span className="absolute inset-0 flex items-center justify-center text-[8.5px] font-mono-num font-semibold text-[#f8fafc] drop-shadow">
-                      {displayFatigued
-                        ? `FATIGUED · ${Math.round(displayStamina)}%`
-                        : `${Math.round(displayStamina)} / ${displayMaxStamina}`}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Shore Exposure Reserve (Plate 4 Mid-Game Vignette Alert Gauge for Lv.40-79) */}
-                {!isSpectating && p.level >= 40 && p.level < 80 && (
-                  <div
-                    className={`mt-1 px-2 py-1 rounded-[2px] border ${
-                      p.isOnShore
-                        ? 'bg-[#2a1114]/90 border-[#ef4444]/70'
-                        : 'bg-[#0b141c]/90 border-[#4e3d21]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-[9.5px] font-mono-num">
-                      <span className={p.isOnShore ? 'text-[#fca5a5] font-semibold' : 'text-[#9cb0ba]'}>
-                        {p.isOnShore ? 'Land Time · HP -7%/s at 0' : 'Shore Reserve'}
-                      </span>
-                      <span className={p.isOnShore ? 'text-[#fef08a] font-bold' : 'text-[#f3e6c8]'}>
-                        {p.shoreReserve.toFixed(1)}s
-                      </span>
-                    </div>
-                    <div className="compendium-track h-1.5 mt-0.5 rounded-[1px] overflow-hidden">
+                <div className="px-1.5 py-1 space-y-1">
+                  {/* Condensed Crimson HP Bar */}
+                  <div className="flex items-center gap-1" title={`HP ${Math.max(0, Math.round(displayHp))} / ${displayMaxHp}`}>
+                    <Heart className="w-2.5 h-2.5 text-[#fca5a5] shrink-0" />
+                    <div className="compendium-track relative flex-1 h-2.5 rounded-[2px] overflow-hidden">
                       <div
                         className="h-full transition-all duration-100"
                         style={{
-                          width: `${reservePct}%`,
-                          background: p.isOnShore
-                            ? 'linear-gradient(90deg, #ef4444, #f59e0b)'
-                            : 'linear-gradient(90deg, #c99c4a, #f3d285)',
+                          width: `${hpPct}%`,
+                          background: 'linear-gradient(180deg, #ef4444 0%, #991b1b 100%)',
                         }}
                       />
                     </div>
+                    <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#f8fafc] shrink-0">
+                      {Math.max(0, Math.round(displayHp))}
+                    </span>
                   </div>
-                )}
 
-                {/* Unboxed Compendium Metadata Footer */}
-                <div className="pt-1 border-t border-[#2a3844] flex items-center justify-between gap-2 text-[10px] text-[#a9b9c2]">
-                  <span className="truncate">
-                    {nextMilestone ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}` : getFormLabel(displayForm)}
-                  </span>
-                  <span className="font-mono-num text-[#f3d285] shrink-0">
-                    {displayKills} Kills
-                  </span>
-                </div>
+                  {/* Condensed Cerulean Fragments Bar */}
+                  <div className="flex items-center gap-1" title={`Fragments ${displayLevel} / 100`}>
+                    <Sparkles className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" />
+                    <div className="compendium-track relative flex-1 h-2 rounded-[2px] overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-150"
+                        style={{
+                          width: `${displayLevel}%`,
+                          background: 'linear-gradient(180deg, #38bdf8 0%, #075985 100%)',
+                        }}
+                      />
+                    </div>
+                    <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#bae6fd] shrink-0">
+                      {displayLevel}%
+                    </span>
+                  </div>
 
-                {/* Active Status & Power-Up Buff Strip (beveled micro-plates) */}
-                {!isSpectating &&
-                  (p.venomActive ||
-                    p.frenzyActive ||
-                    p.surgeTimeLeft > 0 ||
-                    p.predatorTimeLeft > 0 ||
-                    p.aegisTimeLeft > 0 ||
-                    p.dewTimeLeft > 0 ||
-                    p.stormFinTimeLeft > 0 ||
-                    p.thunderRoeTimeLeft > 0 ||
-                    p.veilActive ||
-                    p.stunned ||
-                    displayFatigued) && (
-                    <div className="pt-1 border-t border-[#202d37] flex flex-wrap items-center gap-1.5 text-[9.5px] font-mono-num font-semibold">
-                      {p.dewTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0b2726] border border-[#2dd4bf]/70 text-[#5eead4] whitespace-nowrap">
-                          ● Dew {p.dewTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.stormFinTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0d2138] border border-[#60a5fa]/70 text-[#93c5fd] whitespace-nowrap">
-                          ● Stormfin {p.stormFinTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.thunderRoeTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#241338] border border-[#c084fc]/70 text-[#d8b4fe] whitespace-nowrap">
-                          ● Thunder {p.thunderRoeTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.surgeTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0a2130] border border-[#38bdf8]/65 text-[#7dd3fc] whitespace-nowrap">
-                          ◆ Surge {p.surgeTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.predatorTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a0f18] border border-[#fb7185]/65 text-[#fda4af] whitespace-nowrap">
-                          ◆ Predator {p.predatorTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.aegisTimeLeft > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a1f0b] border border-[#fbbf24]/65 text-[#fde68a] whitespace-nowrap">
-                          ◆ Aegis {p.aegisTimeLeft.toFixed(1)}s
-                        </span>
-                      )}
-                      {p.venomActive && <span className="text-[#4ade80]">Venom</span>}
-                      {p.frenzyActive && <span className="text-[#fbbf24]">Frenzy</span>}
-                      {p.veilActive && <span className="text-[#94a3b8]">Silt Veil</span>}
-                      {p.stunned && <span className="text-[#f87171]">Stunned</span>}
-                      {displayFatigued && <span className="text-[#f59e0b]">Fatigued -16% Spd</span>}
+                  {/* Condensed Emerald / Amber Stamina Bar */}
+                  <div className="flex items-center gap-1" title={`Stamina ${Math.round(displayStamina)} / ${displayMaxStamina}`}>
+                    <Zap className={`w-2.5 h-2.5 shrink-0 ${displayFatigued ? 'text-[#fbbf24]' : 'text-[#6ee7b7]'}`} />
+                    <div className="compendium-track relative flex-1 h-2 rounded-[2px] overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-100"
+                        style={{
+                          width: `${stamPct}%`,
+                          background: displayFatigued
+                            ? 'linear-gradient(180deg, #f59e0b 0%, #b45309 100%)'
+                            : 'linear-gradient(180deg, #34d399 0%, #065f46 100%)',
+                        }}
+                      />
+                    </div>
+                    <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#d1fae5] shrink-0">
+                      {Math.round(stamPct)}%
+                    </span>
+                  </div>
+
+                  {/* Condensed Shore Reserve Bar (Lv.40-79) */}
+                  {!isSpectating && p.level >= 40 && p.level < 80 && (
+                    <div className="flex items-center gap-1" title={`Shore Reserve ${p.shoreReserve.toFixed(1)}s`}>
+                      <Timer className={`w-2.5 h-2.5 shrink-0 ${p.isOnShore ? 'text-[#f87171]' : 'text-[#f3d285]'}`} />
+                      <div className="compendium-track relative flex-1 h-1.5 rounded-[1px] overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-100"
+                          style={{
+                            width: `${reservePct}%`,
+                            background: p.isOnShore
+                              ? 'linear-gradient(90deg, #ef4444, #f59e0b)'
+                              : 'linear-gradient(90deg, #c99c4a, #f3d285)',
+                          }}
+                        />
+                      </div>
+                      <span className="w-7 text-right text-[8.5px] font-mono-num text-[#fde68a] shrink-0">
+                        {p.shoreReserve.toFixed(0)}s
+                      </span>
                     </div>
                   )}
 
-                {displayHazard && (
-                  <div
-                    className="mt-1 px-2 py-1 rounded-[2px] bg-[#081016]/95 border text-[10px]"
-                    style={{ borderColor: displayHazard.color }}
-                  >
-                    <div className="font-semibold" style={{ color: displayHazard.color }}>
-                      ◆ {displayHazard.label}
-                    </div>
-                    <div className="text-[#d6d3c9] text-[9.5px] leading-tight">
-                      {displayHazard.summary}
-                    </div>
-                  </div>
-                )}
-
-                {!p.inSafeZone && (
-                  <div className="mt-1 px-2 py-1 rounded-[2px] bg-[#5c1616]/95 border border-[#f59e0b] text-[10px] font-medium text-[#fef3c7]">
-                    {isSpectating ? 'Target in radioactive water' : 'Radioactive water · Return toward Jantung Tasik'}
-                  </div>
-                )}
+                  {/* Compact Icon Buffs & Alerts Row */}
+                  {!isSpectating &&
+                    (Boolean(selfBounty) ||
+                      p.dewTimeLeft > 0 ||
+                      p.stormFinTimeLeft > 0 ||
+                      p.thunderRoeTimeLeft > 0 ||
+                      p.surgeTimeLeft > 0 ||
+                      p.predatorTimeLeft > 0 ||
+                      p.aegisTimeLeft > 0 ||
+                      p.venomActive ||
+                      p.stunned ||
+                      displayFatigued ||
+                      Boolean(displayHazard) ||
+                      !p.inSafeZone) && (
+                      <div className="pt-0.5 border-t border-[#202d37] flex flex-wrap items-center gap-1 text-[8.5px] font-mono-num font-semibold">
+                        {selfBounty && (
+                          <span
+                            title={`You are marked on the minimap (+${selfBounty.rewardPoints} Evo Pts bounty)`}
+                            className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a]"
+                          >
+                            ◎ +{selfBounty.rewardPoints}
+                          </span>
+                        )}
+                        {p.dewTimeLeft > 0 && (
+                          <span title="Monsoon Dew" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0b2726] border border-[#2dd4bf]/70 text-[#5eead4]">
+                            <Droplets className="w-2.5 h-2.5" />
+                            {Math.ceil(p.dewTimeLeft)}s
+                          </span>
+                        )}
+                        {p.stormFinTimeLeft > 0 && (
+                          <span title="Stormfin Catalyst" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0d2138] border border-[#60a5fa]/70 text-[#93c5fd]">
+                            <Wind className="w-2.5 h-2.5" />
+                            {Math.ceil(p.stormFinTimeLeft)}s
+                          </span>
+                        )}
+                        {p.thunderRoeTimeLeft > 0 && (
+                          <span title="Thunder Roe" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#241338] border border-[#c084fc]/70 text-[#d8b4fe]">
+                            <Zap className="w-2.5 h-2.5" />
+                            {Math.ceil(p.thunderRoeTimeLeft)}s
+                          </span>
+                        )}
+                        {p.surgeTimeLeft > 0 && (
+                          <span title="Amphetide Surge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0a2130] border border-[#38bdf8]/65 text-[#7dd3fc]">
+                            <Gauge className="w-2.5 h-2.5" />
+                            {Math.ceil(p.surgeTimeLeft)}s
+                          </span>
+                        )}
+                        {p.predatorTimeLeft > 0 && (
+                          <span title="Fang Charge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f18] border border-[#fb7185]/65 text-[#fda4af]">
+                            <Swords className="w-2.5 h-2.5" />
+                            {Math.ceil(p.predatorTimeLeft)}s
+                          </span>
+                        )}
+                        {p.aegisTimeLeft > 0 && (
+                          <span title="Carapace Aegis" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a1f0b] border border-[#fbbf24]/65 text-[#fde68a]">
+                            <Shield className="w-2.5 h-2.5" />
+                            {Math.ceil(p.aegisTimeLeft)}s
+                          </span>
+                        )}
+                        {p.venomActive && (
+                          <span title="Venom Active" className="inline-flex items-center text-[#4ade80]">
+                            <Skull className="w-2.5 h-2.5" />
+                          </span>
+                        )}
+                        {displayFatigued && (
+                          <span title="Fatigued" className="inline-flex items-center text-[#f59e0b]">
+                            <BatteryLow className="w-2.5 h-2.5" />
+                          </span>
+                        )}
+                        {displayHazard && (
+                          <span
+                            title={displayHazard.label}
+                            className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#081016] border"
+                            style={{ borderColor: displayHazard.color, color: displayHazard.color }}
+                          >
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            <span className="truncate max-w-[54px]">{displayHazard.label.split(' ')[0]}</span>
+                          </span>
+                        )}
+                        {!p.inSafeZone && (
+                          <span title="Radioactive Water" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#5c1616] border border-[#f59e0b] text-[#fef3c7]">
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            Zone
+                          </span>
+                        )}
+                      </div>
+                    )}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className={`pointer-events-auto absolute top-3 left-3 flex items-start gap-2.5 origin-top-left ${scaleClass}`}>
+              {/* Double-Beveled Circular Brass Portrait + Droplet Form Crest */}
+              <div className="relative shrink-0">
+                <div
+                  className={`compendium-medallion relative w-16 h-16 sm:w-[74px] sm:h-[74px] rounded-full overflow-hidden ${
+                    isSpectating ? 'border-[#fbbf24]' : ''
+                  }`}
+                >
+                  <canvas ref={portraitRef} width={74} height={74} className="w-full h-full block" />
+                  <div className="absolute bottom-0 inset-x-0 bg-[#081016]/92 text-center text-[10px] font-mono-num font-bold text-[#f3d285] border-t border-[#8a6a31] py-0.5">
+                    Lv.{displayLevel}
+                  </div>
+                </div>
+                {/* Aquatic Form Crest Badge (Plate 2 water-droplet jewel) */}
+                <div
+                  title={getFormLabel(displayForm)}
+                  className="absolute -bottom-0.5 -left-0.5 w-6 h-6 rounded-full border border-[#d4a64e] bg-[#0a1821] flex items-center justify-center shadow-lg"
+                >
+                  <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" aria-hidden="true">
+                    <path
+                      d="M8 1.5 C8 1.5 3.5 6.8 3.5 10 A4.5 4.5 0 0 0 12.5 10 C12.5 6.8 8 1.5 8 1.5 Z"
+                      fill={displayForm >= 4 ? '#fbbf24' : displayForm === 3 ? '#38bdf8' : displayForm === 2 ? '#5eead4' : '#60a5fa'}
+                      stroke="#e0f2fe"
+                      strokeWidth="0.9"
+                    />
+                  </svg>
+                </div>
+              </div>
+
+              {/* Ornate Beveled Dark-Iron & Gold Status Plaque */}
+              <div className="compendium-plaque w-60 sm:w-72 rounded-sm overflow-hidden">
+                {/* Header Ribbon */}
+                <div className="compendium-ribbon flex items-center justify-between gap-2 px-2.5 py-1">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[9px] text-[#c99c4a]" aria-hidden="true">◆</span>
+                    <span className="font-display text-sm font-semibold text-[#f7f0dc] truncate drop-shadow-sm">
+                      {isSpectating ? `Spectating · ${displayName}` : `Lv.${displayLevel} ${displayName}`}
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-medium text-[#d9b25f] truncate shrink-0">
+                    {displayZone}
+                  </span>
+                </div>
+
+                <div className="p-2.5 space-y-1.5">
+                  {isSpectating && (
+                    <div className="flex items-center justify-between gap-2 text-[10px] font-semibold text-[#fbbf24] pb-1 border-b border-[#3a2f1c]">
+                      <span className="flex items-center gap-1">
+                        <Eye className="w-3 h-3" />
+                        Spectator Feed
+                      </span>
+                      <span className="font-mono-num text-[#9cb0ba]">
+                        Your Run: Lv.{hud.matchResult.finalLevel}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Metallic Beveled Crimson HP Gauge */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#fca5a5] shrink-0">
+                      HP
+                    </span>
+                    <div className="compendium-track relative flex-1 h-4 rounded-[2px] overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-100"
+                        style={{
+                          width: `${hpPct}%`,
+                          background: 'linear-gradient(180deg, #ef4444 0%, #b91c1c 65%, #7f1d1d 100%)',
+                        }}
+                      />
+                      <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
+                      <span className="absolute inset-0 flex items-center justify-center text-[10px] font-mono-num font-semibold text-white drop-shadow">
+                        {Math.max(0, Math.round(displayHp))} / {displayMaxHp}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Metallic Beveled Cerulean Fragments / EXP Gauge */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
+                      EXP
+                    </span>
+                    <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-150"
+                        style={{
+                          width: `${displayLevel}%`,
+                          background: 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
+                        }}
+                      />
+                      <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
+                      <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
+                        FRAGMENTS {displayLevel} / 100
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Emerald / Amber Stamina Gauge */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#6ee7b7] shrink-0">
+                      STM
+                    </span>
+                    <div className="compendium-track relative flex-1 h-3 rounded-[2px] overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-100"
+                        style={{
+                          width: `${stamPct}%`,
+                          background: displayFatigued
+                            ? 'linear-gradient(180deg, #f59e0b 0%, #b45309 75%)'
+                            : 'linear-gradient(180deg, #34d399 0%, #059669 70%, #065f46 100%)',
+                        }}
+                      />
+                      <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
+                      <span className="absolute inset-0 flex items-center justify-center text-[8.5px] font-mono-num font-semibold text-[#f8fafc] drop-shadow">
+                        {displayFatigued
+                          ? `FATIGUED · ${Math.round(displayStamina)}%`
+                          : `${Math.round(displayStamina)} / ${displayMaxStamina}`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Shore Exposure Reserve (Plate 4 Mid-Game Vignette Alert Gauge for Lv.40-79) */}
+                  {!isSpectating && p.level >= 40 && p.level < 80 && (
+                    <div
+                      className={`mt-1 px-2 py-1 rounded-[2px] border ${
+                        p.isOnShore
+                          ? 'bg-[#2a1114]/90 border-[#ef4444]/70'
+                          : 'bg-[#0b141c]/90 border-[#4e3d21]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[9.5px] font-mono-num">
+                        <span className={p.isOnShore ? 'text-[#fca5a5] font-semibold' : 'text-[#9cb0ba]'}>
+                          {p.isOnShore ? 'Land Time · HP -7%/s at 0' : 'Shore Reserve'}
+                        </span>
+                        <span className={p.isOnShore ? 'text-[#fef08a] font-bold' : 'text-[#f3e6c8]'}>
+                          {p.shoreReserve.toFixed(1)}s
+                        </span>
+                      </div>
+                      <div className="compendium-track h-1.5 mt-0.5 rounded-[1px] overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-100"
+                          style={{
+                            width: `${reservePct}%`,
+                            background: p.isOnShore
+                              ? 'linear-gradient(90deg, #ef4444, #f59e0b)'
+                              : 'linear-gradient(90deg, #c99c4a, #f3d285)',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Unboxed Compendium Metadata Footer */}
+                  <div className="pt-1 border-t border-[#2a3844] flex items-center justify-between gap-2 text-[10px] text-[#a9b9c2]">
+                    <span className="truncate">
+                      {nextMilestone ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}` : getFormLabel(displayForm)}
+                    </span>
+                    <span className="font-mono-num text-[#f3d285] shrink-0">
+                      {displayKills} Kills
+                    </span>
+                  </div>
+
+                  {/* Active Status & Power-Up Buff Strip (beveled micro-plates) */}
+                  {!isSpectating &&
+                    (Boolean(selfBounty) ||
+                      p.venomActive ||
+                      p.frenzyActive ||
+                      p.surgeTimeLeft > 0 ||
+                      p.predatorTimeLeft > 0 ||
+                      p.aegisTimeLeft > 0 ||
+                      p.dewTimeLeft > 0 ||
+                      p.stormFinTimeLeft > 0 ||
+                      p.thunderRoeTimeLeft > 0 ||
+                      p.veilActive ||
+                      p.stunned ||
+                      displayFatigued) && (
+                      <div className="pt-1 border-t border-[#202d37] flex flex-wrap items-center gap-1.5 text-[9.5px] font-mono-num font-semibold">
+                        {selfBounty && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a] whitespace-nowrap">
+                            ◎ Bounty +{selfBounty.rewardPoints} Evo
+                          </span>
+                        )}
+                        {p.dewTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0b2726] border border-[#2dd4bf]/70 text-[#5eead4] whitespace-nowrap">
+                            ● Dew {p.dewTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.stormFinTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0d2138] border border-[#60a5fa]/70 text-[#93c5fd] whitespace-nowrap">
+                            ● Stormfin {p.stormFinTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.thunderRoeTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#241338] border border-[#c084fc]/70 text-[#d8b4fe] whitespace-nowrap">
+                            ● Thunder {p.thunderRoeTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.surgeTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#0a2130] border border-[#38bdf8]/65 text-[#7dd3fc] whitespace-nowrap">
+                            ◆ Surge {p.surgeTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.predatorTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a0f18] border border-[#fb7185]/65 text-[#fda4af] whitespace-nowrap">
+                            ◆ Predator {p.predatorTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.aegisTimeLeft > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a1f0b] border border-[#fbbf24]/65 text-[#fde68a] whitespace-nowrap">
+                            ◆ Aegis {p.aegisTimeLeft.toFixed(1)}s
+                          </span>
+                        )}
+                        {p.venomActive && <span className="text-[#4ade80]">Venom</span>}
+                        {p.frenzyActive && <span className="text-[#fbbf24]">Frenzy</span>}
+                        {p.veilActive && <span className="text-[#94a3b8]">Silt Veil</span>}
+                        {p.stunned && <span className="text-[#f87171]">Stunned</span>}
+                        {displayFatigued && <span className="text-[#f59e0b]">Fatigued -16% Spd</span>}
+                      </div>
+                    )}
+
+                  {displayHazard && (
+                    <div
+                      className="mt-1 px-2 py-1 rounded-[2px] bg-[#081016]/95 border text-[10px]"
+                      style={{ borderColor: displayHazard.color }}
+                    >
+                      <div className="font-semibold" style={{ color: displayHazard.color }}>
+                        ◆ {displayHazard.label}
+                      </div>
+                      <div className="text-[#d6d3c9] text-[9.5px] leading-tight">
+                        {displayHazard.summary}
+                      </div>
+                    </div>
+                  )}
+
+                  {!p.inSafeZone && (
+                    <div className="mt-1 px-2 py-1 rounded-[2px] bg-[#5c1616]/95 border border-[#f59e0b] text-[10px] font-medium text-[#fef3c7]">
+                      {isSpectating ? 'Target in radioactive water' : 'Radioactive water · Return toward Jantung Tasik'}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Top-Center: Compendium Ornate Diamond Ribbon Banners */}
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 max-w-md w-[90vw] sm:w-auto">
+          <div
+            className={`absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 ${
+              isCompactMode
+                ? canPlaceControlsBesideBar
+                  ? 'top-2 max-w-[230px]'
+                  : 'top-28 max-w-[220px]'
+                : 'top-3 max-w-md w-[90vw] sm:w-auto'
+            }`}
+          >
             {!isSpectating && hud.tutorial && hud.tutorial.step < 4 && (
-              <div className="compendium-plaque pointer-events-auto flex items-center gap-3 rounded-sm px-3.5 py-2 text-xs">
-                <div className="min-w-0">
-                  <span className="font-display font-semibold text-[#f3d285]">First Match · </span>
+              <div
+                className={`compendium-plaque pointer-events-auto flex items-center gap-2 rounded-sm ${
+                  isCompactMode ? 'px-2.5 py-1 text-[10.5px]' : 'px-3.5 py-2 text-xs gap-3'
+                }`}
+              >
+                <div className="min-w-0 truncate">
+                  {!isCompactMode && (
+                    <span className="font-display font-semibold text-[#f3d285]">First Match · </span>
+                  )}
                   <span className="text-[#e6e4dd]">
-                    {hud.tutorial.step === 0 && 'Swim with WASD & bite with Click / Space.'}
-                    {hud.tutorial.step === 1 && 'Consume the nearby 10-fragment carcass.'}
-                    {hud.tutorial.step === 2 && 'Defeat Jerung & claim the 15-fragment carcass.'}
-                    {hud.tutorial.step === 3 && 'Reach Lv.40 and haul onto Tebing Kering shore.'}
+                    {hud.tutorial.step === 0 && (isCompactMode ? 'Move & Bite' : 'Swim with WASD & bite with Click / Space.')}
+                    {hud.tutorial.step === 1 && (isCompactMode ? 'Eat carcass' : 'Consume the nearby 10-fragment carcass.')}
+                    {hud.tutorial.step === 2 && (isCompactMode ? 'Defeat Jerung' : 'Defeat Jerung & claim the 15-fragment carcass.')}
+                    {hud.tutorial.step === 3 && (isCompactMode ? 'Lv.40: Haul ashore' : 'Reach Lv.40 and haul onto Tebing Kering shore.')}
                   </span>
                 </div>
                 {p.level < 40 && (
                   <button
                     type="button"
                     onClick={() => simRef.current?.skipToLandLesson()}
-                    className="px-2.5 py-1 rounded-[2px] border border-[#f3d285]/40 bg-[#c99c4a] text-[#0b1218] font-semibold text-[11px] hover:bg-[#e5b66c] whitespace-nowrap shrink-0"
+                    className={`rounded-[2px] border border-[#f3d285]/40 bg-[#c99c4a] text-[#0b1218] font-semibold hover:bg-[#e5b66c] whitespace-nowrap shrink-0 ${
+                      isCompactMode ? 'px-1.5 py-0.5 text-[9.5px]' : 'px-2.5 py-1 text-[11px]'
+                    }`}
                   >
-                    Skip to Lv.40 Lesson
+                    {isCompactMode ? 'Lv.40' : 'Skip to Lv.40 Lesson'}
                   </button>
                 )}
               </div>
             )}
 
             {!evolutionEvent && hud.recentBanner && (
-              <div className="compendium-plaque rounded-sm px-5 py-2 text-center">
-                <div className="flex items-center justify-center gap-2">
-                  <span className="h-px w-5 bg-gradient-to-r from-transparent to-[#c99c4a]" />
-                  <span className="font-display text-sm font-semibold text-[#f3d285]">
-                    ◆ {hud.recentBanner.title} ◆
+              <div
+                className={`compendium-plaque rounded-sm text-center ${
+                  isCompactMode ? 'px-2.5 py-1' : 'px-5 py-2'
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5">
+                  {!isCompactMode && <span className="h-px w-5 bg-gradient-to-r from-transparent to-[#c99c4a]" />}
+                  <span className={`font-display font-semibold text-[#f3d285] ${isCompactMode ? 'text-[11px]' : 'text-sm'}`}>
+                    ◆ {hud.recentBanner.title} {!isCompactMode ? '◆' : ''}
                   </span>
-                  <span className="h-px w-5 bg-gradient-to-l from-transparent to-[#c99c4a]" />
+                  {!isCompactMode && <span className="h-px w-5 bg-gradient-to-l from-transparent to-[#c99c4a]" />}
                 </div>
-                <div className="text-[11px] text-[#d6d3c9] mt-0.5">
-                  {hud.recentBanner.subtitle}
-                </div>
+                {!isCompactMode && (
+                  <div className="text-[11px] text-[#d6d3c9] mt-0.5">
+                    {hud.recentBanner.subtitle}
+                  </div>
+                )}
               </div>
             )}
 
             {p.feedingTargetName && p.feedingDuration > 0 && (
-              <div className="compendium-plaque w-60 rounded-sm px-3 py-2 text-center">
-                <div className="text-[11px] font-medium text-[#f3d285] mb-1 truncate">
-                  Consuming {p.feedingTargetName}
+              <div className={`compendium-plaque rounded-sm text-center ${isCompactMode ? 'w-36 px-2 py-1' : 'w-60 px-3 py-2'}`}>
+                <div className={`${isCompactMode ? 'text-[9.5px] mb-0.5' : 'text-[11px] mb-1'} font-medium text-[#f3d285] truncate`}>
+                  {isCompactMode ? p.feedingTargetName : `Consuming ${p.feedingTargetName}`}
                 </div>
-                <div className="compendium-track h-2 rounded-[2px] overflow-hidden">
+                <div className={`compendium-track ${isCompactMode ? 'h-1.5' : 'h-2'} rounded-[2px] overflow-hidden`}>
                   <div
                     className="h-full"
                     style={{
@@ -1075,11 +1531,78 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Incoming Emote Signal / Taunt Feed */}
+            {hud.recentEmotes && hud.recentEmotes.length > 0 && (
+              <div className="flex flex-col items-center gap-1">
+                {hud.recentEmotes.slice(0, isCompactMode ? 1 : 2).map((em) => {
+                  const spec = getEmoteSpec(em.emoteId);
+                  if (!spec) return null;
+                  const dist = Math.hypot(em.x - p.x, em.z - p.z);
+                  const dirAngle = dist > 220 ? Math.atan2(em.z - p.z, em.x - p.x) : null;
+                  return (
+                    <div
+                      key={em.id}
+                      style={{ borderColor: spec.color }}
+                      className={`compendium-plaque-subtle flex items-center gap-1.5 rounded-[2px] ${
+                        isCompactMode ? 'px-2 py-0.5 text-[9.5px]' : 'px-3 py-1 text-[11px]'
+                      } text-[#f7f2e7] whitespace-nowrap`}
+                    >
+                      <span className="font-semibold" style={{ color: spec.color }}>
+                        {em.senderName}
+                      </span>
+                      <span className="text-[#cbd5e1]">· {spec.label}</span>
+                      {dirAngle !== null && (
+                        <ArrowUpRight
+                          className="w-3 h-3 shrink-0"
+                          style={{
+                            color: spec.color,
+                            transform: `rotate(${(dirAngle * 180) / Math.PI + 45}deg)`,
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {/* Top-Right: Brass Utility Row + Wang Kelian Cartography Minimap + Proximity Voice */}
-          <div className={`pointer-events-auto absolute top-3 right-3 flex flex-col items-end gap-2 origin-top-right ${scaleClass}`}>
-            <div className="flex items-center gap-1.5">
+          {/* Top-Right: Brass Utility Row + Compact Telemetry / Wang Kelian Minimap + Proximity Voice */}
+          <div
+            className={`pointer-events-auto absolute flex flex-col items-end origin-top-right ${
+              isCompactMode ? 'top-2 right-2 gap-1' : `top-3 right-3 gap-2 ${scaleClass}`
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              {!isSpectating && p.alive && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmoteHoverIdx(null);
+                    setEmoteWheelOpen((prev) => !prev);
+                  }}
+                  title="Quick-Access Emote Wheel [G] (Hold & Flick or Tap)"
+                  aria-label="Open emote wheel"
+                  aria-expanded={emoteWheelOpen}
+                  className={`compendium-plaque-subtle flex items-center gap-1 ${
+                    isCompactMode ? 'p-1.5' : 'px-2.5 py-2'
+                  } rounded-[2px] text-[10.5px] font-mono-num transition-colors ${
+                    emoteWheelOpen
+                      ? 'border-[#f3d285] bg-[#1d2d39] text-[#f3d285]'
+                      : emoteCooldownLeft > 0.05
+                        ? 'opacity-75 text-[#9cb0ba]'
+                        : 'text-[#f3e6c8] hover:border-[#c99c4a]'
+                  }`}
+                >
+                  <MessageCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  {!isCompactMode && (
+                    <span className="hidden sm:inline whitespace-nowrap">
+                      {emoteCooldownLeft > 0.05 ? `${emoteCooldownLeft.toFixed(1)}s` : 'Emote [G]'}
+                    </span>
+                  )}
+                </button>
+              )}
               {isMultiplayer && (
                 <>
                   {voiceSnap.micEnabled && voiceSnap.voiceMode === 'ptt' && (
@@ -1090,13 +1613,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       onPointerLeave={() => spatialVoice.setPttActive(false)}
                       onPointerCancel={() => spatialVoice.setPttActive(false)}
                       title="Hold [V] to Push-to-Talk"
-                      className={`compendium-plaque-subtle px-2.5 py-1.5 rounded-[2px] text-[10.5px] font-mono-num font-semibold transition-colors touch-none ${
+                      className={`compendium-plaque-subtle ${
+                        isCompactMode ? 'px-2 py-1 text-[9.5px]' : 'px-2.5 py-1.5 text-[10.5px]'
+                      } rounded-[2px] font-mono-num font-semibold transition-colors touch-none ${
                         voiceSnap.pttActive
                           ? 'border-[#4ade80] bg-[#133827] text-[#bbf7d0]'
                           : 'text-[#f3d285] hover:border-[#c99c4a]'
                       }`}
                     >
-                      {voiceSnap.pttActive ? 'TX LIVE' : 'HOLD [V]'}
+                      {voiceSnap.pttActive ? 'TX' : isCompactMode ? 'PTT' : 'HOLD [V]'}
                     </button>
                   )}
                   <button
@@ -1116,7 +1641,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                           ? 'Unmute Microphone [M]'
                           : 'Mute Microphone [M]'
                     }
-                    className={`compendium-plaque-subtle flex items-center gap-1.5 px-2.5 py-2 rounded-[2px] text-[10.5px] font-mono-num transition-colors ${
+                    className={`compendium-plaque-subtle flex items-center gap-1.5 ${
+                      isCompactMode ? 'p-1.5' : 'px-2.5 py-2'
+                    } rounded-[2px] text-[10.5px] font-mono-num transition-colors ${
                       !voiceSnap.micEnabled
                         ? 'text-[#f3d285] hover:border-[#c99c4a]'
                         : voiceSnap.micMuted
@@ -1131,15 +1658,17 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     ) : (
                       <Mic className="w-3.5 h-3.5" />
                     )}
-                    <span className="hidden sm:inline">
-                      {!voiceSnap.micEnabled
-                        ? 'Mic'
-                        : voiceSnap.micMuted
-                          ? 'Muted'
-                          : voiceSnap.voiceMode === 'ptt'
-                            ? 'PTT'
-                            : 'Live'}
-                    </span>
+                    {!isCompactMode && (
+                      <span className="hidden sm:inline">
+                        {!voiceSnap.micEnabled
+                          ? 'Mic'
+                          : voiceSnap.micMuted
+                            ? 'Muted'
+                            : voiceSnap.voiceMode === 'ptt'
+                              ? 'PTT'
+                              : 'Live'}
+                      </span>
+                    )}
                   </button>
                 </>
               )}
@@ -1147,31 +1676,52 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 type="button"
                 onClick={() => onUpdateSettings({ muted: !settings.muted })}
                 aria-label={settings.muted ? 'Unmute audio' : 'Mute audio'}
-                className="compendium-plaque-subtle p-2 rounded-[2px] text-[#f3e6c8] hover:border-[#c99c4a] transition-colors"
+                className={`compendium-plaque-subtle ${isCompactMode ? 'p-1.5' : 'p-2'} rounded-[2px] text-[#f3e6c8] hover:border-[#c99c4a] transition-colors`}
               >
-                {settings.muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                {settings.muted ? <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
               </button>
               <button
                 type="button"
                 onClick={() => setPaused((prev) => !prev)}
                 aria-label="Pause match"
-                className="compendium-plaque-subtle p-2 rounded-[2px] text-[#f3e6c8] hover:border-[#c99c4a] transition-colors"
+                className={`compendium-plaque-subtle ${isCompactMode ? 'p-1.5' : 'p-2'} rounded-[2px] text-[#f3e6c8] hover:border-[#c99c4a] transition-colors`}
               >
-                {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                {paused ? <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Pause className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
               </button>
             </div>
+
+            {isCompactMode && (
+              <div
+                style={{ width: 102 }}
+                className="compendium-plaque-subtle flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-[2px] text-[9px] font-mono-num text-[#d6d3c9] whitespace-nowrap"
+              >
+                <span className="inline-flex items-center gap-0.5 text-white font-semibold" title="Remaining Kelis">
+                  <Users className="w-2.5 h-2.5 text-[#c99c4a]" />
+                  {hud.aliveCount}
+                </span>
+                <span className="text-[#f3d285]">{formatClock(hud.matchTime)}</span>
+                {hud.weather.kind === 'light_rain' ? (
+                  <CloudRain className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" aria-label={hud.weather.label} />
+                ) : hud.weather.kind === 'basin_fog' ? (
+                  <CloudFog className="w-2.5 h-2.5 text-[#cbd5e1] shrink-0" aria-label={hud.weather.label} />
+                ) : (
+                  <Sun className="w-2.5 h-2.5 text-[#f3d285] shrink-0" aria-label={hud.weather.label} />
+                )}
+              </div>
+            )}
 
             <Minimap
               hud={hud}
               showVoiceHorizon={isMultiplayer && (voiceSnap.micEnabled || voiceSnap.peers.length > 0)}
               voicePeers={voiceSnap.peers}
+              compact={isCompactMode}
             />
 
             {/* Spatial Proximity Voice Roster (Multiplayer) */}
             {isMultiplayer && (voiceSnap.error || voiceSnap.peers.length > 0) && (
-              <div className="w-48 space-y-1">
+              <div className={`${isCompactMode ? 'w-32' : 'w-48'} space-y-1`}>
                 {voiceSnap.error && (
-                  <div className="compendium-plaque-subtle rounded-[2px] border-[#ef4444]/60 px-2.5 py-1.5 text-[10px] text-[#fecaca] flex items-center justify-between gap-2">
+                  <div className="compendium-plaque-subtle rounded-[2px] border-[#ef4444]/60 px-2 py-1 text-[9.5px] text-[#fecaca] flex items-center justify-between gap-1.5">
                     <span className="truncate">{voiceSnap.error}</span>
                     <button
                       type="button"
@@ -1182,12 +1732,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     </button>
                   </div>
                 )}
-                {voiceSnap.peers.slice(0, 4).map((peer) => {
+                {voiceSnap.peers.slice(0, isCompactMode ? 2 : 4).map((peer) => {
                   const pct = Math.round(peer.proximityRatio * 100);
                   return (
                     <div
                       key={peer.id}
-                      className={`compendium-plaque-subtle rounded-[2px] px-2 py-1 text-[10px] flex items-center justify-between gap-1.5 ${
+                      className={`compendium-plaque-subtle rounded-[2px] ${
+                        isCompactMode ? 'px-1.5 py-0.5 text-[9px]' : 'px-2 py-1 text-[10px]'
+                      } flex items-center justify-between gap-1 ${
                         peer.speaking && peer.inRange
                           ? 'border-[#4ade80]/80'
                           : !peer.inRange
@@ -1195,9 +1747,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                             : ''
                       }`}
                     >
-                      <div className="min-w-0 flex items-center gap-1.5">
+                      <div className="min-w-0 flex items-center gap-1">
                         <Radio
-                          className={`w-3 h-3 shrink-0 ${
+                          className={`w-2.5 h-2.5 sm:w-3 sm:h-3 shrink-0 ${
                             peer.localMuted || peer.mutedByPeer
                               ? 'text-[#f87171]'
                               : peer.speaking && peer.inRange
@@ -1207,17 +1759,17 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                         />
                         <span className="truncate text-[#f7f2e7] font-medium">{peer.name}</span>
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0 font-mono-num">
+                      <div className="flex items-center gap-1 shrink-0 font-mono-num">
                         {peer.alive && peer.inRange && (
                           <ArrowUpRight
-                            className="w-3 h-3 text-[#f3d285]"
+                            className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-[#f3d285]"
                             style={{
                               transform: `rotate(${(peer.bearingRad * 180) / Math.PI + 45}deg)`,
                             }}
                           />
                         )}
                         <span className={peer.inRange ? 'text-[#9cb0ba]' : 'text-[#64748b]'}>
-                          {!peer.alive ? 'KO' : peer.inRange ? `${peer.distance}u · ${pct}%` : 'Far'}
+                          {!peer.alive ? 'KO' : peer.inRange ? (isCompactMode ? `${pct}%` : `${peer.distance}u · ${pct}%`) : 'Far'}
                         </span>
                         <button
                           type="button"
@@ -1240,16 +1792,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
             {/* Visual Sound Cues (Accessibility) */}
             {settings.visualSoundCues && hud.soundCues.length > 0 && (
-              <div className="w-48 space-y-1">
-                {hud.soundCues.slice(0, 3).map((cue) => (
+              <div className={`${isCompactMode ? 'w-32' : 'w-48'} space-y-1`}>
+                {hud.soundCues.slice(0, isCompactMode ? 2 : 3).map((cue) => (
                   <div
                     key={cue.id}
-                    className="compendium-plaque-subtle rounded-[2px] px-2.5 py-1 text-[10px] text-[#e6dfd0] flex items-center justify-between gap-2"
+                    className={`compendium-plaque-subtle rounded-[2px] ${
+                      isCompactMode ? 'px-1.5 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]'
+                    } text-[#e6dfd0] flex items-center justify-between gap-1.5`}
                   >
                     <span className="truncate">{cue.label}</span>
                     {cue.directionAngle !== null && (
                       <ArrowUpRight
-                        className="w-3.5 h-3.5 text-[#f3d285] shrink-0"
+                        className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#f3d285] shrink-0"
                         style={{
                           transform: `rotate(${(cue.directionAngle * 180) / Math.PI + 45}deg)`,
                         }}
@@ -1261,59 +1815,64 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             )}
           </div>
 
-          {/* Bottom-Right: Battle for Wang Kelian Ornate Plaque (Design Compendium Plate 2) */}
-          <div className={`compendium-plaque pointer-events-auto hidden sm:block absolute bottom-3 right-3 w-60 rounded-sm overflow-hidden origin-bottom-right ${scaleClass}`}>
-            <div className="compendium-ribbon flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-display font-semibold text-[#f3d285]">
-              <Swords className="w-3.5 h-3.5 text-[#c99c4a]" />
-              <span>Battle for Wang Kelian</span>
+          {/* Bottom-Right: Battle for Wang Kelian Ornate Plaque (Full Mode Only) */}
+          {!isCompactMode && (
+            <div className={`compendium-plaque pointer-events-auto hidden md:block absolute bottom-3 right-3 w-60 rounded-sm overflow-hidden origin-bottom-right ${scaleClass}`}>
+              <div className="compendium-ribbon flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-display font-semibold text-[#f3d285]">
+                <Swords className="w-3.5 h-3.5 text-[#c99c4a]" />
+                <span>Battle for Wang Kelian</span>
+              </div>
+              <div className="p-2.5 space-y-1.5 font-mono-num">
+                <div className="flex items-center justify-between text-xs text-[#d6d3c9]">
+                  <span className="text-[11px] font-sans text-[#b8c4bf]">Remaining Kelis</span>
+                  <span className="text-sm font-bold text-white">
+                    {hud.aliveCount} <span className="text-[#8ea3ae] font-normal">/ {hud.totalEntrants}</span>
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-[#d6d3c9]">
+                  <span className="text-[11px] font-sans text-[#b8c4bf]">
+                    {isMultiplayer && roomCode ? `Basin ${roomCode}` : 'Match Time'}
+                  </span>
+                  <span className="text-[#f3d285] font-semibold">
+                    {formatClock(hud.matchTime)}
+                    {isMultiplayer && latencyMs !== null ? ` · ${latencyMs}ms` : ''}
+                  </span>
+                </div>
+                <div className="pt-1 border-t border-[#22313d] flex items-center justify-between text-[10.5px] text-[#9cb0ba]">
+                  <span>
+                    Mass {hud.livingMassSum}+{hud.carcassMassSum}=
+                    {hud.livingMassSum + hud.carcassMassSum}
+                  </span>
+                  <span className={hud.zone.isShrinking ? 'text-[#fca5a5] font-semibold' : 'text-[#6ee7b7]'}>
+                    P{hud.zone.phase} · {hud.zone.isShrinking ? 'Closing' : `${Math.ceil(hud.zone.warningTimer)}s`}
+                  </span>
+                </div>
+                <div className="pt-1 border-t border-[#22313d] flex items-center justify-between gap-2 text-[10.5px]">
+                  <span className="inline-flex items-center gap-1 min-w-0 font-sans text-[#cbd5e1] truncate">
+                    {hud.weather.kind === 'light_rain' ? (
+                      <CloudRain className="w-3.5 h-3.5 text-[#7dd3fc] shrink-0" />
+                    ) : hud.weather.kind === 'basin_fog' ? (
+                      <CloudFog className="w-3.5 h-3.5 text-[#cbd5e1] shrink-0" />
+                    ) : (
+                      <Sun className="w-3.5 h-3.5 text-[#f3d285] shrink-0" />
+                    )}
+                    <span className="truncate">{hud.weather.label}</span>
+                  </span>
+                  <span
+                    className={`shrink-0 whitespace-nowrap ${
+                      hud.weather.kind === 'basin_fog'
+                        ? 'text-[#cbd5e1]'
+                        : hud.weather.kind === 'light_rain'
+                          ? 'text-[#7dd3fc]'
+                          : 'text-[#8ea3ae]'
+                    }`}
+                  >
+                    {Math.round(hud.weather.visibilityRange * 100)}% Vis
+                  </span>
+                </div>
+              </div>
             </div>
-            <div className="p-2.5 space-y-1.5 font-mono-num">
-              <div className="flex items-center justify-between text-xs text-[#d6d3c9]">
-                <span className="text-[11px] font-sans text-[#b8c4bf]">Remaining Kelis</span>
-                <span className="text-sm font-bold text-white">
-                  {hud.aliveCount} <span className="text-[#8ea3ae] font-normal">/ {hud.totalEntrants}</span>
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-xs text-[#d6d3c9]">
-                <span className="text-[11px] font-sans text-[#b8c4bf]">
-                  {isMultiplayer && roomCode ? `Basin ${roomCode}` : 'Match Time'}
-                </span>
-                <span className="text-[#f3d285] font-semibold">
-                  {formatClock(hud.matchTime)}
-                  {isMultiplayer && latencyMs !== null ? ` · ${latencyMs}ms` : ''}
-                </span>
-              </div>
-              <div className="pt-1 border-t border-[#22313d] flex items-center justify-between text-[10.5px] text-[#9cb0ba]">
-                <span>Mass {hud.livingMassSum}+{hud.carcassMassSum}=100</span>
-                <span className={hud.zone.isShrinking ? 'text-[#fca5a5] font-semibold' : 'text-[#6ee7b7]'}>
-                  P{hud.zone.phase} · {hud.zone.isShrinking ? 'Closing' : `${Math.ceil(hud.zone.warningTimer)}s`}
-                </span>
-              </div>
-              <div className="pt-1 border-t border-[#22313d] flex items-center justify-between gap-2 text-[10.5px]">
-                <span className="inline-flex items-center gap-1 min-w-0 font-sans text-[#cbd5e1] truncate">
-                  {hud.weather.kind === 'light_rain' ? (
-                    <CloudRain className="w-3.5 h-3.5 text-[#7dd3fc] shrink-0" />
-                  ) : hud.weather.kind === 'basin_fog' ? (
-                    <CloudFog className="w-3.5 h-3.5 text-[#cbd5e1] shrink-0" />
-                  ) : (
-                    <Sun className="w-3.5 h-3.5 text-[#f3d285] shrink-0" />
-                  )}
-                  <span className="truncate">{hud.weather.label}</span>
-                </span>
-                <span
-                  className={`shrink-0 whitespace-nowrap ${
-                    hud.weather.kind === 'basin_fog'
-                      ? 'text-[#cbd5e1]'
-                      : hud.weather.kind === 'light_rain'
-                        ? 'text-[#7dd3fc]'
-                        : 'text-[#8ea3ae]'
-                  }`}
-                >
-                  {Math.round(hud.weather.visibilityRange * 100)}% Vis
-                </span>
-              </div>
-            </div>
-          </div>
+          )}
 
           {/* Off-Screen Sonar Indicators */}
           {hud.offscreenIndicators.map((ind) => {
@@ -1340,8 +1899,16 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
           {/* Bottom-Center: Compendium RPG Action Bar + Circular Concentric Sonar Dish */}
           {!isSpectating ? (
-            <div className={`pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 flex items-end gap-2.5 origin-bottom ${scaleClass}`}>
-              <div className="compendium-plaque relative flex items-center gap-1 sm:gap-1.5 p-1.5 sm:p-2 rounded-sm">
+            <div
+              className={`pointer-events-auto absolute left-1/2 -translate-x-1/2 flex items-end origin-bottom ${
+                isCompactMode ? 'bottom-2 gap-1.5' : `bottom-3 gap-2.5 ${scaleClass}`
+              }`}
+            >
+              <div
+                className={`compendium-plaque relative flex items-center rounded-sm ${
+                  isCompactMode ? 'gap-1 p-1' : 'gap-1 sm:gap-1.5 p-1.5 sm:p-2'
+                }`}
+              >
                 {hotbarAbilities.map((ab) => {
                   const unlocked = p.level >= ab.unlockLevel;
                   const cd =
@@ -1365,7 +1932,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                         if (e.detail === 0 && unlocked && !onCd) handleAbilityClick(ab.id);
                       }}
                       title={`${ab.name} (${ab.key}) — ${ab.description}`}
-                      className={`relative flex flex-col items-center justify-center w-12 h-12 sm:w-16 sm:h-16 rounded-[3px] transition-transform touch-none overflow-hidden ${
+                      aria-label={ab.name}
+                      className={`relative flex flex-col items-center justify-center rounded-[3px] transition-transform touch-none overflow-hidden ${
+                        isCompactMode ? 'w-11 h-11' : 'w-12 h-12 sm:w-16 sm:h-16'
+                      } ${
                         !unlocked
                           ? 'compendium-slot-locked text-[#4e5f6b] cursor-not-allowed'
                           : onCd
@@ -1373,13 +1943,21 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                           : 'compendium-slot text-[#f7f2e7] hover:brightness-110 active:scale-95'
                       }`}
                     >
-                      <span className="hidden sm:block absolute top-0.5 left-1 text-[8.5px] font-mono-num font-bold text-[#f3d285] drop-shadow">
-                        {ab.key.split(' / ')[0]}
-                      </span>
+                      {!isCompactMode && (
+                        <span className="hidden sm:block absolute top-0.5 left-1 text-[8.5px] font-mono-num font-bold text-[#f3d285] drop-shadow">
+                          {ab.key.split(' / ')[0]}
+                        </span>
+                      )}
                       <AbilityIcon id={ab.id} unlocked={unlocked} />
-                      <span className="text-[8.5px] font-medium truncate max-w-full px-1 mt-0.5 leading-tight">
-                        {unlocked ? ab.name.split(' / ')[0] : `Lv.${ab.unlockLevel}`}
-                      </span>
+                      {!isCompactMode ? (
+                        <span className="text-[8.5px] font-medium truncate max-w-full px-1 mt-0.5 leading-tight">
+                          {unlocked ? ab.name.split(' / ')[0] : `Lv.${ab.unlockLevel}`}
+                        </span>
+                      ) : !unlocked ? (
+                        <span className="absolute bottom-0.5 inset-x-0 text-center text-[8px] font-mono-num font-bold text-[#8ea3ae] leading-none">
+                          {ab.unlockLevel}
+                        </span>
+                      ) : null}
                       {onCd && unlocked && (
                         <div className="absolute inset-0 bg-[#05090d]/78 flex items-center justify-center text-xs font-mono-num font-bold text-[#fbbf24]">
                           {cd.toFixed(1)}
@@ -1389,12 +1967,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   );
                 })}
                 {/* Compendium bottom diamond finial */}
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute -bottom-2 left-1/2 -translate-x-1/2 text-[11px] leading-none text-[#f3d285] drop-shadow"
-                >
-                  ◆
-                </span>
+                {!isCompactMode && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -bottom-2 left-1/2 -translate-x-1/2 text-[11px] leading-none text-[#f3d285] drop-shadow"
+                  >
+                    ◆
+                  </span>
+                )}
               </div>
 
               {/* Signature Circular Concentric Sonar Dish (Design Compendium Plate 2) */}
@@ -1418,7 +1998,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       if (e.detail === 0 && unlocked && !onCd) handleAbilityClick('sonar');
                     }}
                     title={`${isHunter ? 'Hunter Sonar' : 'Echo Sonar'} (E) — ${sonarSpec.description}`}
-                    className={`compendium-medallion relative flex flex-col items-center justify-center w-16 h-16 sm:w-[78px] sm:h-[78px] rounded-full transition-transform touch-none overflow-hidden ${
+                    aria-label={isHunter ? 'Hunter Sonar' : 'Echo Sonar'}
+                    className={`compendium-medallion relative flex flex-col items-center justify-center rounded-full transition-transform touch-none overflow-hidden ${
+                      isCompactMode ? 'w-12 h-12' : 'w-16 h-16 sm:w-[78px] sm:h-[78px]'
+                    } ${
                       !unlocked
                         ? 'opacity-50 cursor-not-allowed grayscale'
                         : p.sonarActive
@@ -1446,19 +2029,71 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                         <line x1="32" y1="32" x2="32" y2="6" stroke={accentStroke} strokeWidth="1.6" />
                       </svg>
                     )}
-                    <Radar className={`relative w-5 h-5 sm:w-6 sm:h-6 ${isHunter ? 'text-[#fde68a]' : 'text-[#7dd3fc]'}`} />
-                    <span className="relative text-[9px] font-mono-num font-bold mt-0.5 text-[#f7f2e7] drop-shadow">
-                      {!unlocked
-                        ? 'Lv.20'
-                        : onCd
-                        ? `${cd.toFixed(0)}s`
-                        : isHunter
-                        ? 'Hunter [E]'
-                        : 'Sonar [E]'}
-                    </span>
+                    <Radar className={`relative ${isCompactMode ? 'w-5 h-5' : 'w-5 h-5 sm:w-6 sm:h-6'} ${isHunter ? 'text-[#fde68a]' : 'text-[#7dd3fc]'}`} />
+                    {(!isCompactMode || !unlocked || onCd) && (
+                      <span className={`relative ${isCompactMode ? 'text-[8px]' : 'text-[9px] mt-0.5'} font-mono-num font-bold text-[#f7f2e7] drop-shadow leading-none`}>
+                        {!unlocked
+                          ? isCompactMode
+                            ? '20'
+                            : 'Lv.20'
+                          : onCd
+                          ? `${cd.toFixed(0)}s`
+                          : isHunter
+                          ? 'Hunter [E]'
+                          : 'Sonar [E]'}
+                      </span>
+                    )}
                   </button>
                 );
               })()}
+            </div>
+          ) : hud.matchResult.status === 'playing' && isDeathCam && deathCam ? (
+            <div
+              data-death-cam="active"
+              className={`compendium-plaque pointer-events-auto absolute ${
+                isCompactMode ? 'bottom-2 w-[92vw] max-w-sm px-3 py-2' : 'bottom-4 w-[92vw] max-w-lg px-4 py-2.5'
+              } left-1/2 -translate-x-1/2 rounded-sm border-[#ef4444]/65 origin-bottom ${scaleClass}`}
+            >
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-mono-num font-bold uppercase tracking-wider text-[#fca5a5]">
+                    <Skull className="w-3.5 h-3.5 text-[#ef4444] shrink-0" />
+                    <span className="truncate">
+                      {isCompactMode ? 'Death Cam · Slow-Mo' : 'Death Cam · Rival Perspective'}
+                    </span>
+                    <span className="text-[#f3d285] shrink-0">
+                      {deathCam.remaining.toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="font-display text-sm sm:text-base font-semibold text-[#f7f2e7] truncate mt-0.5">
+                    {deathCam.killerName} <span className="font-mono-num text-[#f3d285]">· Lv.{deathCam.killerLevel}</span>
+                  </div>
+                  <div className="text-[10.5px] sm:text-[11px] text-[#a9b9c2] truncate">
+                    Finishing Blow: {deathCam.causeLabel}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    isMultiplayer
+                      ? multiplayerClient.sendSpectateAction('skip_death_cam')
+                      : simRef.current?.skipDeathCam()
+                  }
+                  title="Skip Death Cam (Space)"
+                  className="shrink-0 px-2.5 py-1.5 text-[11px] font-semibold whitespace-nowrap rounded-[2px] border border-[#5f4722] bg-[#142029] text-[#f3e6c8] hover:border-[#c99c4a] hover:text-white"
+                >
+                  Skip {!isCompactMode && <span className="text-[#9cb0ba] font-mono-num">[Space]</span>}
+                </button>
+              </div>
+              <div className="mt-2 h-1.5 w-full rounded-[1px] bg-[#080f14] border border-[#2a3b47] overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-[#dc2626] via-[#f59e0b] to-[#f3d285]"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, (deathCam.remaining / Math.max(0.01, deathCam.duration)) * 100))}%`,
+                  }}
+                />
+              </div>
             </div>
           ) : hud.matchResult.status === 'playing' ? (
             <div className={`compendium-plaque pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 w-[94vw] max-w-2xl rounded-sm px-4 py-3 origin-bottom ${scaleClass}`}>
@@ -1599,11 +2234,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 onPointerUp={handleJoyPointerEnd}
                 onPointerCancel={handleJoyPointerEnd}
                 aria-label="Movement directional joystick"
-                className="compendium-medallion pointer-events-auto absolute bottom-24 left-4 w-28 h-28 rounded-full flex items-center justify-center touch-none select-none"
+                className={`compendium-medallion pointer-events-auto absolute left-3 rounded-full flex items-center justify-center touch-none select-none ${
+                  canPlaceControlsBesideBar ? 'bottom-2.5' : 'bottom-16'
+                } ${isCompactMode ? 'w-20 h-20' : 'w-24 h-24'}`}
               >
-                <div className="pointer-events-none absolute inset-2 rounded-full border border-[#c99c4a]/35" />
+                <div className="pointer-events-none absolute inset-1.5 rounded-full border border-[#c99c4a]/35" />
                 <div
-                  className="w-11 h-11 rounded-full bg-gradient-to-b from-[#f3d285] to-[#a87c32] border border-[#fef3c7] shadow-lg pointer-events-none"
+                  className={`rounded-full bg-gradient-to-b from-[#f3d285] to-[#a87c32] border border-[#fef3c7] shadow-lg pointer-events-none ${
+                    isCompactMode ? 'w-8 h-8' : 'w-10 h-10'
+                  }`}
                   style={{
                     transform: `translate(${joyOffset.x}px, ${joyOffset.y}px)`,
                   }}
@@ -1623,7 +2262,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   }
                 }}
                 aria-label="Bite and Feed"
-                className={`pointer-events-auto absolute bottom-24 right-4 w-24 h-24 rounded-full border-2 flex flex-col items-center justify-center gap-1 touch-none select-none shadow-2xl transition-transform ${
+                className={`pointer-events-auto absolute right-3 rounded-full border-2 flex flex-col items-center justify-center gap-0.5 touch-none select-none shadow-2xl transition-transform ${
+                  canPlaceControlsBesideBar ? 'bottom-2.5' : 'bottom-16'
+                } ${isCompactMode ? 'w-[72px] h-[72px]' : 'w-20 h-20'} ${
                   bitePressed
                     ? 'scale-95 border-[#f3d285] bg-gradient-to-b from-[#7f1d1d] to-[#3f0f12] text-[#fef3c7]'
                     : p.hasPreyInRange
@@ -1633,19 +2274,42 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     : 'compendium-medallion text-[#f7f2e7]'
                 }`}
               >
-                <Swords className="w-7 h-7 pointer-events-none" />
-                <span className="text-[11px] font-display font-semibold tracking-wide pointer-events-none">
+                <Swords className={`${isCompactMode ? 'w-5 h-5' : 'w-6 h-6'} pointer-events-none`} />
+                <span className={`${isCompactMode ? 'text-[9.5px]' : 'text-[10.5px]'} font-display font-semibold tracking-wide pointer-events-none leading-none`}>
                   {p.feedingTargetName
-                    ? 'FEEDING'
+                    ? 'FEED'
                     : p.hasCarcassInRange && !p.hasPreyInRange
                     ? 'FEED'
-                    : p.hasPreyInRange
-                    ? 'BITE'
-                    : 'BITE & FEED'}
+                    : 'BITE'}
                 </span>
               </button>
             </>
           )}
+
+          {/* New Evolution Form Visual Notification Toast (with Temporary Stat Boost Icon) */}
+          <EvolutionFormToast
+            toast={p.alive ? evolutionToast : null}
+            boostTimeLeft={p.evoBoostTimeLeft}
+            paused={paused}
+            compact={isCompactMode}
+            canPlaceControlsBesideBar={canPlaceControlsBesideBar}
+            reducedMotion={settings.reducedMotion}
+            onDismiss={(key) => setEvolutionToast((prev) => (prev?.key === key ? null : prev))}
+          />
+
+          {/* Quick-Access Radial Emote Wheel */}
+          <EmoteWheel
+            open={emoteWheelOpen && !isSpectating && p.alive && !paused}
+            selectedIndex={emoteHoverIdx}
+            cooldownLeft={emoteCooldownLeft}
+            compact={isCompactMode}
+            onHoverIndex={setEmoteHoverIdx}
+            onSelectEmote={dispatchEmote}
+            onClose={() => {
+              setEmoteWheelOpen(false);
+              setEmoteHoverIdx(null);
+            }}
+          />
         </div>
       )}
 

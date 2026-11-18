@@ -5,7 +5,9 @@ import {
   Clock,
   Copy,
   Crown,
+  Globe,
   LogOut,
+  MapPin,
   Mic,
   MicOff,
   Play,
@@ -18,10 +20,13 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { EVOLUTION_MILESTONES } from '../data/abilities';
+import { getRegionInfo, REGIONS, RegionCode, RegionFilter } from '../data/regions';
 import { ZONE_METADATA } from '../game/arena';
 import {
   DEFAULT_PLAYER_NAME,
   formatSurvivalDuration,
+  GlobalLeaderboardResponse,
+  GlobalLeaderboardSort,
   LeaderboardSortOrder,
   sortSurvivalEntries,
   SurvivalLeaderboardEntry,
@@ -37,13 +42,23 @@ interface LobbyScreenProps {
   lobbySize: LobbySize;
   mode: LobbyPlayMode;
   playerName: string;
+  playerRegion: RegionCode;
   leaderboard: SurvivalLeaderboardEntry[];
+  globalLeaderboard: GlobalLeaderboardResponse | null;
+  globalLeaderboardLoading: boolean;
+  globalLeaderboardError: string | null;
+  globalRegionFilter: RegionFilter;
+  globalSort: GlobalLeaderboardSort;
   epilogueUnlocked: boolean;
   settings: AccessibilitySettings;
   mpSnapshot: MultiplayerSnapshot;
   onSelectLobbySize: (n: LobbySize) => void;
   onSelectMode: (m: LobbyPlayMode) => void;
   onChangePlayerName: (name: string) => void;
+  onChangePlayerRegion: (region: RegionCode) => void;
+  onSelectGlobalRegionFilter: (region: RegionFilter) => void;
+  onSelectGlobalSort: (sort: GlobalLeaderboardSort) => void;
+  onRefreshGlobalLeaderboard: () => void;
   onClearLeaderboard: () => void;
   onUpdateSettings: (patch: Partial<AccessibilitySettings>) => void;
   onStartMatch: () => void;
@@ -71,13 +86,23 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   lobbySize,
   mode,
   playerName,
+  playerRegion,
   leaderboard,
+  globalLeaderboard,
+  globalLeaderboardLoading,
+  globalLeaderboardError,
+  globalRegionFilter,
+  globalSort,
   epilogueUnlocked,
   settings,
   mpSnapshot,
   onSelectLobbySize,
   onSelectMode,
   onChangePlayerName,
+  onChangePlayerRegion,
+  onSelectGlobalRegionFilter,
+  onSelectGlobalSort,
+  onRefreshGlobalLeaderboard,
   onClearLeaderboard,
   onUpdateSettings,
   onStartMatch,
@@ -85,6 +110,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   onOpenCodex,
 }) => {
   const [nameDraft, setNameDraft] = useState(playerName);
+  const [boardScope, setBoardScope] = useState<'global' | 'local'>('global');
   const [sortOrder, setSortOrder] = useState<LeaderboardSortOrder>('longest');
   const [confirmClear, setConfirmClear] = useState(false);
   const [joinCodeDraft, setJoinCodeDraft] = useState('');
@@ -253,6 +279,24 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                     }}
                     className="w-48 px-3 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] placeholder-[#5a6c75] focus:outline-none focus:border-[#c99c4a]"
                   />
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <label htmlFor="player-region" className="text-xs font-medium text-[#d9b25f] shrink-0">
+                    Region
+                  </label>
+                  <select
+                    id="player-region"
+                    value={playerRegion}
+                    onChange={(e) => onChangePlayerRegion(e.target.value as RegionCode)}
+                    className="w-48 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] focus:outline-none focus:border-[#c99c4a]"
+                  >
+                    {REGIONS.map((reg) => (
+                      <option key={reg.code} value={reg.code}>
+                        {reg.shortLabel} · {reg.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="flex items-center justify-between gap-3">
@@ -852,160 +896,461 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </div>
         </section>
 
-        {/* Top 10 Survival Times Leaderboard */}
+        {/* Global Top 100 Survival Times & Regional Rankings */}
         <section id="leaderboard" className="space-y-4 pt-4 border-t border-[#1e2d38]">
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+          <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
-                <Crown className="w-5 h-5 text-[#f3d285]" />
+                {boardScope === 'global' ? (
+                  <Globe className="w-5 h-5 text-[#f3d285]" />
+                ) : (
+                  <Crown className="w-5 h-5 text-[#f3d285]" />
+                )}
                 <h2 className="font-display text-2xl font-semibold text-[#f7f2e7]">
-                  Top 10 Survival Times
+                  {boardScope === 'global'
+                    ? 'Global Top 100 Survival Times'
+                    : 'Local Top 10 Keli King Records'}
                 </h2>
               </div>
               <p className="text-sm text-[#9cb0ba] mt-0.5">
-                Local hall of fame tracking how long players survived before reaching Keli King (Lv.100) status.
+                {boardScope === 'global'
+                  ? `Compete for global and regional rankings as ${playerName} (${getRegionInfo(playerRegion).shortLabel} · ${getRegionInfo(playerRegion).name}).`
+                  : 'Local hall of fame tracking how long players survived before reaching Keli King (Lv.100) status.'}
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
-              <div className="flex items-center gap-1 p-1 rounded bg-[#0b1218] border border-[#2a3b47]">
+              {/* Scope Switcher: Global Top 100 vs Local Top 10 */}
+              <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
                 <button
                   type="button"
-                  onClick={() => setSortOrder('longest')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                    sortOrder === 'longest'
+                  onClick={() => setBoardScope('global')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                    boardScope === 'global'
                       ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
                       : 'text-[#a9b9c2] hover:text-white'
                   }`}
                 >
-                  Longest
+                  Global Top 100
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSortOrder('fastest')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                    sortOrder === 'fastest'
+                  onClick={() => setBoardScope('local')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                    boardScope === 'local'
                       ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
                       : 'text-[#a9b9c2] hover:text-white'
                   }`}
                 >
-                  Fastest
+                  Local Top 10
                 </button>
               </div>
 
-              {leaderboard.length > 0 && !confirmClear && (
-                <button
-                  type="button"
-                  onClick={() => setConfirmClear(true)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded border border-[#3a301e] bg-[#101920] text-[#9cb0ba] hover:border-[#b91c1c] hover:text-[#fca5a5] transition-colors whitespace-nowrap"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Clear
-                </button>
-              )}
+              {boardScope === 'global' ? (
+                <>
+                  <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
+                    {(
+                      [
+                        { id: 'longest', label: 'Longest' },
+                        { id: 'fastest_king', label: 'Fastest King' },
+                        { id: 'kills', label: 'Most Kills' },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onSelectGlobalSort(opt.id)}
+                        className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                          globalSort === opt.id
+                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                            : 'text-[#a9b9c2] hover:text-white'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
 
-              {leaderboard.length > 0 && confirmClear && (
-                <div className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => {
-                      onClearLeaderboard();
-                      setConfirmClear(false);
-                    }}
-                    className="px-2.5 py-1.5 text-xs font-semibold rounded bg-[#991b1b] text-[#fee2e2] hover:bg-[#b91c1c] transition-colors whitespace-nowrap"
+                    onClick={onRefreshGlobalLeaderboard}
+                    disabled={globalLeaderboardLoading}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4a3c22] bg-[#101920] text-[#f3e6c8] hover:border-[#c99c4a] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
                   >
-                    Confirm Clear
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${globalLeaderboardLoading ? 'animate-spin' : ''}`}
+                    />
+                    Refresh
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmClear(false)}
-                    className="px-2.5 py-1.5 text-xs font-medium rounded border border-[#2a3b47] bg-[#0b1218] text-[#b5c2c9] hover:text-white transition-colors whitespace-nowrap"
-                  >
-                    Cancel
-                  </button>
-                </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
+                    <button
+                      type="button"
+                      onClick={() => setSortOrder('longest')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                        sortOrder === 'longest'
+                          ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                          : 'text-[#a9b9c2] hover:text-white'
+                      }`}
+                    >
+                      Longest
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSortOrder('fastest')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                        sortOrder === 'fastest'
+                          ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                          : 'text-[#a9b9c2] hover:text-white'
+                      }`}
+                    >
+                      Fastest
+                    </button>
+                  </div>
+
+                  {leaderboard.length > 0 && !confirmClear && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClear(true)}
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#3a301e] bg-[#101920] text-[#9cb0ba] hover:border-[#b91c1c] hover:text-[#fca5a5] transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Clear
+                    </button>
+                  )}
+
+                  {leaderboard.length > 0 && confirmClear && (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClearLeaderboard();
+                          setConfirmClear(false);
+                        }}
+                        className="px-2.5 py-1.5 text-xs font-semibold rounded-[2px] bg-[#991b1b] text-[#fee2e2] hover:bg-[#b91c1c] transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Confirm Clear
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClear(false)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#2a3b47] bg-[#0b1218] text-[#b5c2c9] hover:text-white transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
 
-          <div className="compendium-plaque rounded-sm overflow-hidden">
-            {sortedLeaderboard.length === 0 ? (
-              <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-start gap-3">
-                  <div className="p-2.5 rounded border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
-                    <Clock className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-[#f7f2e7]">
-                      No Keli King Survival Records Yet
-                    </div>
-                    <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
-                      Survive the Wang Kelian basin and reunite all 100 fragments to reach Keli King status. Your top 10 survival times are automatically saved in local storage.
-                    </p>
-                  </div>
-                </div>
+          {boardScope === 'global' ? (
+            <div className="space-y-3">
+              {/* Regional Standings Filter Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                 <button
                   type="button"
-                  onClick={commitNameAndStart}
-                  className="px-4 py-2 text-xs font-semibold rounded bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                  onClick={() => onSelectGlobalRegionFilter('ALL')}
+                  className={`text-left px-3 py-2.5 rounded-[2px] border transition-colors ${
+                    globalRegionFilter === 'ALL'
+                      ? 'border-[#c99c4a] bg-[#16232e]'
+                      : 'border-[#253440] bg-[#0d161d] hover:border-[#5b4724]'
+                  }`}
                 >
-                  Claim #1 Record
+                  <div className="flex items-center justify-between gap-1 text-xs font-semibold text-[#f3d285] whitespace-nowrap">
+                    <span>ALL · Global</span>
+                    <Globe className="w-3.5 h-3.5 shrink-0" />
+                  </div>
+                  <div className="font-mono-num text-sm font-semibold text-[#f7f2e7] mt-1">
+                    {globalLeaderboard?.entries[0] && globalRegionFilter === 'ALL'
+                      ? formatSurvivalDuration(globalLeaderboard.entries[0].survivalTime)
+                      : globalLeaderboard?.regionSummary.reduce<number | null>(
+                            (best, r) =>
+                              r.topSurvivalTime !== null &&
+                              (best === null || r.topSurvivalTime > best)
+                                ? r.topSurvivalTime
+                                : best,
+                            null
+                          ) !== null
+                        ? formatSurvivalDuration(
+                            globalLeaderboard?.regionSummary.reduce<number>(
+                              (best, r) =>
+                                r.topSurvivalTime !== null && r.topSurvivalTime > best
+                                  ? r.topSurvivalTime
+                                  : best,
+                              0
+                            ) ?? 0
+                          )
+                        : '—'}
+                  </div>
+                  <div className="text-[11px] font-mono-num text-[#9cb0ba] mt-0.5">
+                    {globalLeaderboard?.totalGlobal ?? 0} ranked
+                  </div>
                 </button>
+
+                {REGIONS.map((reg) => {
+                  const summary = globalLeaderboard?.regionSummary.find(
+                    (s) => s.region === reg.code
+                  );
+                  const isSelected = globalRegionFilter === reg.code;
+                  const isOwnRegion = playerRegion === reg.code;
+                  return (
+                    <button
+                      key={reg.code}
+                      type="button"
+                      onClick={() => onSelectGlobalRegionFilter(reg.code)}
+                      className={`text-left px-3 py-2.5 rounded-[2px] border transition-colors ${
+                        isSelected
+                          ? 'border-[#c99c4a] bg-[#16232e]'
+                          : 'border-[#253440] bg-[#0d161d] hover:border-[#5b4724]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1 text-xs font-semibold whitespace-nowrap">
+                        <span className={isSelected ? 'text-[#f3d285]' : 'text-[#e6e4dd]'}>
+                          {reg.shortLabel}
+                        </span>
+                        {isOwnRegion && (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-[#7dd3fc]">
+                            <MapPin className="w-2.5 h-2.5" />
+                            You
+                          </span>
+                        )}
+                      </div>
+                      <div className="font-mono-num text-sm font-semibold text-[#f7f2e7] mt-1">
+                        {summary?.topSurvivalTime !== null && summary?.topSurvivalTime !== undefined
+                          ? formatSurvivalDuration(summary.topSurvivalTime)
+                          : '—'}
+                      </div>
+                      <div className="text-[11px] font-mono-num text-[#9cb0ba] mt-0.5 truncate">
+                        {summary?.count ?? 0} runs · {reg.name}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-sm">
-                  <thead className="bg-[#0b1218] text-xs text-[#9cb0ba]">
-                    <tr>
-                      <th className="py-3 px-4 font-medium w-16">Rank</th>
-                      <th className="py-3 px-4 font-medium">Player</th>
-                      <th className="py-3 px-4 font-medium">Survival Time</th>
-                      <th className="py-3 px-4 font-medium">Eliminations</th>
-                      <th className="py-3 px-4 font-medium">Match Format</th>
-                      <th className="py-3 px-4 font-medium text-right">Crowned At</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1a2630]">
-                    {sortedLeaderboard.map((entry, idx) => {
-                      const rank = idx + 1;
-                      const rankColor =
-                        rank === 1
-                          ? 'text-[#f3d285]'
-                          : rank === 2
-                          ? 'text-[#d6d3c9]'
-                          : rank === 3
-                          ? 'text-[#d49a6a]'
-                          : 'text-[#8ea0aa]';
-                      return (
-                        <tr key={entry.id} className="hover:bg-[#142029]">
-                          <td className={`py-2.5 px-4 font-mono-num font-semibold ${rankColor}`}>
-                            #{rank}
-                          </td>
-                          <td className="py-2.5 px-4 font-medium text-[#f7f2e7]">
-                            {entry.playerName}
-                          </td>
-                          <td className="py-2.5 px-4 font-mono-num font-semibold text-[#f3d285]">
-                            {formatSurvivalDuration(entry.survivalTime)}
-                          </td>
-                          <td className="py-2.5 px-4 font-mono-num text-[#d6d3c9]">
-                            {entry.kills}
-                          </td>
-                          <td className="py-2.5 px-4 text-xs text-[#b8c4bf] whitespace-nowrap">
-                            {entry.mode === 'tutorial'
-                              ? 'First Match Guide'
-                              : `${entry.lobbySize}-Keli Royale`}
-                          </td>
-                          <td className="py-2.5 px-4 text-xs text-[#9cb0ba] text-right whitespace-nowrap">
-                            {formatRecordedDate(entry.achievedAt)}
-                          </td>
+
+              {/* Global Top 100 Table */}
+              <div className="compendium-plaque rounded-sm overflow-hidden">
+                {globalLeaderboardError ? (
+                  <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-[#fca5a5]">
+                        Unable to Load Global Rankings
+                      </div>
+                      <p className="text-xs text-[#9cb0ba] mt-1">{globalLeaderboardError}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onRefreshGlobalLeaderboard}
+                      className="px-4 py-2 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Retry Fetch
+                    </button>
+                  </div>
+                ) : globalLeaderboardLoading && !globalLeaderboard ? (
+                  <div className="px-6 py-8 text-sm text-[#9cb0ba]">
+                    Fetching global top 100 survival rankings...
+                  </div>
+                ) : !globalLeaderboard || globalLeaderboard.entries.length === 0 ? (
+                  <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-[2px] border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
+                        <Globe className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-[#f7f2e7]">
+                          {globalRegionFilter === 'ALL'
+                            ? 'No Global Survival Records Yet'
+                            : `No ${getRegionInfo(globalRegionFilter).name} (${globalRegionFilter}) Records Yet`}
+                        </div>
+                        <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
+                          Complete a Solo Royale or Multiplayer match to submit your survival time to the global top 100 and claim the top spot for {getRegionInfo(playerRegion).name}.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={commitNameAndStart}
+                      className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                    >
+                      Claim #1 Record
+                    </button>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                    <table className="w-full text-left border-collapse text-sm">
+                      <thead className="bg-[#0b1218] text-xs text-[#9cb0ba] sticky top-0 z-10 border-b border-[#22313d]">
+                        <tr>
+                          <th className="py-3 px-4 font-medium whitespace-nowrap">
+                            {globalRegionFilter === 'ALL' ? 'Global' : `${globalRegionFilter} Rank`}
+                          </th>
+                          <th className="py-3 px-4 font-medium">Player</th>
+                          <th className="py-3 px-4 font-medium">Region</th>
+                          <th className="py-3 px-4 font-medium">Survival Time</th>
+                          <th className="py-3 px-4 font-medium">Peak Level</th>
+                          <th className="py-3 px-4 font-medium">Eliminations</th>
+                          <th className="py-3 px-4 font-medium">Format</th>
+                          <th className="py-3 px-4 font-medium text-right">Recorded</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-[#1a2630]">
+                        {globalLeaderboard.entries.map((entry) => {
+                          const displayRank =
+                            globalRegionFilter === 'ALL' ? entry.globalRank : entry.regionalRank;
+                          const rankColor =
+                            displayRank === 1
+                              ? 'text-[#f3d285]'
+                              : displayRank === 2
+                                ? 'text-[#d6d3c9]'
+                                : displayRank === 3
+                                  ? 'text-[#d49a6a]'
+                                  : 'text-[#8ea0aa]';
+                          const isOwnEntry =
+                            entry.playerName === playerName && entry.region === playerRegion;
+                          return (
+                            <tr
+                              key={entry.id}
+                              className={
+                                isOwnEntry
+                                  ? 'bg-[#15242f] hover:bg-[#192b38]'
+                                  : 'hover:bg-[#142029]'
+                              }
+                            >
+                              <td className="py-2.5 px-4 font-mono-num whitespace-nowrap">
+                                <span className={`font-semibold ${rankColor}`}>
+                                  #{displayRank}
+                                </span>
+                                {globalRegionFilter === 'ALL' ? (
+                                  <span className="ml-2 text-[11px] text-[#7c8f99]">
+                                    #{entry.regionalRank} {entry.region}
+                                  </span>
+                                ) : (
+                                  <span className="ml-2 text-[11px] text-[#7c8f99]">
+                                    Global #{entry.globalRank}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 font-medium text-[#f7f2e7] whitespace-nowrap">
+                                {entry.playerName}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono-num text-xs text-[#7dd3fc] whitespace-nowrap">
+                                {entry.region}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono-num font-semibold text-[#f3d285] whitespace-nowrap">
+                                {formatSurvivalDuration(entry.survivalTime)}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono-num text-xs whitespace-nowrap">
+                                {entry.victory ? (
+                                  <span className="text-[#4ade80] font-semibold">
+                                    Lv.{entry.finalLevel} · King
+                                  </span>
+                                ) : (
+                                  <span className="text-[#b8c4bf]">Lv.{entry.finalLevel}</span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono-num text-[#d6d3c9]">
+                                {entry.kills}
+                              </td>
+                              <td className="py-2.5 px-4 text-xs text-[#b8c4bf] whitespace-nowrap">
+                                {entry.mode === 'multiplayer'
+                                  ? `Multiplayer · ${entry.lobbySize}K`
+                                  : `${entry.lobbySize}-Keli Royale`}
+                              </td>
+                              <td className="py-2.5 px-4 text-xs text-[#9cb0ba] text-right whitespace-nowrap">
+                                {formatRecordedDate(entry.achievedAt)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="compendium-plaque rounded-sm overflow-hidden">
+              {sortedLeaderboard.length === 0 ? (
+                <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2.5 rounded-[2px] border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
+                      <Clock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-semibold text-[#f7f2e7]">
+                        No Keli King Survival Records Yet
+                      </div>
+                      <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
+                        Survive the Wang Kelian basin and reunite all 100 fragments to reach Keli King status. Your top 10 survival times are automatically saved in local storage.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={commitNameAndStart}
+                    className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                  >
+                    Claim #1 Record
+                  </button>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead className="bg-[#0b1218] text-xs text-[#9cb0ba]">
+                      <tr>
+                        <th className="py-3 px-4 font-medium w-16">Rank</th>
+                        <th className="py-3 px-4 font-medium">Player</th>
+                        <th className="py-3 px-4 font-medium">Survival Time</th>
+                        <th className="py-3 px-4 font-medium">Eliminations</th>
+                        <th className="py-3 px-4 font-medium">Match Format</th>
+                        <th className="py-3 px-4 font-medium text-right">Crowned At</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1a2630]">
+                      {sortedLeaderboard.map((entry, idx) => {
+                        const rank = idx + 1;
+                        const rankColor =
+                          rank === 1
+                            ? 'text-[#f3d285]'
+                            : rank === 2
+                            ? 'text-[#d6d3c9]'
+                            : rank === 3
+                            ? 'text-[#d49a6a]'
+                            : 'text-[#8ea0aa]';
+                        return (
+                          <tr key={entry.id} className="hover:bg-[#142029]">
+                            <td className={`py-2.5 px-4 font-mono-num font-semibold ${rankColor}`}>
+                              #{rank}
+                            </td>
+                            <td className="py-2.5 px-4 font-medium text-[#f7f2e7]">
+                              {entry.playerName}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono-num font-semibold text-[#f3d285]">
+                              {formatSurvivalDuration(entry.survivalTime)}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono-num text-[#d6d3c9]">
+                              {entry.kills}
+                            </td>
+                            <td className="py-2.5 px-4 text-xs text-[#b8c4bf] whitespace-nowrap">
+                              {entry.mode === 'tutorial'
+                                ? 'First Match Guide'
+                                : `${entry.lobbySize}-Keli Royale`}
+                            </td>
+                            <td className="py-2.5 px-4 text-xs text-[#9cb0ba] text-right whitespace-nowrap">
+                              {formatRecordedDate(entry.achievedAt)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Bestiary & Design Sheets Strip */}

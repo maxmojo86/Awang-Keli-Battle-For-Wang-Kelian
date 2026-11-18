@@ -4,12 +4,19 @@ import { DesignCodexModal } from './components/DesignCodexModal';
 import { GameViewport } from './components/GameViewport';
 import { LobbyPlayMode, LobbyScreen } from './components/LobbyScreen';
 import { PostMatchScreen } from './components/PostMatchScreen';
+import { RegionCode, RegionFilter } from './data/regions';
 import {
   clearTopSurvivalTimes,
+  fetchGlobalLeaderboard,
   getSavedPlayerName,
+  getSavedPlayerRegion,
   getTopSurvivalTimes,
+  GlobalLeaderboardResponse,
+  GlobalLeaderboardSort,
   recordKeliKingSurvivalTime,
   savePlayerName,
+  savePlayerRegion,
+  submitGlobalSurvivalTime,
   SurvivalLeaderboardEntry,
 } from './game/leaderboard';
 import { multiplayerClient, MultiplayerSnapshot } from './game/multiplayerClient';
@@ -27,10 +34,23 @@ export default function App() {
   const [finalHud, setFinalHud] = useState<HudSnapshot | null>(null);
   const [finalReplay, setFinalReplay] = useState<MatchReplayData | null>(null);
   const [playerName, setPlayerName] = useState<string>(() => getSavedPlayerName());
+  const [playerRegion, setPlayerRegion] = useState<RegionCode>(() => getSavedPlayerRegion());
   const [leaderboard, setLeaderboard] = useState<SurvivalLeaderboardEntry[]>(() =>
     getTopSurvivalTimes()
   );
   const [lastLeaderboardRank, setLastLeaderboardRank] = useState<number | null>(null);
+  const [globalLeaderboard, setGlobalLeaderboard] = useState<GlobalLeaderboardResponse | null>(
+    null
+  );
+  const [globalLeaderboardLoading, setGlobalLeaderboardLoading] = useState<boolean>(true);
+  const [globalLeaderboardError, setGlobalLeaderboardError] = useState<string | null>(null);
+  const [globalRegionFilter, setGlobalRegionFilter] = useState<RegionFilter>('ALL');
+  const [globalSort, setGlobalSort] = useState<GlobalLeaderboardSort>('longest');
+  const [lastGlobalRank, setLastGlobalRank] = useState<{
+    globalRank: number | null;
+    regionalRank: number | null;
+    region: RegionCode;
+  } | null>(null);
 
   const [mpSnapshot, setMpSnapshot] = useState<MultiplayerSnapshot>(() =>
     multiplayerClient.getSnapshot()
@@ -77,6 +97,7 @@ export default function App() {
       setFinalHud(null);
       setFinalReplay(null);
       setLastLeaderboardRank(null);
+      setLastGlobalRank(null);
       setActiveMpSession(info);
       setMode('multiplayer');
       setMatchKey((k) => k + 1);
@@ -110,9 +131,36 @@ export default function App() {
     setSettings((prev) => ({ ...prev, ...patch }));
   }, []);
 
+  const refreshGlobalLeaderboard = useCallback(
+    async (regionFilter: RegionFilter = globalRegionFilter, sort: GlobalLeaderboardSort = globalSort) => {
+      setGlobalLeaderboardLoading(true);
+      setGlobalLeaderboardError(null);
+      try {
+        const data = await fetchGlobalLeaderboard(regionFilter, sort, 100);
+        setGlobalLeaderboard(data);
+      } catch (err) {
+        setGlobalLeaderboardError(
+          err instanceof Error ? err.message : 'Unable to reach global rankings service.'
+        );
+      } finally {
+        setGlobalLeaderboardLoading(false);
+      }
+    },
+    [globalRegionFilter, globalSort]
+  );
+
+  useEffect(() => {
+    void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
+  }, [globalRegionFilter, globalSort, refreshGlobalLeaderboard]);
+
   const handlePlayerNameChange = useCallback((nextName: string) => {
     const saved = savePlayerName(nextName);
     setPlayerName(saved);
+  }, []);
+
+  const handlePlayerRegionChange = useCallback((nextRegion: RegionCode) => {
+    const saved = savePlayerRegion(nextRegion);
+    setPlayerRegion(saved);
   }, []);
 
   const handleClearLeaderboard = useCallback(() => {
@@ -126,6 +174,7 @@ export default function App() {
     setFinalHud(null);
     setFinalReplay(null);
     setLastLeaderboardRank(null);
+    setLastGlobalRank(null);
     setMatchKey((k) => k + 1);
     setScreen('playing');
   }, [mode]);
@@ -147,9 +196,40 @@ export default function App() {
       } else {
         setLastLeaderboardRank(null);
       }
+
+      if (snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
+        const subId = `run-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        void submitGlobalSurvivalTime(
+          snap,
+          playerName,
+          playerRegion,
+          Boolean(activeMpSession),
+          subId
+        ).then((res) => {
+          if (res) {
+            setLastGlobalRank({
+              globalRank: res.globalRank,
+              regionalRank: res.regionalRank,
+              region: res.entry.region,
+            });
+            void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
+          }
+        });
+      } else {
+        setLastGlobalRank(null);
+      }
+
       setScreen('summary');
     },
-    [playerName]
+    [
+      activeMpSession,
+      globalRegionFilter,
+      globalSort,
+      matchKey,
+      playerName,
+      playerRegion,
+      refreshGlobalLeaderboard,
+    ]
   );
 
   const handleExitToLobby = useCallback(() => {
@@ -195,13 +275,23 @@ export default function App() {
           lobbySize={lobbySize}
           mode={mode}
           playerName={playerName}
+          playerRegion={playerRegion}
           leaderboard={leaderboard}
+          globalLeaderboard={globalLeaderboard}
+          globalLeaderboardLoading={globalLeaderboardLoading}
+          globalLeaderboardError={globalLeaderboardError}
+          globalRegionFilter={globalRegionFilter}
+          globalSort={globalSort}
           epilogueUnlocked={epilogueUnlocked}
           settings={settings}
           mpSnapshot={mpSnapshot}
           onSelectLobbySize={setLobbySize}
           onSelectMode={setMode}
           onChangePlayerName={handlePlayerNameChange}
+          onChangePlayerRegion={handlePlayerRegionChange}
+          onSelectGlobalRegionFilter={setGlobalRegionFilter}
+          onSelectGlobalSort={setGlobalSort}
+          onRefreshGlobalLeaderboard={() => refreshGlobalLeaderboard(globalRegionFilter, globalSort)}
           onClearLeaderboard={handleClearLeaderboard}
           onUpdateSettings={handleUpdateSettings}
           onStartMatch={handleStartMatch}
@@ -235,6 +325,7 @@ export default function App() {
           hud={finalHud}
           replay={finalReplay}
           leaderboardRank={lastLeaderboardRank}
+          globalRankInfo={lastGlobalRank}
           isMultiplayer={Boolean(activeMpSession)}
           isMultiplayerHost={isMpHost}
           onPlayAgain={handleRematch}

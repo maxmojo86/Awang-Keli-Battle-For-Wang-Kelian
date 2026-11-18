@@ -14,6 +14,8 @@ import {
   WORLD_SIZE,
 } from './arena';
 import { getEvolutionForm, getMilestoneTier } from '../data/abilities';
+import { getEmoteSpec } from '../data/emotes';
+import { AmbientHazardParticles } from './ambientParticles';
 import { ArenaTextureSet, createArenaTextureSet } from './arenaTextures';
 import {
   angleToFacingIndex,
@@ -24,6 +26,8 @@ import {
 } from './sprites';
 import {
   CarcassEntity,
+  DamageImpulse,
+  DeathCamState,
   KeliEntity,
   PickupItem,
   PickupKind,
@@ -40,8 +44,10 @@ export interface RenderableSimulation {
   zone: ZoneState;
   weather: WeatherState;
   cameraShake: number;
+  damageImpulse?: DamageImpulse | null;
   getPlayer: () => KeliEntity;
   getSpectateTarget: () => KeliEntity | null;
+  getDeathCam?: () => DeathCamState | null;
 }
 
 // Pre-allocated math helpers (zero GC in render loop)
@@ -50,6 +56,10 @@ const _ndc = new THREE.Vector2();
 const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _hitVec = new THREE.Vector3();
 const _camTarget = new THREE.Vector3();
+const _camDesiredPos = new THREE.Vector3();
+const _camDesiredLook = new THREE.Vector3();
+const _deathCamPos = new THREE.Vector3();
+const _deathCamLook = new THREE.Vector3();
 const _dummy = new THREE.Object3D();
 const _skyClear = new THREE.Color(0x162b35);
 const _skyRain = new THREE.Color(0x10222c);
@@ -135,6 +145,7 @@ export class ArenaScene3D {
     speedX: number;
     speedZ: number;
   }> = [];
+  private ambientParticles!: AmbientHazardParticles;
 
   private sharedQuadGeo = new THREE.PlaneGeometry(1, 1);
   private sharedRingGeo = new THREE.RingGeometry(0.76, 1.0, 32);
@@ -144,12 +155,20 @@ export class ArenaScene3D {
   private frameId = 0;
   private disposed = false;
   private clock = new THREE.Clock();
+  private visualElapsed = 0;
   private reducedMotion = false;
   private onContextLost?: () => void;
 
   // Elevated Ragnarok Online-inspired 2.5D camera
   private camOffset = new THREE.Vector3(0, 33, 33);
   private currentCamFocus = new THREE.Vector3(0, 0, 0);
+  private currentCamPos = new THREE.Vector3(0, 33, 33);
+  private currentCamLook = new THREE.Vector3(0, 0, 0);
+  private cameraInitialized = false;
+  private lastDamageImpulseSeq = 0;
+  private impulseOffsetX = 0;
+  private impulseOffsetZ = 0;
+  private shakeClock = 0;
 
   constructor(
     container: HTMLElement,
@@ -213,6 +232,10 @@ export class ArenaScene3D {
     this.buildCompositeLandmarks();
     this.buildZoneBoundary();
     this.initWeatherVisuals();
+    this.ambientParticles = new AmbientHazardParticles(
+      this.scene,
+      this.renderer.getPixelRatio()
+    );
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -970,10 +993,10 @@ export class ArenaScene3D {
     biteCone.renderOrder = 6;
     group.add(biteCone);
 
-    // RPG overhead nameplate matching Plate 2 (Lv. X Awang Keli + HP bar)
+    // RPG overhead nameplate matching Plate 2 (Lv. X Awang Keli + HP bar) + top emote callout slot
     const badgeCanvas = document.createElement('canvas');
     badgeCanvas.width = 160;
-    badgeCanvas.height = 40;
+    badgeCanvas.height = 68;
     const badgeCtx = badgeCanvas.getContext('2d')!;
     const badgeTex = new THREE.CanvasTexture(badgeCanvas);
     badgeTex.colorSpace = THREE.SRGBColorSpace;
@@ -981,7 +1004,7 @@ export class ArenaScene3D {
       this.sharedQuadGeo,
       new THREE.MeshBasicMaterial({ map: badgeTex, transparent: true, depthWrite: false })
     );
-    badgeMesh.scale.set(5.4, 1.35, 1);
+    badgeMesh.scale.set(5.4, 2.295, 1);
     badgeMesh.renderOrder = 15;
     group.add(badgeMesh);
 
@@ -1032,25 +1055,68 @@ export class ArenaScene3D {
 
   private updateActorBadge(vis: ActorVisual, k: KeliEntity, playerLevel: number) {
     const hpBucket = Math.round((k.hp / Math.max(1, k.maxHp)) * 20);
-    const key = `${k.level}-${hpBucket}-${k.isPlayer ? 1 : 0}-${k.level > playerLevel ? 'd' : 'p'}-${k.stunTimer > 0 ? 's' : ''}-${k.venomTimer > 0 ? 'v' : ''}-${k.isSpeaking ? 'm' : ''}`;
+    const emoteId = k.activeEmote ?? '';
+    const bountyPts = k.bountyReward ?? 0;
+    const key = `${k.level}-${hpBucket}-${k.isPlayer ? 1 : 0}-${k.level > playerLevel ? 'd' : 'p'}-${k.stunTimer > 0 ? 's' : ''}-${k.venomTimer > 0 ? 'v' : ''}-${k.isSpeaking ? 'm' : ''}-${emoteId}-${bountyPts}`;
     if (key === vis.lastBadgeKey) return;
     vis.lastBadgeKey = key;
 
     const ctx = vis.badgeCtx;
-    ctx.clearRect(0, 0, 160, 40);
+    ctx.clearRect(0, 0, 160, 68);
+
+    // Optional overhead Emote Signal / Rival Taunt / Bounty callout ribbon
+    const emoteSpec = getEmoteSpec(k.activeEmote);
+    if (emoteSpec) {
+      ctx.fillStyle = emoteSpec.category === 'taunt' ? 'rgba(34, 10, 14, 0.94)' : 'rgba(9, 23, 34, 0.94)';
+      ctx.fillRect(18, 2, 124, 20);
+      ctx.strokeStyle = emoteSpec.color;
+      ctx.lineWidth = 1.6;
+      ctx.strokeRect(18, 2, 124, 20);
+      // Small downward pointer notch
+      ctx.beginPath();
+      ctx.moveTo(75, 22);
+      ctx.lineTo(80, 27);
+      ctx.lineTo(85, 22);
+      ctx.closePath();
+      ctx.fillStyle = emoteSpec.color;
+      ctx.fill();
+
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = emoteSpec.color;
+      ctx.fillText(emoteSpec.overheadText, 80, 12);
+    } else if (bountyPts > 0) {
+      ctx.fillStyle = 'rgba(38, 12, 14, 0.94)';
+      ctx.fillRect(22, 3, 116, 18);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1.4;
+      ctx.strokeRect(22, 3, 116, 18);
+      ctx.font = 'bold 10.5px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fde68a';
+      ctx.fillText(`BOUNTY +${bountyPts} EVO`, 80, 12);
+    }
+
+    const yOff = 28;
 
     // Dark RPG plaque with thin brass border
     ctx.fillStyle = 'rgba(13, 21, 27, 0.88)';
-    ctx.fillRect(6, 2, 148, 20);
-    ctx.strokeStyle = k.isSpeaking
-      ? '#4ade80'
-      : k.isPlayer
-        ? '#c99c4a'
-        : k.level > playerLevel
-          ? '#b91c1c'
-          : '#3a545e';
-    ctx.lineWidth = k.isSpeaking ? 1.8 : 1.2;
-    ctx.strokeRect(6, 2, 148, 20);
+    ctx.fillRect(6, yOff + 2, 148, 20);
+    ctx.strokeStyle = emoteSpec
+      ? emoteSpec.color
+      : bountyPts > 0
+        ? '#fbbf24'
+        : k.isSpeaking
+          ? '#4ade80'
+          : k.isPlayer
+            ? '#c99c4a'
+            : k.level > playerLevel
+              ? '#b91c1c'
+              : '#3a545e';
+    ctx.lineWidth = emoteSpec || k.isSpeaking || bountyPts > 0 ? 1.8 : 1.2;
+    ctx.strokeRect(6, yOff + 2, 148, 20);
 
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
@@ -1058,22 +1124,22 @@ export class ArenaScene3D {
     ctx.fillStyle = k.isPlayer ? '#f3d285' : k.level > playerLevel ? '#fca5a5' : '#e2e8f0';
     const baseLabel = k.isPlayer ? `Lv.${k.level} Awang Keli` : `Lv.${k.level} ${k.name.slice(0, 9)}`;
     const label = k.isSpeaking ? `(( )) ${baseLabel}` : baseLabel;
-    ctx.fillText(label, 80, 12);
+    ctx.fillText(label, 80, yOff + 12);
 
     // HP bar
     ctx.fillStyle = '#0c1216';
-    ctx.fillRect(14, 25, 132, 6);
+    ctx.fillRect(14, yOff + 25, 132, 6);
     const pct = Math.max(0, Math.min(1, k.hp / Math.max(1, k.maxHp)));
     ctx.fillStyle = k.isPlayer ? '#38bdf8' : k.level > playerLevel ? '#ef4444' : '#34d399';
-    ctx.fillRect(14, 25, Math.round(132 * pct), 6);
+    ctx.fillRect(14, yOff + 25, Math.round(132 * pct), 6);
 
     if (k.venomTimer > 0) {
       ctx.fillStyle = '#4ade80';
-      ctx.fillRect(14, 33, 56, 3);
+      ctx.fillRect(14, yOff + 33, 56, 3);
     }
     if (k.stunTimer > 0) {
       ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(90, 33, 56, 3);
+      ctx.fillRect(90, yOff + 33, 56, 3);
     }
 
     vis.badgeTex.needsUpdate = true;
@@ -1401,7 +1467,16 @@ export class ArenaScene3D {
   public render(sim: RenderableSimulation) {
     if (this.disposed) return;
     const dt = Math.min(0.05, this.clock.getDelta());
-    const elapsed = this.clock.elapsedTime;
+    const player = sim.getPlayer();
+    const deathCam = !player.alive ? sim.getDeathCam?.() ?? null : null;
+    const deathCamActive = Boolean(deathCam && deathCam.active && deathCam.remaining > 0);
+
+    // Slow visual pacing during the 3-second Death Cam transition
+    const visualScale = deathCamActive ? (this.reducedMotion ? 0.5 : 0.28) : 1.0;
+    const visualDt = dt * visualScale;
+    this.visualElapsed += visualDt;
+    const elapsed = this.visualElapsed;
+
     this.waterUniforms.uTime.value = elapsed;
     if (!this.reducedMotion) {
       this.arenaTextures.hazardRapids.offset.x = -((elapsed * 0.75) % 1);
@@ -1435,31 +1510,155 @@ export class ArenaScene3D {
       this.paperBoatGroup.rotation.z = Math.sin(elapsed * 1.6) * 0.06;
     }
 
-    const player = sim.getPlayer();
-    const focus = player.alive ? player : sim.getSpectateTarget() ?? player;
+    const killerEntity = deathCamActive
+      ? sim.kelis.find((k) => k.alive && k.id === deathCam!.killerId) ?? null
+      : null;
+    const focus = player.alive
+      ? player
+      : killerEntity ?? sim.getSpectateTarget() ?? player;
+
     const targetCamX = simTo3D(focus.x);
     const targetCamZ = simTo3D(focus.z);
-
     const zoomScale = 1 + (focus.level / 100) * 0.25;
     _camTarget.set(targetCamX, 0, targetCamZ);
-    const dampFactor = 1 - Math.exp(-8 * dt);
-    this.currentCamFocus.lerp(_camTarget, dampFactor);
 
-    const shakeAmt = this.reducedMotion ? 0 : sim.cameraShake * 0.9;
-    const shakeX = shakeAmt > 0.01 ? (Math.random() - 0.5) * shakeAmt : 0;
-    const shakeZ = shakeAmt > 0.01 ? (Math.random() - 0.5) * shakeAmt : 0;
+    if (!this.cameraInitialized) {
+      this.currentCamFocus.copy(_camTarget);
+      this.currentCamLook.copy(_camTarget);
+      this.currentCamPos.set(
+        _camTarget.x + this.camOffset.x * zoomScale,
+        this.camOffset.y * zoomScale,
+        _camTarget.z + this.camOffset.z * zoomScale
+      );
+      this.cameraInitialized = true;
+    } else {
+      const dampFactor = 1 - Math.exp(-8 * dt);
+      this.currentCamFocus.lerp(_camTarget, dampFactor);
+    }
+
+    _camDesiredLook.copy(this.currentCamFocus);
+    _camDesiredPos.set(
+      this.currentCamFocus.x + this.camOffset.x * zoomScale,
+      this.camOffset.y * zoomScale,
+      this.currentCamFocus.z + this.camOffset.z * zoomScale
+    );
+
+    if (deathCamActive && deathCam) {
+      const dur = Math.max(0.01, deathCam.duration);
+      const progress = Math.max(0, Math.min(1, 1 - deathCam.remaining / dur));
+
+      // Smooth ramp-in (0..0.16), hold rival perspective (0.16..0.78), smooth handoff to spectator cam (0.78..1.0)
+      let cinematicBlend = 1;
+      if (progress < 0.16) {
+        const u = progress / 0.16;
+        cinematicBlend = u * u * (3 - 2 * u);
+      } else if (progress > 0.78) {
+        const u = Math.min(1, (progress - 0.78) / 0.22);
+        cinematicBlend = 1 - u * u * (3 - 2 * u);
+      }
+      if (this.reducedMotion) {
+        cinematicBlend *= 0.55;
+      }
+
+      const rivalX = killerEntity ? simTo3D(killerEntity.x) : simTo3D(deathCam.deathX);
+      const rivalZ = killerEntity ? simTo3D(killerEntity.z) : simTo3D(deathCam.deathZ);
+      const rivalAngle = killerEntity ? killerEntity.facingAngle : focus.facingAngle;
+      const fwdX = Math.cos(rivalAngle);
+      const fwdZ = Math.sin(rivalAngle);
+      const rightX = -fwdZ;
+      const rightZ = fwdX;
+
+      const backDist = 14.5 + zoomScale * 2.8;
+      const shoulderOffset = this.reducedMotion ? 2.5 : 5.2;
+      const heightOffset = this.reducedMotion ? 19.5 : 13.8 + zoomScale * 2.2;
+
+      _deathCamPos.set(
+        rivalX - fwdX * backDist + rightX * shoulderOffset,
+        heightOffset,
+        rivalZ - fwdZ * backDist + rightZ * shoulderOffset
+      );
+
+      // Frame the rival Keli and the fallen victim spot slightly ahead
+      const deathSpotX = simTo3D(deathCam.deathX);
+      const deathSpotZ = simTo3D(deathCam.deathZ);
+      const distToDeath = Math.hypot(deathSpotX - rivalX, deathSpotZ - rivalZ);
+      const spotWeight = distToDeath < 18 ? 0.35 : 0;
+      _deathCamLook.set(
+        rivalX * (1 - spotWeight) + deathSpotX * spotWeight + fwdX * 3.8,
+        0.55,
+        rivalZ * (1 - spotWeight) + deathSpotZ * spotWeight + fwdZ * 3.8
+      );
+
+      _camDesiredPos.lerp(_deathCamPos, cinematicBlend);
+      _camDesiredLook.lerp(_deathCamLook, cinematicBlend);
+    }
+
+    const posDamp = 1 - Math.exp((deathCamActive ? -9.5 : -14) * dt);
+    this.currentCamPos.lerp(_camDesiredPos, posDamp);
+    this.currentCamLook.lerp(_camDesiredLook, posDamp);
+
+    const impulse = sim.damageImpulse;
+    if (impulse && impulse.seq !== this.lastDamageImpulseSeq) {
+      this.lastDamageImpulseSeq = impulse.seq;
+      if (!this.reducedMotion) {
+        const kick = 1.2 + impulse.strength * 1.15;
+        this.impulseOffsetX += impulse.x * kick;
+        this.impulseOffsetZ += impulse.z * kick;
+      }
+    }
+    const impulseDecay = Math.exp(-15 * dt);
+    this.impulseOffsetX *= impulseDecay;
+    this.impulseOffsetZ *= impulseDecay;
+
+    let shakeX = 0;
+    let shakeY = 0;
+    let shakeZ = 0;
+    let shakeRoll = 0;
+    if (!this.reducedMotion) {
+      this.shakeClock += dt;
+      const trauma = Math.min(1, Math.max(0, sim.cameraShake));
+      const traumaSq = trauma * trauma;
+      if (traumaSq > 0.002 || Math.abs(this.impulseOffsetX) > 0.01 || Math.abs(this.impulseOffsetZ) > 0.01) {
+        const t = this.shakeClock;
+        shakeX =
+          this.impulseOffsetX +
+          (Math.sin(t * 53) * 0.65 + (Math.random() - 0.5) * 0.7) * traumaSq * 2.15;
+        shakeY = (Math.cos(t * 61) * 0.55 + (Math.random() - 0.5) * 0.5) * traumaSq * 1.15;
+        shakeZ =
+          this.impulseOffsetZ +
+          (Math.sin(t * 47 + 1.4) * 0.65 + (Math.random() - 0.5) * 0.7) * traumaSq * 2.15;
+        shakeRoll = Math.sin(t * 43) * traumaSq * 0.022;
+      }
+    } else {
+      this.impulseOffsetX = 0;
+      this.impulseOffsetZ = 0;
+    }
 
     this.camera.position.set(
-      this.currentCamFocus.x + this.camOffset.x * zoomScale + shakeX,
-      this.camOffset.y * zoomScale,
-      this.currentCamFocus.z + this.camOffset.z * zoomScale + shakeZ
+      this.currentCamPos.x + shakeX,
+      this.currentCamPos.y + shakeY,
+      this.currentCamPos.z + shakeZ
     );
-    this.camera.lookAt(this.currentCamFocus.x, 0, this.currentCamFocus.z);
+    this.camera.lookAt(
+      this.currentCamLook.x + shakeX * 0.42,
+      this.currentCamLook.y + shakeY * 0.35,
+      this.currentCamLook.z + shakeZ * 0.42
+    );
+    if (shakeRoll !== 0) {
+      this.camera.rotateZ(shakeRoll);
+    }
 
-    this.keyLight.position.set(this.currentCamFocus.x + 35, 65, this.currentCamFocus.z + 25);
-    this.keyLight.target.position.copy(this.currentCamFocus);
+    this.keyLight.position.set(this.currentCamLook.x + 35, 65, this.currentCamLook.z + 25);
+    this.keyLight.target.position.copy(this.currentCamLook);
 
-    this.updateWeatherVisuals(sim.weather, dt, elapsed);
+    this.updateWeatherVisuals(sim.weather, visualDt, elapsed);
+    this.ambientParticles.update(
+      visualDt,
+      this.reducedMotion,
+      sim.weather,
+      (this.scene.fog as THREE.FogExp2).density,
+      this.renderer.getPixelRatio()
+    );
 
     this.zoneRingMesh.position.x = simTo3D(sim.zone.centerX);
     this.zoneRingMesh.position.z = simTo3D(sim.zone.centerZ);
@@ -1517,13 +1716,13 @@ export class ArenaScene3D {
       const speed = Math.hypot(k.vx, k.vz);
       const isMoving = speed > 10 && k.stunTimer <= 0;
       const moveTarget = isMoving ? Math.min(1, speed / 95) : 0;
-      vis.moveBlend += (moveTarget - vis.moveBlend) * (1 - Math.exp(-10 * dt));
-      vis.idleTime += dt * motionScale;
+      vis.moveBlend += (moveTarget - vis.moveBlend) * (1 - Math.exp(-10 * visualDt));
+      vis.idleTime += visualDt * motionScale;
 
       const speedRatio = Math.min(1.3, speed / 120);
       const cycleFreq =
         form === 1 ? 6.5 + speedRatio * 5.2 : 5.6 + speedRatio * 5.0;
-      vis.animPhase += dt * cycleFreq * (0.25 + vis.moveBlend * 0.75) * motionScale;
+      vis.animPhase += visualDt * cycleFreq * (0.25 + vis.moveBlend * 0.75) * motionScale;
 
       const moveW = vis.moveBlend;
       const idleW = 1 - moveW;
@@ -1676,7 +1875,7 @@ export class ArenaScene3D {
       vis.rigGroup.quaternion.copy(this.camera.quaternion);
       vis.badgeMesh.quaternion.copy(this.camera.quaternion);
       const badgeFactor = tier >= 80 ? 1.05 : tier >= 40 ? 0.88 : 0.72;
-      vis.badgeMesh.position.y = size3D * badgeFactor;
+      vis.badgeMesh.position.y = size3D * badgeFactor + 0.45;
 
       const elev = getElevationAt(k.x, k.z);
       const groundY = k.isOnShore ? Math.max(0.08, elev * 2.2) : -0.15;
@@ -1715,14 +1914,21 @@ export class ArenaScene3D {
         ringMat.color.setHex(0x4ade80);
         ringMat.opacity = 0.78;
       } else if (!player.alive && k.id === focus.id) {
-        // Warm gold spectator focus rune ring
+        // Crimson rival focus rune during 3s Death Cam; warm gold once in normal Spectator Mode
+        const isKillerCam = Boolean(deathCamActive && deathCam && k.id === deathCam.killerId);
         vis.runeMesh.visible = true;
-        const runeDiam = size3D * 1.14;
+        const runeDiam = size3D * (isKillerCam ? 1.24 : 1.14);
         vis.runeMesh.scale.set(runeDiam, runeDiam, 1);
-        vis.runeMesh.rotation.z = this.reducedMotion ? 0 : elapsed * 0.25;
-        runeMat.color.setHex(0xfbbf24);
-        runeMat.opacity = 0.85;
+        vis.runeMesh.rotation.z = this.reducedMotion ? 0 : elapsed * (isKillerCam ? 0.55 : 0.25);
+        runeMat.color.setHex(isKillerCam ? 0xf87171 : 0xfbbf24);
+        runeMat.opacity = isKillerCam ? 0.94 : 0.85;
         ringMat.opacity = 0;
+      } else if ((k.bountyReward ?? 0) > 0) {
+        vis.runeMesh.visible = false;
+        const pulse = this.reducedMotion ? 1.0 : 1.0 + Math.sin(elapsed * 6 + k.x) * 0.08;
+        vis.ringMesh.scale.setScalar(size3D * 0.56 * pulse);
+        ringMat.color.setHex(0xf59e0b);
+        ringMat.opacity = 0.62;
       } else if (!k.isOnShore) {
         vis.runeMesh.visible = false;
         ringMat.color.setHex(0x5eead4);
@@ -1946,6 +2152,7 @@ export class ArenaScene3D {
 
     this.rainLines?.geometry?.dispose();
     (this.rainLines?.material as THREE.Material | undefined)?.dispose();
+    this.ambientParticles?.dispose();
 
     this.scene.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) {

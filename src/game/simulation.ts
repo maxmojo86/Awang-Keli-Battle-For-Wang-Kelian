@@ -2,6 +2,7 @@ import {
   EVOLUTION_MILESTONES,
   getEvolutionForm,
 } from '../data/abilities';
+import { EmoteId, getEmoteSpec, VALID_EMOTE_IDS } from '../data/emotes';
 import {
   ARENA_SCALE,
   ECHO_SONAR_RADIUS,
@@ -27,7 +28,11 @@ import {
 } from './multiplayerTypes';
 import {
   AbilityId,
+  BountyTarget,
   CarcassEntity,
+  DamageHitEvent,
+  DamageImpulse,
+  DeathCamState,
   FloatingCallout,
   HudSnapshot,
   KeliEntity,
@@ -80,6 +85,14 @@ export interface HumanEntrant {
 export interface SimulationOptions {
   humanEntrants?: HumanEntrant[];
   emitLocalSound?: boolean;
+  isMultiplayerMatch?: boolean;
+}
+
+export function computeBountyReward(rivalsConsumed: number): number {
+  if (rivalsConsumed < 2) return 0;
+  if (rivalsConsumed === 2) return 5;
+  if (rivalsConsumed === 3) return 8;
+  return 12;
 }
 
 interface PlayerMetaState {
@@ -89,9 +102,12 @@ interface PlayerMetaState {
   finalLevel: number;
   survivalTime: number;
   spectateTargetId: string | null;
+  deathCam: DeathCamState | null;
   recentBanner: { title: string; subtitle: string; key: number } | null;
   bannerTimer: number;
   cameraShake: number;
+  damageImpulse: DamageImpulse | null;
+  recentDamageHits: DamageHitEvent[];
   soundCues: SoundCue[];
   pendingSfx: ClientSfxEvent[];
 }
@@ -104,6 +120,15 @@ export class GameSimulation {
   public callouts: FloatingCallout[] = [];
   public ledger: MassLedgerEntry[] = [];
   public soundCues: SoundCue[] = [];
+  private recentEmotes: Array<{
+    id: string;
+    senderId: string;
+    senderName: string;
+    emoteId: EmoteId;
+    x: number;
+    z: number;
+    time: number;
+  }> = [];
 
   public mode: MatchMode;
   public lobbySize: LobbySize;
@@ -112,6 +137,7 @@ export class GameSimulation {
   private humanIds = new Set<string>();
   private primaryPlayerId: string;
   private emitLocalSound: boolean;
+  private isMultiplayerMatch: boolean;
 
   public matchTime = 0;
   public zone: ZoneState;
@@ -130,6 +156,7 @@ export class GameSimulation {
   public playerFinalLevel = 1;
   public playerSurvivalTime = 0;
   public spectateTargetId: string | null = null;
+  public deathCam: DeathCamState | null = null;
 
   public recentBanner: { title: string; subtitle: string; key: number } | null = null;
   private bannerTimer = 0;
@@ -137,6 +164,8 @@ export class GameSimulation {
   private idSeq = 1;
 
   public cameraShake = 0;
+  public damageImpulse: DamageImpulse | null = null;
+  private recentDamageHits: DamageHitEvent[] = [];
   private inputsById = new Map<string, PlayerInputState>();
   private playerMetaById = new Map<string, PlayerMetaState>();
   private prevPlayerX = 0;
@@ -152,6 +181,8 @@ export class GameSimulation {
     this.mode = mode;
     this.playerName = playerName.trim() || 'Awang (You)';
     this.emitLocalSound = options.emitLocalSound ?? true;
+    this.isMultiplayerMatch =
+      options.isMultiplayerMatch ?? (Boolean(options.humanEntrants && options.humanEntrants.length > 1));
 
     const entrants =
       options.humanEntrants && options.humanEntrants.length > 0
@@ -178,9 +209,12 @@ export class GameSimulation {
         finalLevel: 1,
         survivalTime: 0,
         spectateTargetId: null,
+        deathCam: null,
         recentBanner: null,
         bannerTimer: 0,
         cameraShake: 0,
+        damageImpulse: null,
+        recentDamageHits: [],
         soundCues: [],
         pendingSfx: [],
       });
@@ -268,6 +302,7 @@ export class GameSimulation {
       dewTimer: 0,
       stormFinTimer: 0,
       thunderRoeTimer: 0,
+      evoBoostTimer: 0,
       veilTimer: 0,
       dashTimer: 0,
       dashDirX: 0,
@@ -289,6 +324,8 @@ export class GameSimulation {
         maelstrom: 0,
       },
       kills: 0,
+      rivalsConsumed: 0,
+      bountyReward: 0,
       damageDealt: 0,
       lastAttackerId: null,
       lastAttackerName: null,
@@ -299,6 +336,9 @@ export class GameSimulation {
       aiTargetId: null,
       aiAggression: 0.35 + Math.random() * 0.55,
       aiRetreatingFromShore: false,
+      activeEmote: null,
+      emoteTimer: 0,
+      emoteCooldown: 0,
     };
   }
 
@@ -492,6 +532,30 @@ export class GameSimulation {
     this.spectateLeaderFor(this.primaryPlayerId);
   }
 
+  public getDeathCam(playerId = this.primaryPlayerId): DeathCamState | null {
+    if (this.status !== 'playing') return null;
+    const p = this.getPlayer(playerId);
+    if (!p || p.alive) return null;
+    const meta = this.playerMetaById.get(playerId);
+    const dc = meta ? meta.deathCam : this.deathCam;
+    if (!dc || !dc.active || dc.remaining <= 0) return null;
+    return dc;
+  }
+
+  public skipDeathCamFor(playerId = this.primaryPlayerId) {
+    const meta = this.playerMetaById.get(playerId);
+    if (meta) {
+      meta.deathCam = null;
+    }
+    if (playerId === this.primaryPlayerId) {
+      this.deathCam = null;
+    }
+  }
+
+  public skipDeathCam() {
+    this.skipDeathCamFor(this.primaryPlayerId);
+  }
+
   public setInputForPlayer(playerId: string, input: Partial<PlayerInputState>) {
     const existing = this.inputsById.get(playerId);
     if (existing) {
@@ -531,6 +595,61 @@ export class GameSimulation {
 
   public triggerPlayerAbility(ability: AbilityId) {
     this.triggerAbilityForPlayer(this.primaryPlayerId, ability);
+  }
+
+  public triggerEmoteForPlayer(playerId: string, emoteId: EmoteId): boolean {
+    if (this.status !== 'playing' || !VALID_EMOTE_IDS.has(emoteId)) return false;
+    const k = this.kelis.find((e) => e.id === playerId);
+    if (!k || !k.alive || (k.emoteCooldown ?? 0) > 0) return false;
+    const spec = getEmoteSpec(emoteId);
+    if (!spec) return false;
+
+    k.activeEmote = emoteId;
+    k.emoteTimer = 2.8;
+    k.emoteCooldown = 1.1;
+
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: 'sonar_ring',
+      x: k.x,
+      z: k.z,
+      angle: 0,
+      radius: 92,
+      duration: 0.55,
+      elapsed: 0,
+      ownerId: k.id,
+      color: spec.ringColor,
+    });
+
+    this.recentEmotes.unshift({
+      id: this.nextId('emo'),
+      senderId: k.id,
+      senderName: k.name,
+      emoteId,
+      x: k.x,
+      z: k.z,
+      time: this.matchTime,
+    });
+    if (this.recentEmotes.length > 6) this.recentEmotes.length = 6;
+
+    this.addSoundCue(
+      `${k.name} ${spec.calloutText}`,
+      { x: k.x, z: k.z },
+      spec.category === 'taunt' ? 'warning' : 'info'
+    );
+
+    const sfxKind = spec.category === 'taunt' ? 'emote_taunt' : 'emote_signal';
+    for (const [pid] of this.playerMetaById.entries()) {
+      const listener = this.getPlayer(pid);
+      if (pid === k.id || (listener && Math.hypot(listener.x - k.x, listener.z - k.z) <= 950)) {
+        this.emitSfxFor(pid, sfxKind);
+      }
+    }
+    return true;
+  }
+
+  public triggerPlayerEmote(emoteId: EmoteId): boolean {
+    return this.triggerEmoteForPlayer(this.primaryPlayerId, emoteId);
   }
 
   /**
@@ -642,6 +761,24 @@ export class GameSimulation {
       case 'weather_fog':
         soundEngine.playWeatherCue('basin_fog');
         break;
+      case 'emote_signal':
+        soundEngine.playEmoteCue(false);
+        break;
+      case 'emote_taunt':
+        soundEngine.playEmoteCue(true);
+        break;
+      case 'damage_hit':
+        soundEngine.playDamageHit(false);
+        break;
+      case 'damage_hit_heavy':
+        soundEngine.playDamageHit(true);
+        break;
+      case 'bounty_marked':
+        soundEngine.playBountyCue(false);
+        break;
+      case 'bounty_claimed':
+        soundEngine.playBountyCue(true);
+        break;
       case 'whistle':
         soundEngine.playShiftWhistle();
         break;
@@ -728,9 +865,10 @@ export class GameSimulation {
     });
   }
 
-  public step(rawDt: number) {
+  public step(rawDt: number, realDt = rawDt) {
     if (this.status !== 'playing') return;
-    const dt = Math.min(0.05, Math.max(0.001, rawDt));
+    const dt = Math.min(0.05, Math.max(0.0005, rawDt));
+    const wallDt = Math.min(0.05, Math.max(0.0005, realDt));
     this.matchTime += dt;
 
     if (this.bannerTimer > 0) {
@@ -740,6 +878,12 @@ export class GameSimulation {
     if (this.cameraShake > 0) {
       this.cameraShake = Math.max(0, this.cameraShake - dt * 2.5);
     }
+    if (this.deathCam && this.deathCam.active) {
+      this.deathCam.remaining = Math.max(0, this.deathCam.remaining - wallDt);
+      if (this.deathCam.remaining <= 0.0005) {
+        this.deathCam = null;
+      }
+    }
     for (const meta of this.playerMetaById.values()) {
       if (meta.bannerTimer > 0) {
         meta.bannerTimer -= dt;
@@ -747,6 +891,12 @@ export class GameSimulation {
       }
       if (meta.cameraShake > 0) {
         meta.cameraShake = Math.max(0, meta.cameraShake - dt * 2.5);
+      }
+      if (meta.deathCam && meta.deathCam.active) {
+        meta.deathCam.remaining = Math.max(0, meta.deathCam.remaining - wallDt);
+        if (meta.deathCam.remaining <= 0.0005) {
+          meta.deathCam = null;
+        }
       }
     }
 
@@ -927,10 +1077,20 @@ export class GameSimulation {
     }
     if (k.stormFinTimer > 0) k.stormFinTimer = Math.max(0, k.stormFinTimer - dt);
     if (k.thunderRoeTimer > 0) k.thunderRoeTimer = Math.max(0, k.thunderRoeTimer - dt);
+    if (k.evoBoostTimer > 0) k.evoBoostTimer = Math.max(0, k.evoBoostTimer - dt);
     if (k.veilTimer > 0) k.veilTimer = Math.max(0, k.veilTimer - dt);
     if (k.dashTimer > 0) k.dashTimer = Math.max(0, k.dashTimer - dt);
     if (k.sonarTimer > 0) k.sonarTimer = Math.max(0, k.sonarTimer - dt);
     if (k.hitFlashTimer > 0) k.hitFlashTimer = Math.max(0, k.hitFlashTimer - dt);
+    if ((k.emoteCooldown ?? 0) > 0) {
+      k.emoteCooldown = Math.max(0, (k.emoteCooldown ?? 0) - dt);
+    }
+    if ((k.emoteTimer ?? 0) > 0) {
+      k.emoteTimer = Math.max(0, (k.emoteTimer ?? 0) - dt);
+      if (k.emoteTimer <= 0) {
+        k.activeEmote = null;
+      }
+    }
 
     const cdScale = k.stormFinTimer > 0 ? 1.55 : 1.0;
     k.cooldowns.dash = Math.max(0, k.cooldowns.dash - dt * cdScale);
@@ -1030,6 +1190,7 @@ export class GameSimulation {
     if (k.frenzyTimer > 0) base *= 1.18;
     if (k.surgeTimer > 0) base *= 1.28;
     if (k.stormFinTimer > 0) base *= 1.22;
+    if (k.evoBoostTimer > 0) base *= 1.18;
     if (k.feedingTargetId) base *= 0.28; // Slowed while committing to a feed
     return base;
   }
@@ -1299,7 +1460,8 @@ export class GameSimulation {
     const dmg =
       (19 + attacker.level * 1.15) *
       (attacker.predatorTimer > 0 ? 1.38 : 1.0) *
-      (attacker.thunderRoeTimer > 0 ? 1.32 : 1.0);
+      (attacker.thunderRoeTimer > 0 ? 1.32 : 1.0) *
+      (attacker.evoBoostTimer > 0 ? 1.15 : 1.0);
 
     this.effects.push({
       id: this.nextId('fx'),
@@ -1368,17 +1530,75 @@ export class GameSimulation {
     }
 
     if (target.isPlayer || attacker?.isPlayer) {
-      if (target.isPlayer) {
+      if (target.isPlayer && attacker && attacker.id !== target.id) {
+        const dx = attacker.x - target.x;
+        const dz = attacker.z - target.z;
+        const dist = Math.hypot(dx, dz);
+        const directionAngle = dist > 0.001 ? Math.atan2(dz, dx) : target.facingAngle + Math.PI;
+        const intensity = Math.min(
+          1,
+          Math.max(0.32, finalAmount / Math.max(35, target.maxHp * 0.3))
+        );
+        const shakeAdd = 0.44 + intensity * 0.46;
+        const hitEvent: DamageHitEvent = {
+          id: this.nextId('hit'),
+          attackerId: attacker.id,
+          attackerName: attacker.name,
+          cause,
+          damage: Math.max(1, Math.round(finalAmount)),
+          directionAngle,
+          intensity,
+          timestamp: this.matchTime,
+        };
+        const impulseX = -Math.cos(directionAngle);
+        const impulseZ = -Math.sin(directionAngle);
+
         const tm = this.playerMetaById.get(target.id);
-        if (tm) tm.cameraShake = Math.min(0.6, tm.cameraShake + 0.22);
+        if (tm) {
+          tm.cameraShake = Math.min(1.0, tm.cameraShake + shakeAdd);
+          tm.recentDamageHits = tm.recentDamageHits
+            .filter((h) => this.matchTime - h.timestamp < 1.4)
+            .slice(-5);
+          tm.recentDamageHits.push(hitEvent);
+          tm.damageImpulse = {
+            x: impulseX,
+            z: impulseZ,
+            strength: intensity,
+            seq: (tm.damageImpulse?.seq ?? 0) + 1,
+          };
+        }
+
+        if (target.id === this.primaryPlayerId) {
+          this.cameraShake = Math.min(1.0, this.cameraShake + shakeAdd);
+          this.recentDamageHits = this.recentDamageHits
+            .filter((h) => this.matchTime - h.timestamp < 1.4)
+            .slice(-5);
+          this.recentDamageHits.push(hitEvent);
+          this.damageImpulse = {
+            x: impulseX,
+            z: impulseZ,
+            strength: intensity,
+            seq: (this.damageImpulse?.seq ?? 0) + 1,
+          };
+        }
+
+        this.emitSfxFor(target.id, intensity >= 0.65 ? 'damage_hit_heavy' : 'damage_hit');
+      } else if (target.isPlayer) {
+        const tm = this.playerMetaById.get(target.id);
+        if (tm) tm.cameraShake = Math.min(0.65, tm.cameraShake + 0.24);
+        if (target.id === this.primaryPlayerId) {
+          this.cameraShake = Math.min(0.65, this.cameraShake + 0.24);
+        }
       }
-      if (attacker?.isPlayer) {
+
+      if (attacker?.isPlayer && target.id !== attacker.id) {
         const am = this.playerMetaById.get(attacker.id);
-        if (am) am.cameraShake = Math.min(0.6, am.cameraShake + 0.18);
+        if (am) am.cameraShake = Math.min(0.55, am.cameraShake + 0.16);
+        if (attacker.id === this.primaryPlayerId) {
+          this.cameraShake = Math.min(0.55, this.cameraShake + 0.16);
+        }
       }
-      if (target.id === this.primaryPlayerId || attacker?.id === this.primaryPlayerId) {
-        this.cameraShake = Math.min(0.6, this.cameraShake + 0.22);
-      }
+
       this.spawnCallout(target.x, target.z, `-${Math.round(finalAmount)}`, '#f87171');
     }
 
@@ -1427,15 +1647,55 @@ export class GameSimulation {
       victim.level
     );
 
+    if (
+      this.isMultiplayerMatch &&
+      (victim.bountyReward ?? 0) > 0 &&
+      killer &&
+      killer.id !== victim.id &&
+      killer.alive
+    ) {
+      const bountyBonus = victim.bountyReward!;
+      victim.bountyReward = 0;
+      this.grantFragments(killer, bountyBonus, `${victim.name} (Rival Bounty)`);
+      this.recordLedger('kill', killer.name, `${victim.name} Bounty`, bountyBonus);
+      this.spawnCallout(killer.x, killer.z, `+${bountyBonus} BOUNTY!`, '#fbbf24');
+      this.pushBanner(
+        'Rival Bounty Claimed!',
+        `${killer.name} defeated ${victim.name} (+${bountyBonus} Evolution Pts)`
+      );
+      this.addSoundCue(
+        `${killer.name} claimed +${bountyBonus} Bounty on ${victim.name}`,
+        { x: killer.x, z: killer.z },
+        'info'
+      );
+      this.emitSfxGlobal('bounty_claimed');
+    }
+
     if (this.humanIds.has(victim.id)) {
       const killedByName = killer ? killer.name : causeLabel;
       const meta = this.playerMetaById.get(victim.id);
+      const deathCamData: DeathCamState | null =
+        killer && killer.id !== victim.id
+          ? {
+              active: true,
+              killerId: killer.id,
+              killerName: killer.name,
+              killerLevel: killer.level,
+              causeLabel,
+              deathX: victim.x,
+              deathZ: victim.z,
+              remaining: 3.0,
+              duration: 3.0,
+            }
+          : null;
+
       if (meta) {
         meta.killedBy = killedByName;
         meta.deathCause = causeLabel;
         meta.finalLevel = victim.level;
         meta.survivalTime = this.matchTime;
         meta.spectateTargetId = killer && killer.alive ? killer.id : null;
+        meta.deathCam = deathCamData ? { ...deathCamData } : null;
       }
       if (victim.id === this.primaryPlayerId) {
         this.killedBy = killedByName;
@@ -1443,13 +1703,16 @@ export class GameSimulation {
         this.playerFinalLevel = victim.level;
         this.playerSurvivalTime = this.matchTime;
         this.spectateTargetId = killer && killer.alive ? killer.id : null;
+        this.deathCam = deathCamData ? { ...deathCamData } : null;
       }
       this.emitSfxFor(victim.id, 'death');
       this.getSpectateTarget(victim.id);
       this.pushBannerFor(
         victim.id,
         `Eliminated by ${killedByName}`,
-        'Spectating live match until Keli King is crowned'
+        deathCamData
+          ? 'Death Cam · Tracking finishing blow before Spectator Mode'
+          : 'Spectating live match until Keli King is crowned'
       );
     }
 
@@ -1480,15 +1743,46 @@ export class GameSimulation {
 
     if (carc.sourceId && this.humanIds.has(carc.sourceId)) {
       const deadMeta = this.playerMetaById.get(carc.sourceId);
-      if (deadMeta) deadMeta.massTransferredTo = eater.name;
+      if (deadMeta) {
+        deadMeta.massTransferredTo = eater.name;
+        if (deadMeta.deathCam && deadMeta.deathCam.killerId === eater.id) {
+          deadMeta.deathCam.killerLevel = eater.level;
+        }
+      }
       if (carc.sourceId === this.primaryPlayerId) {
         this.massTransferredTo = eater.name;
+        if (this.deathCam && this.deathCam.killerId === eater.id) {
+          this.deathCam.killerLevel = eater.level;
+        }
       }
     }
 
     if (eater.isPlayer) {
       this.emitSfxFor(eater.id, 'feed');
       this.spawnCallout(eater.x, eater.z, `+${gained} FRAGMENTS`, '#e6b86e');
+    }
+
+    if (carc.sourceId && carc.sourceId !== eater.id) {
+      eater.rivalsConsumed = (eater.rivalsConsumed ?? 0) + 1;
+      if (this.isMultiplayerMatch) {
+        const prevReward = eater.bountyReward ?? 0;
+        const nextReward = computeBountyReward(eater.rivalsConsumed);
+        eater.bountyReward = nextReward;
+        if (nextReward > prevReward) {
+          const title =
+            prevReward === 0
+              ? `Rival Bounty: ${eater.name}`
+              : `Bounty Escalated: ${eater.name}`;
+          const subtitle = `Consumed ${eater.rivalsConsumed} rivals · +${nextReward} Evo Pts on defeat · Marked on Minimap`;
+          this.pushBanner(title, subtitle);
+          this.addSoundCue(
+            `${eater.name} marked with a +${nextReward} Rival Bounty`,
+            { x: eater.x, z: eater.z },
+            'danger'
+          );
+          this.emitSfxGlobal('bounty_marked');
+        }
+      }
     }
   }
 
@@ -1513,6 +1807,7 @@ export class GameSimulation {
         this.emitSfxFor(eater.id, 'evolution');
       }
       if (getEvolutionForm(eater.level) > prevForm) {
+        eater.evoBoostTimer = Math.max(eater.evoBoostTimer, 5.0);
         this.effects.push({
           id: this.nextId('fx'),
           type: 'evolution_burst',
@@ -2425,6 +2720,7 @@ export class GameSimulation {
         dewTimeLeft: p.dewTimer,
         stormFinTimeLeft: p.stormFinTimer,
         thunderRoeTimeLeft: p.thunderRoeTimer,
+        evoBoostTimeLeft: Math.round(p.evoBoostTimer * 100) / 100,
         veilActive: p.veilTimer > 0,
         sonarActive: focus.sonarTimer > 0,
         sonarIsHunter: focus.sonarIsHunter,
@@ -2486,6 +2782,26 @@ export class GameSimulation {
           }
         : null,
       spectatorDots,
+      deathCam: this.getDeathCam(playerId) ? { ...this.getDeathCam(playerId)! } : null,
+      bountyTargets: this.isMultiplayerMatch
+        ? aliveKelis
+            .filter((k) => (k.bountyReward ?? 0) > 0)
+            .map<BountyTarget>((k) => ({
+              id: k.id,
+              name: k.name,
+              x: k.x,
+              z: k.z,
+              level: k.level,
+              rivalsConsumed: k.rivalsConsumed ?? 0,
+              rewardPoints: k.bountyReward ?? 0,
+              isSelf: k.id === p.id,
+            }))
+            .sort((a, b) => b.rewardPoints - a.rewardPoints || b.level - a.level)
+        : [],
+      recentDamageHits: (meta ? meta.recentDamageHits : this.recentDamageHits)
+        .filter((h) => this.matchTime - h.timestamp < 1.35)
+        .map((h) => ({ ...h })),
+      recentEmotes: this.recentEmotes.filter((em) => this.matchTime - em.time < 3.8),
       matchResult: {
         status: perPlayerStatus,
         winnerName: this.winnerName,
@@ -2547,13 +2863,17 @@ export class GameSimulation {
         dewTimer: Math.round(k.dewTimer * 100) / 100,
         stormFinTimer: Math.round(k.stormFinTimer * 100) / 100,
         thunderRoeTimer: Math.round(k.thunderRoeTimer * 100) / 100,
+        evoBoostTimer: Math.round(k.evoBoostTimer * 100) / 100,
         sonarTimer: Math.round(k.sonarTimer * 100) / 100,
         sonarIsHunter: k.sonarIsHunter,
         kills: k.kills,
+        rivalsConsumed: k.rivalsConsumed ?? 0,
+        bountyReward: k.bountyReward ?? 0,
         feedingTargetId: k.feedingTargetId,
         feedingProgress: Math.round(k.feedingProgress * 100) / 100,
         feedingDuration: Math.round(k.feedingDuration * 100) / 100,
         cooldowns: { ...k.cooldowns },
+        activeEmote: k.activeEmote ?? null,
       }));
 
     return {

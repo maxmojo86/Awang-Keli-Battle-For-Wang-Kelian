@@ -1,3 +1,4 @@
+import type { EmoteId } from '../data/emotes';
 import {
   AbilityCooldowns,
   AbilityId,
@@ -106,13 +107,17 @@ export interface RemoteKeliState {
   dewTimer: number;
   stormFinTimer: number;
   thunderRoeTimer: number;
+  evoBoostTimer?: number;
   sonarTimer: number;
   sonarIsHunter: boolean;
   kills: number;
+  rivalsConsumed?: number;
+  bountyReward?: number;
   feedingTargetId: string | null;
   feedingProgress: number;
   feedingDuration: number;
   cooldowns: AbilityCooldowns;
+  activeEmote: EmoteId | null;
 }
 
 export interface ClientSfxEvent {
@@ -133,6 +138,12 @@ export interface ClientSfxEvent {
     | 'pickup_rainfed'
     | 'weather_rain'
     | 'weather_fog'
+    | 'emote_signal'
+    | 'emote_taunt'
+    | 'damage_hit'
+    | 'damage_hit_heavy'
+    | 'bounty_marked'
+    | 'bounty_claimed'
     | 'whistle';
 }
 
@@ -181,7 +192,8 @@ export type ClientMessage =
       biteHeld: boolean;
     }
   | { type: 'player:ability'; ability: AbilityId }
-  | { type: 'player:spectate'; action: 'prev' | 'next' | 'leader' }
+  | { type: 'player:emote'; emoteId: EmoteId }
+  | { type: 'player:spectate'; action: 'prev' | 'next' | 'leader' | 'skip_death_cam' }
   | { type: 'voice:state'; enabled: boolean; muted: boolean }
   | { type: 'voice:signal'; targetId: string; signal: VoiceSignalPayload }
   | { type: 'voice:speaking'; speaking: boolean }

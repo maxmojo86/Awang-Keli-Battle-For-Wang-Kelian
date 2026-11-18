@@ -1,3 +1,5 @@
+import type { EmoteId } from '../data/emotes';
+
 export type LobbySize = 5 | 10 | 20 | 25 | 50 | 100;
 export type MatchMode = 'royale' | 'tutorial';
 
@@ -116,6 +118,7 @@ export interface KeliEntity {
   dewTimer: number;
   stormFinTimer: number;
   thunderRoeTimer: number;
+  evoBoostTimer: number;
 
   // Sonar
   sonarTimer: number;
@@ -128,6 +131,8 @@ export interface KeliEntity {
 
   cooldowns: AbilityCooldowns;
   kills: number;
+  rivalsConsumed?: number;
+  bountyReward?: number;
   damageDealt: number;
   lastAttackerId: string | null;
   lastAttackerName: string | null;
@@ -139,6 +144,10 @@ export interface KeliEntity {
   aiTargetId: string | null;
   aiAggression: number;
   aiRetreatingFromShore: boolean;
+
+  activeEmote?: EmoteId | null;
+  emoteTimer?: number;
+  emoteCooldown?: number;
   isSpeaking?: boolean;
 }
 
@@ -240,6 +249,35 @@ export interface SoundCue {
   timestamp: number;
 }
 
+export interface DamageHitEvent {
+  id: string;
+  attackerId: string;
+  attackerName: string;
+  cause: string;
+  damage: number;
+  directionAngle: number;
+  intensity: number;
+  timestamp: number;
+}
+
+export interface DamageImpulse {
+  x: number;
+  z: number;
+  strength: number;
+  seq: number;
+}
+
+export interface BountyTarget {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  level: number;
+  rivalsConsumed: number;
+  rewardPoints: number;
+  isSelf: boolean;
+}
+
 export interface HudSnapshot {
   matchTime: number;
   mode: MatchMode;
@@ -278,6 +316,7 @@ export interface HudSnapshot {
     dewTimeLeft: number;
     stormFinTimeLeft: number;
     thunderRoeTimeLeft: number;
+    evoBoostTimeLeft: number;
     sonarActive: boolean;
     sonarIsHunter: boolean;
     sonarTimeLeft: number;
@@ -337,6 +376,19 @@ export interface HudSnapshot {
     isTarget: boolean;
   }>;
 
+  deathCam: DeathCamState | null;
+  bountyTargets?: BountyTarget[];
+  recentDamageHits?: DamageHitEvent[];
+  recentEmotes?: Array<{
+    id: string;
+    senderId: string;
+    senderName: string;
+    emoteId: EmoteId;
+    x: number;
+    z: number;
+    time: number;
+  }>;
+
   matchResult: {
     status: 'playing' | 'victory' | 'defeat' | 'draw';
     winnerName: string | null;
@@ -348,6 +400,18 @@ export interface HudSnapshot {
     survivalTime: number;
     ledger: MassLedgerEntry[];
   };
+}
+
+export interface DeathCamState {
+  active: boolean;
+  killerId: string;
+  killerName: string;
+  killerLevel: number;
+  causeLabel: string;
+  deathX: number;
+  deathZ: number;
+  remaining: number;
+  duration: number;
 }
 
 export interface AccessibilitySettings {

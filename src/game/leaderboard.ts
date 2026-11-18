@@ -1,11 +1,19 @@
+import {
+  detectDefaultRegion,
+  RegionCode,
+  RegionFilter,
+  VALID_REGION_CODES,
+} from '../data/regions';
 import { HudSnapshot, LobbySize, MatchMode } from './types';
 
 export const SURVIVAL_LEADERBOARD_STORAGE_KEY = 'awang_keli_top_survival_times';
 export const PLAYER_NAME_STORAGE_KEY = 'awang_keli_player_name';
+export const PLAYER_REGION_STORAGE_KEY = 'awang_keli_player_region';
 export const MAX_LEADERBOARD_ENTRIES = 10;
 export const DEFAULT_PLAYER_NAME = 'Awang Keli';
 
 export type LeaderboardSortOrder = 'longest' | 'fastest';
+export type GlobalLeaderboardSort = 'longest' | 'fastest_king' | 'kills';
 
 export interface SurvivalLeaderboardEntry {
   id: string;
@@ -56,6 +64,33 @@ export function savePlayerName(name: string): string {
     }
   }
   return sanitized;
+}
+
+export function getSavedPlayerRegion(): RegionCode {
+  const storage = getSafeStorage();
+  if (!storage) return detectDefaultRegion();
+  try {
+    const saved = storage.getItem(PLAYER_REGION_STORAGE_KEY);
+    if (saved && VALID_REGION_CODES.has(saved as RegionCode)) {
+      return saved as RegionCode;
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return detectDefaultRegion();
+}
+
+export function savePlayerRegion(region: RegionCode): RegionCode {
+  const valid: RegionCode = VALID_REGION_CODES.has(region) ? region : detectDefaultRegion();
+  const storage = getSafeStorage();
+  if (storage) {
+    try {
+      storage.setItem(PLAYER_REGION_STORAGE_KEY, valid);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+  return valid;
 }
 
 function isValidEntry(value: unknown): value is SurvivalLeaderboardEntry {
@@ -170,4 +205,94 @@ export function formatSurvivalDuration(seconds: number): string {
   const secs = Math.floor(safe % 60);
   const tenths = Math.floor((safe * 10) % 10);
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${tenths}`;
+}
+
+export interface GlobalLeaderboardEntry {
+  id: string;
+  submissionId: string;
+  playerName: string;
+  region: RegionCode;
+  survivalTime: number;
+  finalLevel: number;
+  kills: number;
+  victory: boolean;
+  lobbySize: LobbySize;
+  mode: 'royale' | 'multiplayer';
+  achievedAt: string;
+  globalRank: number;
+  regionalRank: number;
+}
+
+export interface RegionLeaderboardSummary {
+  region: RegionCode;
+  name: string;
+  count: number;
+  kingCount: number;
+  topSurvivalTime: number | null;
+  topPlayerName: string | null;
+}
+
+export interface GlobalLeaderboardResponse {
+  entries: GlobalLeaderboardEntry[];
+  regionSummary: RegionLeaderboardSummary[];
+  totalGlobal: number;
+  totalMatching: number;
+  updatedAt: string;
+}
+
+export interface GlobalSubmissionResult {
+  entry: GlobalLeaderboardEntry;
+  globalRank: number | null;
+  regionalRank: number | null;
+  totalGlobal: number;
+  totalRegional: number;
+}
+
+export async function fetchGlobalLeaderboard(
+  region: RegionFilter = 'ALL',
+  sort: GlobalLeaderboardSort = 'longest',
+  limit = 100
+): Promise<GlobalLeaderboardResponse> {
+  const params = new URLSearchParams({
+    region,
+    sort,
+    limit: String(Math.max(1, Math.min(100, limit))),
+  });
+  const res = await fetch(`/api/leaderboard?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(`Leaderboard request failed (${res.status})`);
+  }
+  return (await res.json()) as GlobalLeaderboardResponse;
+}
+
+export async function submitGlobalSurvivalTime(
+  snap: HudSnapshot,
+  playerName: string,
+  region: RegionCode,
+  isMultiplayer: boolean,
+  submissionId: string
+): Promise<GlobalSubmissionResult | null> {
+  if (snap.mode === 'tutorial') return null;
+  const survivalTime = Math.max(0, Number(snap.matchResult.survivalTime.toFixed(2)));
+  if (survivalTime < 1) return null;
+
+  const res = await fetch('/api/leaderboard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      submissionId,
+      playerName: sanitizePlayerName(playerName || snap.player.name),
+      region,
+      survivalTime,
+      finalLevel: Math.max(1, Math.min(100, Math.round(snap.matchResult.finalLevel))),
+      kills: Math.max(0, Math.floor(snap.matchResult.kills)),
+      victory: snap.matchResult.status === 'victory',
+      lobbySize: snap.lobbySize,
+      mode: isMultiplayer ? 'multiplayer' : 'royale',
+    }),
+  });
+  if (!res.ok) {
+    return null;
+  }
+  return (await res.json()) as GlobalSubmissionResult;
 }

@@ -3,6 +3,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
+import { GlobalLeaderboardSort, GlobalLeaderboardStore } from './server/leaderboardStore';
+import { VALID_EMOTE_IDS } from './src/data/emotes';
+import { RegionCode, RegionFilter, VALID_REGION_CODES } from './src/data/regions';
 import {
   ClientMessage,
   RoomChatMessage,
@@ -278,6 +281,7 @@ function startRoomMatch(room: RoomRecord) {
   const sim = new GameSimulation(effectiveSize, 'royale', host?.name ?? humanEntrants[0].name, {
     humanEntrants,
     emitLocalSound: false,
+    isMultiplayerMatch: true,
   });
 
   room.sim = sim;
@@ -634,6 +638,15 @@ function handleMessage(client: ConnectedClient, raw: string) {
       break;
     }
 
+    case 'player:emote': {
+      if (!client.roomCode) return;
+      const room = rooms.get(client.roomCode);
+      if (!room || room.status !== 'playing' || !room.sim) return;
+      if (!VALID_EMOTE_IDS.has(msg.emoteId)) return;
+      room.sim.triggerEmoteForPlayer(client.id, msg.emoteId);
+      break;
+    }
+
     case 'player:spectate': {
       if (!client.roomCode) return;
       const room = rooms.get(client.roomCode);
@@ -641,6 +654,7 @@ function handleMessage(client: ConnectedClient, raw: string) {
       if (msg.action === 'prev') room.sim.cycleSpectateTargetFor(client.id, -1);
       else if (msg.action === 'next') room.sim.cycleSpectateTargetFor(client.id, 1);
       else if (msg.action === 'leader') room.sim.spectateLeaderFor(client.id);
+      else if (msg.action === 'skip_death_cam') room.sim.skipDeathCamFor(client.id);
       break;
     }
 
@@ -703,6 +717,7 @@ function handleMessage(client: ConnectedClient, raw: string) {
 async function bootstrap() {
   const app = express();
   app.use(express.json());
+  const leaderboardStore = new GlobalLeaderboardStore();
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, rooms: rooms.size, clients: clients.size });
@@ -710,6 +725,28 @@ async function bootstrap() {
 
   app.get('/api/rooms', (_req, res) => {
     res.json({ rooms: getRoomSummaries() });
+  });
+
+  app.get('/api/leaderboard', (req, res) => {
+    const rawRegion = String(req.query.region || 'ALL').toUpperCase();
+    const region: RegionFilter =
+      rawRegion === 'ALL' || VALID_REGION_CODES.has(rawRegion as RegionCode)
+        ? (rawRegion as RegionFilter)
+        : 'ALL';
+    const rawSort = String(req.query.sort || 'longest');
+    const sort: GlobalLeaderboardSort =
+      rawSort === 'fastest_king' || rawSort === 'kills' ? rawSort : 'longest';
+    const limit = Number(req.query.limit || 100);
+    res.json(leaderboardStore.query(region, sort, limit));
+  });
+
+  app.post('/api/leaderboard', (req, res) => {
+    const outcome = leaderboardStore.submit(req.body ?? {});
+    if (outcome.ok === false) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    res.status(201).json(outcome.result);
   });
 
   const httpServer = createServer(app);

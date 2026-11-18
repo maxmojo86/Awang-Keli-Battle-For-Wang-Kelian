@@ -1,5 +1,6 @@
 import React from 'react';
-import { BookOpen, RotateCcw, ArrowLeft, Crown } from 'lucide-react';
+import { BookOpen, RotateCcw, ArrowLeft, Crown, Globe } from 'lucide-react';
+import { RegionCode } from '../data/regions';
 import { formatSurvivalDuration } from '../game/leaderboard';
 import { MatchReplayData } from '../game/replay';
 import { HudSnapshot } from '../game/types';
@@ -9,6 +10,11 @@ interface PostMatchScreenProps {
   hud: HudSnapshot;
   replay?: MatchReplayData | null;
   leaderboardRank?: number | null;
+  globalRankInfo?: {
+    globalRank: number | null;
+    regionalRank: number | null;
+    region: RegionCode;
+  } | null;
   isMultiplayer?: boolean;
   isMultiplayerHost?: boolean;
   onPlayAgain: () => void;
@@ -26,6 +32,7 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   hud,
   replay = null,
   leaderboardRank = null,
+  globalRankInfo = null,
   isMultiplayer = false,
   isMultiplayerHost = false,
   onPlayAgain,
@@ -103,7 +110,18 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                 {isVictory && leaderboardRank !== null && (
                   <div className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#f3d285]">
                     <Crown className="w-3 h-3" />
-                    <span>Top 10 Survival #{leaderboardRank}</span>
+                    <span>Local Top 10 #{leaderboardRank}</span>
+                  </div>
+                )}
+                {globalRankInfo && (globalRankInfo.globalRank !== null || globalRankInfo.regionalRank !== null) && (
+                  <div className="mt-1 flex items-center gap-1 text-[11px] font-mono-num font-medium text-[#7dd3fc]">
+                    <Globe className="w-3 h-3 shrink-0" />
+                    <span>
+                      {globalRankInfo.globalRank !== null ? `Global #${globalRankInfo.globalRank}` : 'Unranked'}
+                      {globalRankInfo.regionalRank !== null
+                        ? ` · #${globalRankInfo.regionalRank} ${globalRankInfo.region}`
+                        : ''}
+                    </span>
                   </div>
                 )}
               </div>

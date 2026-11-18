@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Map as MapIcon, Minimize2 } from 'lucide-react';
 import {
   ECHO_SONAR_RADIUS,
   getTerrainAt,
@@ -14,6 +15,7 @@ interface MinimapProps {
   hud: HudSnapshot;
   showVoiceHorizon?: boolean;
   voicePeers?: SpatialPeerTelemetry[];
+  compact?: boolean;
 }
 
 type MapZoomMode = 'arena' | 'local';
@@ -52,16 +54,18 @@ export const Minimap: React.FC<MinimapProps> = ({
   hud,
   showVoiceHorizon = false,
   voicePeers = [],
+  compact = false,
 }) => {
   const terrainCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [zoomMode, setZoomMode] = useState<MapZoomMode>('arena');
   const [showKey, setShowKey] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 640 : true
+    typeof window !== 'undefined' ? window.innerWidth >= 768 && window.innerHeight >= 540 : true
   );
+  const [collapsed, setCollapsed] = useState<boolean>(false);
 
-  const cssSize = 180;
+  const cssSize = compact ? 98 : 180;
   const terrainCacheSize = 224;
 
   // Build static 8x arena terrain raster once into an offscreen canvas
@@ -111,6 +115,7 @@ export const Minimap: React.FC<MinimapProps> = ({
 
   // Render dynamic layers (grid, safe zone, highlighted hazards, power-up spawns, contacts, player)
   useEffect(() => {
+    if (compact && collapsed) return;
     const canvas = displayCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -480,6 +485,76 @@ export const Minimap: React.FC<MinimapProps> = ({
       }
     }
 
+    // 7b. Multiplayer Rival Bounty Targets (players who consumed multiple rivals)
+    if (hud.bountyTargets && hud.bountyTargets.length > 0) {
+      for (const bounty of hud.bountyTargets) {
+        const bx = toPxX(bounty.x);
+        const by = toPxY(bounty.z);
+        const r = zoomMode === 'local' ? 8.2 : 6.4;
+
+        ctx.save();
+        ctx.translate(bx, by);
+
+        // Outer amber-crimson halo
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.24)';
+        ctx.beginPath();
+        ctx.arc(0, 0, r + 2.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Crosshair ring + 4 cardinal ticks
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1.3;
+        const tickIn = r * 0.58;
+        const tickOut = r + 2.6;
+        ctx.beginPath();
+        ctx.moveTo(-tickOut, 0);
+        ctx.lineTo(-tickIn, 0);
+        ctx.moveTo(tickIn, 0);
+        ctx.lineTo(tickOut, 0);
+        ctx.moveTo(0, -tickOut);
+        ctx.lineTo(0, -tickIn);
+        ctx.moveTo(0, tickIn);
+        ctx.lineTo(0, tickOut);
+        ctx.stroke();
+
+        if (!bounty.isSelf) {
+          // Diamond target core
+          const cr = zoomMode === 'local' ? 3.9 : 3.2;
+          ctx.fillStyle = '#fbbf24';
+          ctx.strokeStyle = '#7f1d1d';
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.moveTo(0, -cr);
+          ctx.lineTo(cr, 0);
+          ctx.lineTo(0, cr);
+          ctx.lineTo(-cr, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        if (!compact || zoomMode === 'local') {
+          const tag = `+${bounty.rewardPoints}`;
+          ctx.font = 'bold 8.5px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          const tw = ctx.measureText(tag).width + 4;
+          ctx.fillStyle = 'rgba(28, 10, 12, 0.88)';
+          ctx.fillRect(-tw * 0.5, -r - 12, tw, 10);
+          ctx.fillStyle = '#fde68a';
+          ctx.fillText(tag, 0, -r - 2.5);
+        }
+
+        ctx.restore();
+      }
+    }
+
     // 8. Player Current Position Beacon + Heading Cone + Directional Chevron
     const px = toPxX(hud.player.x);
     const py = toPxY(hud.player.z);
@@ -543,7 +618,25 @@ export const Minimap: React.FC<MinimapProps> = ({
         ctx.restore();
       }
     }
-  }, [hud, zoomMode, showVoiceHorizon, voicePeers]);
+  }, [hud, zoomMode, showVoiceHorizon, voicePeers, cssSize, compact, collapsed]);
+
+  if (compact && collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setCollapsed(false);
+        }}
+        title="Expand Basin Minimap"
+        aria-label="Expand Basin Minimap"
+        className="compendium-plaque-subtle flex items-center gap-1 px-2 py-1.5 rounded-[2px] text-[10px] font-mono-num font-semibold text-[#f3d285] hover:border-[#c99c4a] transition-colors"
+      >
+        <MapIcon className="w-3.5 h-3.5 shrink-0" />
+        <span>Map</span>
+      </button>
+    );
+  }
 
   return (
     <div
@@ -551,11 +644,17 @@ export const Minimap: React.FC<MinimapProps> = ({
       style={{ width: cssSize + 4 }}
     >
       {/* Ornate Compendium Ribbon Header */}
-      <div className="compendium-ribbon flex items-center justify-between gap-1 px-2 py-1 text-[10px] font-semibold text-[#f7f0dc]">
-        <span className="inline-flex items-center gap-1 truncate">
-          <span className="text-[8px] text-[#c99c4a]" aria-hidden="true">◆</span>
+      <div className={`compendium-ribbon flex items-center justify-between gap-1 ${compact ? 'px-1.5 py-0.5 text-[9px]' : 'px-2 py-1 text-[10px]'} font-semibold text-[#f7f0dc]`}>
+        <span className="inline-flex items-center gap-1 min-w-0 truncate">
+          {!compact && <span className="text-[8px] text-[#c99c4a]" aria-hidden="true">◆</span>}
           <span className="truncate font-display tracking-wide">
-            {hud.spectating?.active ? 'Spectator Map' : hud.player.zoneName}
+            {compact
+              ? zoomMode === 'arena'
+                ? '8×'
+                : '2.5×'
+              : hud.spectating?.active
+                ? 'Spectator Map'
+                : hud.player.zoneName}
           </span>
         </span>
         <div className="flex items-center gap-1 shrink-0">
@@ -572,29 +671,44 @@ export const Minimap: React.FC<MinimapProps> = ({
             }
             className="px-1.5 py-0.5 rounded-[2px] bg-[#0a1218] border border-[#6e5528] text-[9px] font-mono-num text-[#f3d285] hover:border-[#f3d285] transition-colors"
           >
-            {zoomMode === 'arena' ? '8×' : '2.5×'}
+            {compact ? (zoomMode === 'arena' ? '2.5×' : '8×') : zoomMode === 'arena' ? '8×' : '2.5×'}
           </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowKey((prev) => !prev);
-            }}
-            title="Toggle Hazard Zones & Power-Up Spawn Key"
-            className={`px-1.5 py-0.5 rounded-[2px] border text-[9px] transition-colors ${
-              showKey
-                ? 'bg-[#c99c4a] border-[#f3d285] text-[#091117] font-semibold'
-                : 'bg-[#0a1218] border-[#6e5528] text-[#b8c4bf] hover:border-[#c99c4a]'
-            }`}
-          >
-            Key
-          </button>
+          {compact ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setCollapsed(true);
+              }}
+              title="Minimize Minimap"
+              aria-label="Minimize Minimap"
+              className="p-0.5 rounded-[2px] bg-[#0a1218] border border-[#6e5528] text-[#b8c4bf] hover:border-[#c99c4a] transition-colors"
+            >
+              <Minimize2 className="w-2.5 h-2.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowKey((prev) => !prev);
+              }}
+              title="Toggle Hazard Zones & Power-Up Spawn Key"
+              className={`px-1.5 py-0.5 rounded-[2px] border text-[9px] transition-colors ${
+                showKey
+                  ? 'bg-[#c99c4a] border-[#f3d285] text-[#091117] font-semibold'
+                  : 'bg-[#0a1218] border-[#6e5528] text-[#b8c4bf] hover:border-[#c99c4a]'
+              }`}
+            >
+              Key
+            </button>
+          )}
         </div>
       </div>
 
       {/* Minimap Canvas with Inner Brass Rim */}
       <div
-        className="relative border-b border-[#4e3d21]"
+        className={`relative ${compact ? '' : 'border-b border-[#4e3d21]'}`}
         style={{ width: cssSize, height: cssSize }}
       >
         <canvas
@@ -602,16 +716,18 @@ export const Minimap: React.FC<MinimapProps> = ({
           style={{ width: cssSize, height: cssSize }}
           className="block"
         />
-        <span className="pointer-events-none absolute top-1 left-1.5 px-1 rounded-[2px] bg-[#091117]/80 border border-[#3a2f1c] text-[8.5px] font-mono-num text-[#c9d4d0]">
-          {zoomMode === 'arena' ? '5,656u · 8×' : 'Radar 2.5×'}
-        </span>
-        <span className="pointer-events-none absolute top-1 right-1.5 text-[9px] font-mono-num font-semibold text-[#f3d285]">
+        {!compact && (
+          <span className="pointer-events-none absolute top-1 left-1.5 px-1 rounded-[2px] bg-[#091117]/80 border border-[#3a2f1c] text-[8.5px] font-mono-num text-[#c9d4d0]">
+            {zoomMode === 'arena' ? '5,656u · 8×' : 'Radar 2.5×'}
+          </span>
+        )}
+        <span className="pointer-events-none absolute top-0.5 right-1 text-[8.5px] font-mono-num font-semibold text-[#f3d285]">
           N↑
         </span>
       </div>
 
       {/* Collapsible Hazard & Power-Up Spawn Legend */}
-      {showKey && (
+      {!compact && showKey && (
         <div className="px-2 py-1.5 bg-[#091117]/95 border-b border-[#2c3b46] space-y-1 text-[9px] leading-tight">
           <div className="flex items-center justify-between gap-1 text-[#cbd5e1]">
             <span className="inline-flex items-center gap-1">
@@ -651,16 +767,45 @@ export const Minimap: React.FC<MinimapProps> = ({
             <span className="text-[#60a5fa]">● Storm</span>
             <span className="text-[#c084fc]">● Roe</span>
           </div>
+          <div className="flex items-center justify-between gap-1 text-[#cbd5e1] pt-0.5 border-t border-[#1c2832]">
+            <span className="inline-flex items-center gap-1 text-[#fde68a] font-semibold">
+              <span className="w-2 h-2 rounded-full border border-[#fbbf24] bg-[#ef4444]/60 inline-block" />
+              ◎ Rival Bounty
+            </span>
+            <span className="text-[#fca5a5]">+5–12 Evo</span>
+          </div>
+        </div>
+      )}
+
+      {/* Active Multiplayer Rival Bounty Summary */}
+      {hud.bountyTargets && hud.bountyTargets.length > 0 && (
+        <div
+          className={`flex items-center justify-between gap-1 bg-[#1e0b0d]/95 border-b border-[#7f1d1d]/70 font-mono-num ${
+            compact ? 'px-1.5 py-0.5 text-[8.5px]' : 'px-2 py-1 text-[9.5px]'
+          }`}
+        >
+          <span className="text-[#fbbf24] font-semibold truncate">
+            {hud.bountyTargets[0].isSelf
+              ? `◎ You: +${hud.bountyTargets[0].rewardPoints}`
+              : `◎ ${hud.bountyTargets[0].name}`}
+          </span>
+          <span className="text-[#fca5a5] shrink-0">
+            {compact
+              ? `+${hud.bountyTargets[0].rewardPoints}`
+              : `${hud.bountyTargets.length} Bounty · +${hud.bountyTargets[0].rewardPoints} Evo`}
+          </span>
         </div>
       )}
 
       {/* Coordinates & Active Drop Count */}
-      <div className="flex items-center justify-between px-2 py-1 bg-[#0b1319] text-[9.5px] font-mono-num text-[#b8c4bf]">
-        <span>
-          x:{Math.round(hud.player.x)} y:{Math.round(hud.player.z)}
-        </span>
-        <span className="text-[#f3d285]">{hud.pickups.length} Spawns</span>
-      </div>
+      {!compact && (
+        <div className="flex items-center justify-between px-2 py-1 bg-[#0b1319] text-[9.5px] font-mono-num text-[#b8c4bf]">
+          <span>
+            x:{Math.round(hud.player.x)} y:{Math.round(hud.player.z)}
+          </span>
+          <span className="text-[#f3d285]">{hud.pickups.length} Spawns</span>
+        </div>
+      )}
     </div>
   );
 };
