@@ -4,7 +4,10 @@ import { DesignCodexModal } from './components/DesignCodexModal';
 import { GameViewport } from './components/GameViewport';
 import { LobbyPlayMode, LobbyScreen } from './components/LobbyScreen';
 import { PostMatchScreen } from './components/PostMatchScreen';
+import { TitleScreen } from './components/TitleScreen';
 import { RegionCode, RegionFilter } from './data/regions';
+import { soundEngine } from './game/audio';
+import { loadSavedSettings, saveSettings } from './game/settings';
 import {
   clearTopSurvivalTimes,
   fetchGlobalLeaderboard,
@@ -24,10 +27,18 @@ import { MatchReplayData } from './game/replay';
 import { spatialVoice } from './game/spatialVoice';
 import { AccessibilitySettings, HudSnapshot, LobbySize } from './game/types';
 
-type ScreenState = 'lobby' | 'playing' | 'summary';
+type ScreenState = 'title' | 'lobby' | 'playing' | 'summary';
 
 export default function App() {
-  const [screen, setScreen] = useState<ScreenState>('lobby');
+  const [screen, setScreen] = useState<ScreenState>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('room')?.trim()) return 'lobby';
+    } catch {
+      // Ignore URL parse errors
+    }
+    return 'title';
+  });
   const [lobbySize, setLobbySize] = useState<LobbySize>(20);
   const [mode, setMode] = useState<LobbyPlayMode>('royale');
   const [matchKey, setMatchKey] = useState(1);
@@ -74,21 +85,22 @@ export default function App() {
   const [codexOpen, setCodexOpen] = useState(false);
   const [codexPlateId, setCodexPlateId] = useState('overview');
 
-  const [settings, setSettings] = useState<AccessibilitySettings>({
-    reducedMotion: false,
-    visualSoundCues: true,
-    hudScale: 'standard',
-    muted: false,
-    volume: 0.65,
-    voiceVolume: 0.9,
-    voiceMode: 'open',
-  });
+  const [settings, setSettings] = useState<AccessibilitySettings>(() =>
+    loadSavedSettings()
+  );
 
   useEffect(() => {
+    soundEngine.setMuted(settings.muted);
+    soundEngine.setVolume(settings.volume);
     spatialVoice.setMasterMuted(settings.muted);
     spatialVoice.setVoiceVolume(settings.voiceVolume ?? 0.9);
     spatialVoice.setVoiceMode(settings.voiceMode ?? 'open');
-  }, [settings.muted, settings.voiceVolume, settings.voiceMode]);
+  }, [
+    settings.muted,
+    settings.volume,
+    settings.voiceVolume,
+    settings.voiceMode,
+  ]);
 
   useEffect(() => {
     spatialVoice.init();
@@ -128,7 +140,11 @@ export default function App() {
   }, []);
 
   const handleUpdateSettings = useCallback((patch: Partial<AccessibilitySettings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }));
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
   }, []);
 
   const refreshGlobalLeaderboard = useCallback(
@@ -270,6 +286,14 @@ export default function App() {
 
   return (
     <div className="w-full min-h-screen bg-[#0c141a]">
+      {screen === 'title' && (
+        <TitleScreen
+          settings={settings}
+          onUpdateSettings={handleUpdateSettings}
+          onPlay={() => setScreen('lobby')}
+        />
+      )}
+
       {screen === 'lobby' && (
         <LobbyScreen
           lobbySize={lobbySize}
@@ -297,6 +321,7 @@ export default function App() {
           onStartMatch={handleStartMatch}
           onOpenComic={handleOpenComic}
           onOpenCodex={handleOpenCodex}
+          onReturnToTitle={() => setScreen('title')}
         />
       )}
 

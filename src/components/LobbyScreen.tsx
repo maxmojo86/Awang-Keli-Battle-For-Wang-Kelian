@@ -64,6 +64,7 @@ interface LobbyScreenProps {
   onStartMatch: () => void;
   onOpenComic: (page?: number) => void;
   onOpenCodex: (plateId?: string) => void;
+  onReturnToTitle?: () => void;
 }
 
 const LOBBY_SIZES: LobbySize[] = [5, 10, 20, 25, 50, 100];
@@ -108,6 +109,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   onStartMatch,
   onOpenComic,
   onOpenCodex,
+  onReturnToTitle,
 }) => {
   const [nameDraft, setNameDraft] = useState(playerName);
   const [boardScope, setBoardScope] = useState<'global' | 'local'>('global');
@@ -181,12 +183,23 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
       {/* Top Bar Contract: 3 zones separated by gap-8 */}
       <header className="sticky top-0 z-20 border-b border-[#5b4724] bg-[#0b1218]/95 px-6 py-4">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-8">
-          <a
-            href="#top"
-            className="font-display text-xl font-semibold tracking-tight text-[#f7f2e7] whitespace-nowrap shrink-0"
-          >
-            Awang Keli
-          </a>
+          <div className="flex items-center gap-3 shrink-0">
+            {onReturnToTitle && (
+              <button
+                type="button"
+                onClick={onReturnToTitle}
+                className="px-2.5 py-1 text-xs font-medium rounded-[2px] border border-[#5b4724] bg-[#0e1820] text-[#d9b25f] hover:border-[#c99c4a] hover:text-[#f7f2e7] transition-colors whitespace-nowrap shrink-0"
+              >
+                ← Title
+              </button>
+            )}
+            <a
+              href="#top"
+              className="font-display text-xl font-semibold tracking-tight text-[#f7f2e7] whitespace-nowrap shrink-0"
+            >
+              Awang Keli
+            </a>
+          </div>
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#b5c2c9]">
             <a href="#leaderboard" className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0">
