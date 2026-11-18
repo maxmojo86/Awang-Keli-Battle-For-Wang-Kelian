@@ -1,5 +1,5 @@
-import { ECHO_SONAR_RADIUS } from '../game/arena';
-import { AbilityId, EvolutionForm } from '../game/types';
+import { ECHO_SONAR_RADIUS } from '../game/arena.ts';
+import type { AbilityId, EvolutionForm } from '../game/types.ts';
 
 export interface EvolutionMilestone {
   level: number;

@@ -1,4 +1,4 @@
-import { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType, WeatherKind } from './types';
+import type { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType, WeatherKind } from './types.ts';
 
 export interface AmbientEnvironmentState {
   dt: number;

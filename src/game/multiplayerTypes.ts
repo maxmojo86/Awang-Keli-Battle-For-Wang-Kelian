@@ -1,5 +1,5 @@
-import type { EmoteId } from '../data/emotes';
-import {
+import type { EmoteId } from '../data/emotes.ts';
+import type {
   AbilityCooldowns,
   AbilityId,
   BitePhase,
@@ -11,7 +11,7 @@ import {
   WeatherState,
   WorldEffect,
   ZoneState,
-} from './types';
+} from './types.ts';
 
 export type RoomStatus = 'waiting' | 'playing' | 'finished';
 

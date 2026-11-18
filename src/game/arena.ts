@@ -1,4 +1,4 @@
-import { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType } from './types';
+import type { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType } from './types.ts';
 
 export const ARENA_SCALE = Math.SQRT2 * 2; // √8 ≈ 2.8284 -> 8× surface area
 export const WORLD_SIZE = 5656;

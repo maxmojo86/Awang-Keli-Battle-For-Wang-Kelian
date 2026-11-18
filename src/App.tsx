@@ -363,6 +363,7 @@ export default function App() {
           globalRankInfo={lastGlobalRank}
           isMultiplayer={Boolean(activeMpSession)}
           isMultiplayerHost={isMpHost}
+          reducedMotion={settings.reducedMotion}
           onPlayAgain={handleRematch}
           onReturnLobby={handleReturnFromSummary}
           onOpenEpilogue={() => handleOpenComic(9)}

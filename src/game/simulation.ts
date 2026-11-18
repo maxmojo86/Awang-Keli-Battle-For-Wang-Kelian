@@ -1,8 +1,8 @@
 import {
   EVOLUTION_MILESTONES,
   getEvolutionForm,
-} from '../data/abilities';
-import { EmoteId, getEmoteSpec, VALID_EMOTE_IDS } from '../data/emotes';
+} from '../data/abilities.ts';
+import { type EmoteId, getEmoteSpec, VALID_EMOTE_IDS } from '../data/emotes.ts';
 import {
   ARENA_SCALE,
   ECHO_SONAR_RADIUS,
@@ -19,14 +19,14 @@ import {
   scaleArenaDist,
   WORLD_CENTER,
   WORLD_SIZE,
-} from './arena';
-import { soundEngine } from './audio';
-import {
+} from './arena.ts';
+import { soundEngine } from './audio.ts';
+import type {
   ClientSfxEvent,
   RemoteKeliState,
   WorldStatePacket,
-} from './multiplayerTypes';
-import {
+} from './multiplayerTypes.ts';
+import type {
   AbilityId,
   BountyTarget,
   CarcassEntity,
@@ -48,7 +48,7 @@ import {
   WeatherState,
   WorldEffect,
   ZoneState,
-} from './types';
+} from './types.ts';
 
 export function isRainFedPickup(kind: PickupKind): boolean {
   return kind === 'monsoon_dew' || kind === 'storm_fin' || kind === 'thunder_roe';

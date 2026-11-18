@@ -3,10 +3,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GlobalLeaderboardSort, GlobalLeaderboardStore } from './server/leaderboardStore';
-import { VALID_EMOTE_IDS } from './src/data/emotes';
-import { RegionCode, RegionFilter, VALID_REGION_CODES } from './src/data/regions';
-import {
+import { type GlobalLeaderboardSort, GlobalLeaderboardStore } from './server/leaderboardStore.ts';
+import { VALID_EMOTE_IDS } from './src/data/emotes.ts';
+import { type RegionCode, type RegionFilter, VALID_REGION_CODES } from './src/data/regions.ts';
+import type {
   ClientMessage,
   RoomChatMessage,
   RoomParticipant,
@@ -14,9 +14,9 @@ import {
   RoomStatus,
   RoomSummary,
   ServerMessage,
-} from './src/game/multiplayerTypes';
-import { GameSimulation } from './src/game/simulation';
-import { AbilityId, LobbySize } from './src/game/types';
+} from './src/game/multiplayerTypes.ts';
+import { GameSimulation } from './src/game/simulation.ts';
+import type { AbilityId, LobbySize } from './src/game/types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

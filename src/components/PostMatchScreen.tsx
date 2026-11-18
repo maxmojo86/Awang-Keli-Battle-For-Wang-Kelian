@@ -5,6 +5,7 @@ import { formatSurvivalDuration } from '../game/leaderboard';
 import { MatchReplayData } from '../game/replay';
 import { HudSnapshot } from '../game/types';
 import { MatchReplayPanel } from './MatchReplayPanel';
+import { VictoryCelebrationCanvas } from './VictoryCelebrationCanvas';
 
 interface PostMatchScreenProps {
   hud: HudSnapshot;
@@ -17,6 +18,7 @@ interface PostMatchScreenProps {
   } | null;
   isMultiplayer?: boolean;
   isMultiplayerHost?: boolean;
+  reducedMotion?: boolean;
   onPlayAgain: () => void;
   onReturnLobby: () => void;
   onOpenEpilogue: () => void;
@@ -35,6 +37,7 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   globalRankInfo = null,
   isMultiplayer = false,
   isMultiplayerHost = false,
+  reducedMotion = false,
   onPlayAgain,
   onReturnLobby,
   onOpenEpilogue,
@@ -45,7 +48,8 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
 
   return (
     <div className="fixed inset-0 z-40 overflow-y-auto bg-[#091116] px-4 py-8 sm:py-12">
-      <div className="max-w-4xl mx-auto space-y-6">
+      {isVictory && <VictoryCelebrationCanvas reducedMotion={reducedMotion} />}
+      <div className="relative z-10 max-w-4xl mx-auto space-y-6">
         <section className="compendium-plaque rounded-sm overflow-hidden">
           <div className="compendium-ribbon flex items-center justify-between gap-3 px-6 py-3">
             <div className="text-xs font-mono-num font-semibold tracking-wider text-[#f3d285]">

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { REGIONS, RegionCode, RegionFilter, VALID_REGION_CODES } from '../src/data/regions';
-import { LobbySize } from '../src/game/types';
+import { REGIONS, type RegionCode, type RegionFilter, VALID_REGION_CODES } from '../src/data/regions.ts';
+import type { LobbySize } from '../src/game/types.ts';
 
 export type GlobalLeaderboardSort = 'longest' | 'fastest_king' | 'kills';
 

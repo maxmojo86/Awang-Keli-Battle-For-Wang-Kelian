@@ -1,4 +1,4 @@
-import type { EmoteId } from '../data/emotes';
+import type { EmoteId } from '../data/emotes.ts';
 
 export type LobbySize = 5 | 10 | 20 | 25 | 50 | 100;
 export type MatchMode = 'royale' | 'tutorial';
