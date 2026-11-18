@@ -1,0 +1,260 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ComicReaderModal } from './components/ComicReaderModal';
+import { DesignCodexModal } from './components/DesignCodexModal';
+import { GameViewport } from './components/GameViewport';
+import { LobbyPlayMode, LobbyScreen } from './components/LobbyScreen';
+import { PostMatchScreen } from './components/PostMatchScreen';
+import {
+  clearTopSurvivalTimes,
+  getSavedPlayerName,
+  getTopSurvivalTimes,
+  recordKeliKingSurvivalTime,
+  savePlayerName,
+  SurvivalLeaderboardEntry,
+} from './game/leaderboard';
+import { multiplayerClient, MultiplayerSnapshot } from './game/multiplayerClient';
+import { MatchReplayData } from './game/replay';
+import { spatialVoice } from './game/spatialVoice';
+import { AccessibilitySettings, HudSnapshot, LobbySize } from './game/types';
+
+type ScreenState = 'lobby' | 'playing' | 'summary';
+
+export default function App() {
+  const [screen, setScreen] = useState<ScreenState>('lobby');
+  const [lobbySize, setLobbySize] = useState<LobbySize>(20);
+  const [mode, setMode] = useState<LobbyPlayMode>('royale');
+  const [matchKey, setMatchKey] = useState(1);
+  const [finalHud, setFinalHud] = useState<HudSnapshot | null>(null);
+  const [finalReplay, setFinalReplay] = useState<MatchReplayData | null>(null);
+  const [playerName, setPlayerName] = useState<string>(() => getSavedPlayerName());
+  const [leaderboard, setLeaderboard] = useState<SurvivalLeaderboardEntry[]>(() =>
+    getTopSurvivalTimes()
+  );
+  const [lastLeaderboardRank, setLastLeaderboardRank] = useState<number | null>(null);
+
+  const [mpSnapshot, setMpSnapshot] = useState<MultiplayerSnapshot>(() =>
+    multiplayerClient.getSnapshot()
+  );
+  const [activeMpSession, setActiveMpSession] = useState<{
+    playerId: string;
+    roomCode: string;
+  } | null>(null);
+
+  const [epilogueUnlocked, setEpilogueUnlocked] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('awang_keli_epilogue') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const [comicOpen, setComicOpen] = useState(false);
+  const [comicInitialPage, setComicInitialPage] = useState(1);
+
+  const [codexOpen, setCodexOpen] = useState(false);
+  const [codexPlateId, setCodexPlateId] = useState('overview');
+
+  const [settings, setSettings] = useState<AccessibilitySettings>({
+    reducedMotion: false,
+    visualSoundCues: true,
+    hudScale: 'standard',
+    muted: false,
+    volume: 0.65,
+    voiceVolume: 0.9,
+    voiceMode: 'open',
+  });
+
+  useEffect(() => {
+    spatialVoice.setMasterMuted(settings.muted);
+    spatialVoice.setVoiceVolume(settings.voiceVolume ?? 0.9);
+    spatialVoice.setVoiceMode(settings.voiceMode ?? 'open');
+  }, [settings.muted, settings.voiceVolume, settings.voiceMode]);
+
+  useEffect(() => {
+    spatialVoice.init();
+    const unsubState = multiplayerClient.subscribe(setMpSnapshot);
+    const unsubStart = multiplayerClient.onMatchStarted((info) => {
+      setFinalHud(null);
+      setFinalReplay(null);
+      setLastLeaderboardRank(null);
+      setActiveMpSession(info);
+      setMode('multiplayer');
+      setMatchKey((k) => k + 1);
+      setScreen('playing');
+    });
+
+    multiplayerClient.connect();
+
+    // Auto-join Basin if ?room=CODE is present in the URL
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room')?.trim().toUpperCase();
+    let joinedInitial = false;
+    const unsubWelcome = roomParam
+      ? multiplayerClient.subscribe((snap) => {
+          if (!joinedInitial && snap.status === 'connected' && !snap.currentRoom) {
+            joinedInitial = true;
+            setMode('multiplayer');
+            multiplayerClient.joinRoom(roomParam, getSavedPlayerName());
+          }
+        })
+      : () => {};
+
+    return () => {
+      unsubWelcome();
+      unsubStart();
+      unsubState();
+    };
+  }, []);
+
+  const handleUpdateSettings = useCallback((patch: Partial<AccessibilitySettings>) => {
+    setSettings((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const handlePlayerNameChange = useCallback((nextName: string) => {
+    const saved = savePlayerName(nextName);
+    setPlayerName(saved);
+  }, []);
+
+  const handleClearLeaderboard = useCallback(() => {
+    setLeaderboard(clearTopSurvivalTimes());
+    setLastLeaderboardRank(null);
+  }, []);
+
+  const handleStartMatch = useCallback(() => {
+    if (mode === 'multiplayer') return;
+    setActiveMpSession(null);
+    setFinalHud(null);
+    setFinalReplay(null);
+    setLastLeaderboardRank(null);
+    setMatchKey((k) => k + 1);
+    setScreen('playing');
+  }, [mode]);
+
+  const handleMatchFinished = useCallback(
+    (snap: HudSnapshot, replayData: MatchReplayData) => {
+      setFinalHud(snap);
+      setFinalReplay(replayData);
+      if (snap.matchResult.status === 'victory') {
+        setEpilogueUnlocked(true);
+        try {
+          localStorage.setItem('awang_keli_epilogue', '1');
+        } catch {
+          // Ignore storage errors
+        }
+        const result = recordKeliKingSurvivalTime(snap, playerName);
+        setLeaderboard(result.entries);
+        setLastLeaderboardRank(result.rank);
+      } else {
+        setLastLeaderboardRank(null);
+      }
+      setScreen('summary');
+    },
+    [playerName]
+  );
+
+  const handleExitToLobby = useCallback(() => {
+    if (activeMpSession) {
+      multiplayerClient.leaveRoom();
+      setActiveMpSession(null);
+    }
+    setScreen('lobby');
+  }, [activeMpSession]);
+
+  const handleReturnFromSummary = useCallback(() => {
+    // Keep player inside their Basin Room if still connected, so they can rematch or chat
+    setActiveMpSession(null);
+    setScreen('lobby');
+  }, []);
+
+  const handleRematch = useCallback(() => {
+    if (activeMpSession) {
+      multiplayerClient.restartRoomMatch();
+      return;
+    }
+    handleStartMatch();
+  }, [activeMpSession, handleStartMatch]);
+
+  const handleOpenComic = useCallback((page = 1) => {
+    setComicInitialPage(page);
+    setComicOpen(true);
+  }, []);
+
+  const handleOpenCodex = useCallback((plateId = 'overview') => {
+    setCodexPlateId(plateId);
+    setCodexOpen(true);
+  }, []);
+
+  const isMpHost = Boolean(
+    mpSnapshot.currentRoom && mpSnapshot.currentRoom.hostId === mpSnapshot.clientId
+  );
+
+  return (
+    <div className="w-full min-h-screen bg-[#0c141a]">
+      {screen === 'lobby' && (
+        <LobbyScreen
+          lobbySize={lobbySize}
+          mode={mode}
+          playerName={playerName}
+          leaderboard={leaderboard}
+          epilogueUnlocked={epilogueUnlocked}
+          settings={settings}
+          mpSnapshot={mpSnapshot}
+          onSelectLobbySize={setLobbySize}
+          onSelectMode={setMode}
+          onChangePlayerName={handlePlayerNameChange}
+          onClearLeaderboard={handleClearLeaderboard}
+          onUpdateSettings={handleUpdateSettings}
+          onStartMatch={handleStartMatch}
+          onOpenComic={handleOpenComic}
+          onOpenCodex={handleOpenCodex}
+        />
+      )}
+
+      {screen === 'playing' && (
+        <div className="w-full h-screen">
+          <GameViewport
+            key={matchKey}
+            lobbySize={lobbySize}
+            mode={mode === 'tutorial' ? 'tutorial' : 'royale'}
+            playerName={playerName}
+            isMultiplayer={Boolean(activeMpSession)}
+            multiplayerPlayerId={activeMpSession?.playerId ?? null}
+            roomCode={activeMpSession?.roomCode ?? null}
+            latencyMs={mpSnapshot.latencyMs}
+            settings={settings}
+            onUpdateSettings={handleUpdateSettings}
+            onMatchFinished={handleMatchFinished}
+            onExitToLobby={handleExitToLobby}
+            onRestart={handleRematch}
+          />
+        </div>
+      )}
+
+      {screen === 'summary' && finalHud && (
+        <PostMatchScreen
+          hud={finalHud}
+          replay={finalReplay}
+          leaderboardRank={lastLeaderboardRank}
+          isMultiplayer={Boolean(activeMpSession)}
+          isMultiplayerHost={isMpHost}
+          onPlayAgain={handleRematch}
+          onReturnLobby={handleReturnFromSummary}
+          onOpenEpilogue={() => handleOpenComic(9)}
+        />
+      )}
+
+      <ComicReaderModal
+        open={comicOpen}
+        epilogueUnlocked={epilogueUnlocked}
+        initialPage={comicInitialPage}
+        onClose={() => setComicOpen(false)}
+      />
+
+      <DesignCodexModal
+        open={codexOpen}
+        initialPlateId={codexPlateId}
+        onClose={() => setCodexOpen(false)}
+      />
+    </div>
+  );
+}

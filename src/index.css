@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+    --compendium-brass: #c99c4a;
+    --compendium-brass-bright: #f3d285;
+    --compendium-brass-dark: #5f4722;
+    --compendium-iron-top: rgba(18, 31, 41, 0.96);
+    --compendium-iron-bot: rgba(9, 16, 23, 0.97);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans);
+    background-color: #091116;
+    color: #e6e4dd;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Design Compendium: Beveled Dark-Iron & Burnished Brass Plaque */
+.compendium-plaque {
+  background: linear-gradient(180deg, var(--compendium-iron-top) 0%, var(--compendium-iron-bot) 100%);
+  border: 1.5px solid #c99c4a;
+  box-shadow:
+    inset 0 0 0 1px rgba(88, 66, 30, 0.72),
+    inset 0 1px 0 rgba(247, 224, 163, 0.22),
+    0 14px 32px -8px rgba(0, 0, 0, 0.78);
+}
+
+.compendium-plaque-subtle {
+  background: linear-gradient(180deg, rgba(16, 28, 38, 0.95) 0%, rgba(10, 17, 24, 0.97) 100%);
+  border: 1px solid #6b5023;
+  box-shadow:
+    inset 0 1px 0 rgba(243, 210, 133, 0.14),
+    0 10px 24px -8px rgba(0, 0, 0, 0.7);
+}
+
+/* Design Compendium: Ornate Header Ribbon with Gold Hairline Trim */
+.compendium-ribbon {
+  background: linear-gradient(180deg, #172734 0%, #0d161e 100%);
+  border-bottom: 1px solid #6e5528;
+  box-shadow: inset 0 1px 0 rgba(243, 210, 133, 0.18);
+}
+
+/* Design Compendium: Recessed Metallic Gauge Track */
+.compendium-track {
+  background: linear-gradient(180deg, #080d12 0%, #111b23 100%);
+  border: 1px solid #4e3d21;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.88);
+}
+
+/* Design Compendium: Glossy Bar Highlight Overlay */
+.compendium-bar-gloss {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.28) 0%,
+    rgba(255, 255, 255, 0.06) 45%,
+    rgba(0, 0, 0, 0.22) 100%
+  );
+}
+
+/* Design Compendium: RPG Action Slot */
+.compendium-slot {
+  background: radial-gradient(circle at 50% 38%, rgba(28, 52, 68, 0.95) 0%, rgba(11, 19, 26, 0.98) 78%);
+  border: 1.5px solid #c99c4a;
+  box-shadow:
+    inset 0 0 0 1px rgba(74, 56, 24, 0.85),
+    inset 0 1px 0 rgba(243, 210, 133, 0.26),
+    0 4px 12px rgba(0, 0, 0, 0.65);
+}
+
+.compendium-slot-locked {
+  background: linear-gradient(180deg, #0d141a 0%, #080d11 100%);
+  border: 1px solid #263440;
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.85);
+}
+
+/* Design Compendium: Circular Brass Portrait / Sonar Medallion */
+.compendium-medallion {
+  background: radial-gradient(circle at 50% 35%, #162b38 0%, #091218 82%);
+  border: 2px solid #d4a64e;
+  box-shadow:
+    0 0 0 1px #4f3b1b,
+    inset 0 0 0 1px rgba(243, 210, 133, 0.28),
+    0 8px 20px rgba(0, 0, 0, 0.72);
+}
+
+@keyframes sonar-sweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-sonar-sweep {
+  animation: sonar-sweep 2.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-sonar-sweep {
+    animation: none;
+  }
+}
+
+/* Custom subtle scrollbars for lore comic and ledger modals */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1614;
+}
+::-webkit-scrollbar-thumb {
+  background: #283b36;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a544d;
+}

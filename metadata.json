@@ -1,0 +1,6 @@
+{
+  "name": "Awang Keli: Battle for Wang Kelian",
+  "description": "A 2.5D survival-evolution battle royale set in the flooded tin-mining basin of Wang Kelian, Perlis. Consume rivals, evolve through four amphibious forms, and reunite all 100 fragments to become the Keli King.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
