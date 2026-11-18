@@ -1,6 +1,6 @@
-import React, { useEffect, useRef } from 'react';
-import { Settings, Volume2, VolumeX, X } from 'lucide-react';
-import { soundEngine } from '../game/audio';
+import React, { useEffect, useRef, useState } from 'react';
+import { Music, Settings, Volume2, VolumeX, X } from 'lucide-react';
+import { MenuMusicSnapshot, soundEngine } from '../game/audio';
 import { AccessibilitySettings } from '../game/types';
 
 interface TitleSettingsModalProps {
@@ -21,6 +21,13 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const [menuMusic, setMenuMusic] = useState<MenuMusicSnapshot>(() =>
+    soundEngine.getMenuMusicSnapshot()
+  );
+
+  useEffect(() => {
+    return soundEngine.subscribeMenuMusic(setMenuMusic);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -66,6 +73,7 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
 
   if (!open) return null;
 
+  const musicPct = Math.round((settings.musicVolume ?? 0.35) * 100);
   const volumePct = Math.round(settings.volume * 100);
   const voicePct = Math.round((settings.voiceVolume ?? 0.9) * 100);
 
@@ -134,6 +142,7 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
                     onUpdateSettings({ muted: nextMuted });
                     if (!nextMuted) {
                       soundEngine.unlockFromGesture();
+                      void soundEngine.unlockMenuMusicFromGesture();
                       soundEngine.playUiConfirm(true);
                     }
                   }}
@@ -154,7 +163,51 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
 
               <label className="block space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#cbd5e1]">Master Volume</span>
+                  <span className="inline-flex items-center gap-1.5 text-[#cbd5e1]">
+                    <Music className="w-3.5 h-3.5 text-[#f3d285]" aria-hidden="true" />
+                    Music Volume
+                  </span>
+                  <span className="font-mono-num text-[#f3d285]">{musicPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={settings.musicVolume ?? 0.35}
+                  aria-label="Music Volume"
+                  onChange={(e) => {
+                    const nextMusicVol = parseFloat(e.target.value);
+                    soundEngine.setMusicVolume(nextMusicVol);
+                    if (nextMusicVol > 0 && !settings.muted) {
+                      soundEngine.unlockFromGesture();
+                      void soundEngine.unlockMenuMusicFromGesture();
+                    }
+                    onUpdateSettings({ musicVolume: nextMusicVol });
+                  }}
+                  className="w-full accent-[#c99c4a] cursor-pointer"
+                />
+              </label>
+
+              {menuMusic.status === 'error' && menuMusic.errorMessage && (
+                <div
+                  role="status"
+                  className="flex items-center justify-between gap-2 rounded-[2px] border border-[#ef4444]/50 bg-[#2a1014] px-2.5 py-1.5 text-[11px] text-[#fecaca]"
+                >
+                  <span>{menuMusic.errorMessage}</span>
+                  <button
+                    type="button"
+                    onClick={() => void soundEngine.retryMenuMusic()}
+                    className="shrink-0 underline text-[#f3d285] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285]"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              <label className="block space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#cbd5e1]">Sound Effects & Ambience Volume</span>
                   <span className="font-mono-num text-[#f3d285]">{volumePct}%</span>
                 </div>
                 <input
@@ -163,7 +216,7 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
                   max={1}
                   step={0.05}
                   value={settings.volume}
-                  aria-label="Master Volume"
+                  aria-label="Sound Effects Volume"
                   onChange={(e) => {
                     const nextVol = parseFloat(e.target.value);
                     soundEngine.setVolume(nextVol);

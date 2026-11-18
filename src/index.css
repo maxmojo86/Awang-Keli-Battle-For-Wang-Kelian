@@ -114,9 +114,47 @@
   animation: sonar-sweep 2.4s linear infinite;
 }
 
+@keyframes title-fade-intro {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.animate-title-logo-intro {
+  animation: title-fade-intro 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0ms both;
+}
+
+.animate-title-btn-1 {
+  animation: title-fade-intro 1.15s cubic-bezier(0.16, 1, 0.3, 1) 350ms both;
+}
+
+.animate-title-btn-2 {
+  animation: title-fade-intro 1.15s cubic-bezier(0.16, 1, 0.3, 1) 600ms both;
+}
+
+.animate-title-btn-3 {
+  animation: title-fade-intro 1.15s cubic-bezier(0.16, 1, 0.3, 1) 850ms both;
+}
+
+.animate-title-sound-intro {
+  animation: title-fade-intro 1.1s cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .animate-sonar-sweep {
-    animation: none;
+  .animate-sonar-sweep,
+  .animate-title-logo-intro,
+  .animate-title-btn-1,
+  .animate-title-btn-2,
+  .animate-title-btn-3,
+  .animate-title-sound-intro {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
   }
 }
 

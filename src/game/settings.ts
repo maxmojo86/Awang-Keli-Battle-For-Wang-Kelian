@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: AccessibilitySettings = {
   hudScale: 'standard',
   muted: false,
   volume: 0.65,
+  musicVolume: 0.35,
   voiceVolume: 0.9,
   voiceMode: 'open',
 };
@@ -49,6 +50,10 @@ export function loadSavedSettings(): AccessibilitySettings {
       muted:
         typeof parsed.muted === 'boolean' ? parsed.muted : DEFAULT_SETTINGS.muted,
       volume: clamp01(parsed.volume, DEFAULT_SETTINGS.volume),
+      musicVolume: clamp01(
+        parsed.musicVolume,
+        DEFAULT_SETTINGS.musicVolume ?? 0.35
+      ),
       voiceVolume: clamp01(parsed.voiceVolume, DEFAULT_SETTINGS.voiceVolume ?? 0.9),
       voiceMode,
     };

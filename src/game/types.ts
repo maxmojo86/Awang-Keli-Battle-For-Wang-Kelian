@@ -420,6 +420,7 @@ export interface AccessibilitySettings {
   hudScale: 'compact' | 'standard' | 'large';
   muted: boolean;
   volume: number;
+  musicVolume?: number;
   voiceVolume?: number;
   voiceMode?: 'open' | 'ptt';
 }

@@ -316,9 +316,46 @@ export function getAmbientProfile(
   return profile;
 }
 
+export const MENU_SOUNDTRACK_URL = '/assets/aistudio/Panggilan_Lubuk_Hitam_8b130ca5.mp3';
+
+export type MenuMusicStatus =
+  | 'idle'
+  | 'awaiting_gesture'
+  | 'loading'
+  | 'blocked'
+  | 'playing'
+  | 'paused'
+  | 'error';
+
+export interface MenuMusicSnapshot {
+  status: MenuMusicStatus;
+  errorMessage: string | null;
+  volume: number;
+  muted: boolean;
+  wanted: boolean;
+  activeSourcesCount: number;
+  fadeGainValue: number;
+  musicGainValue: number;
+  outputGainValue: number;
+}
+
+const XFADE_STEPS = 65;
+const COS_XFADE_CURVE = new Float32Array(XFADE_STEPS);
+const SIN_XFADE_CURVE = new Float32Array(XFADE_STEPS);
+for (let i = 0; i < XFADE_STEPS; i++) {
+  const phase = (i / (XFADE_STEPS - 1)) * (Math.PI * 0.5);
+  COS_XFADE_CURVE[i] = Math.cos(phase);
+  SIN_XFADE_CURVE[i] = Math.sin(phase);
+}
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
+  private outputGain: GainNode | null = null;
   private masterGain: GainNode | null = null;
+  private musicVolumeGain: GainNode | null = null;
+  private musicFadeGain: GainNode | null = null;
+  private musicDeckGains: [GainNode, GainNode] | null = null;
+
   private ambientGain: GainNode | null = null;
   private ambientFilter: BiquadFilterNode | null = null;
   private rainGain: GainNode | null = null;
@@ -334,7 +371,34 @@ class SoundEngine {
   private ambientStarted = false;
   private ambientActive = false;
   private muted = false;
-  private volume = 0.6;
+  private volume = 0.65;
+  private musicVolume = 0.35;
+
+  // Menu soundtrack state (single instance across renders, resize & orientation changes)
+  private rawAudioBytes: ArrayBuffer | null = null;
+  private rawAudioPromise: Promise<ArrayBuffer | null> | null = null;
+  private menuMusicBuffer: AudioBuffer | null = null;
+  private decodePromise: Promise<AudioBuffer | null> | null = null;
+  private menuMusicWanted = false;
+  private menuMusicStatus: MenuMusicStatus = 'idle';
+  private menuMusicError: string | null = null;
+  private menuMusicPlaying = false;
+  private wasPlayingBeforeHide = false;
+  private gestureUnlocked = false;
+  private gestureListenersAttached = false;
+  private visibilityListenerAttached = false;
+  private lifecycleRefCount = 0;
+  private activeMusicSources = new Set<AudioBufferSourceNode>();
+  private loopTimerId: number | null = null;
+  private fadeOutStopTimerId: number | null = null;
+  private loopEpoch = 0;
+  private fadeEpoch = 0;
+  private trackCtxStart = 0;
+  private trackOffsetStart = 0.13;
+  private pausedOffsetSec = 0.13;
+  private menuMusicListeners = new Set<(snap: MenuMusicSnapshot) => void>();
+  private unlockPromise: Promise<boolean> | null = null;
+  private lastBlockedAttemptMs = 0;
 
   private rippleTimer = 0.35;
   private bubbleTimer = 0.7;
@@ -346,23 +410,51 @@ class SoundEngine {
   private lastHazard: HazardTileKind | null = null;
   private lastForm: EvolutionForm | null = null;
 
-  private ensureContext(): AudioContext | null {
-    if (this.muted) return null;
+  private ensureAudioContextRaw(): AudioContext | null {
     if (typeof window === 'undefined') return null;
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return null;
-      this.ctx = new AudioCtx();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = this.muted ? 0 : this.volume;
-      this.masterGain.connect(this.ctx.destination);
-    }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+      const ctx = new AudioCtx();
+      this.ctx = ctx;
+
+      this.outputGain = ctx.createGain();
+      this.outputGain.gain.value = this.muted ? 0 : 1;
+      this.outputGain.connect(ctx.destination);
+
+      this.masterGain = ctx.createGain();
+      this.masterGain.gain.value = this.volume;
+      this.masterGain.connect(this.outputGain);
+
+      this.musicVolumeGain = ctx.createGain();
+      this.musicVolumeGain.gain.value = this.musicVolume;
+      this.musicVolumeGain.connect(this.outputGain);
+
+      this.musicFadeGain = ctx.createGain();
+      this.musicFadeGain.gain.value = 0;
+      this.musicFadeGain.connect(this.musicVolumeGain);
+
+      const deckA = ctx.createGain();
+      const deckB = ctx.createGain();
+      deckA.gain.value = 0;
+      deckB.gain.value = 0;
+      deckA.connect(this.musicFadeGain);
+      deckB.connect(this.musicFadeGain);
+      this.musicDeckGains = [deckA, deckB];
     }
     return this.ctx;
+  }
+
+  private ensureContext(): AudioContext | null {
+    if (this.muted) return null;
+    const ctx = this.ensureAudioContextRaw();
+    if (!ctx) return null;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    return ctx;
   }
 
   private getNoiseBuffer(ctx: AudioContext): AudioBuffer {
@@ -383,18 +475,62 @@ class SoundEngine {
     return buffer;
   }
 
-  public setMuted(muted: boolean) {
-    this.muted = muted;
-    if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(muted ? 0 : this.volume, this.ctx.currentTime, 0.05);
+  public getMenuMusicSnapshot(): MenuMusicSnapshot {
+    return {
+      status: this.menuMusicStatus,
+      errorMessage: this.menuMusicError,
+      volume: this.musicVolume,
+      muted: this.muted,
+      wanted: this.menuMusicWanted,
+      activeSourcesCount: this.activeMusicSources.size,
+      fadeGainValue: this.musicFadeGain ? this.musicFadeGain.gain.value : 0,
+      musicGainValue: this.musicVolumeGain ? this.musicVolumeGain.gain.value : this.musicVolume,
+      outputGainValue: this.outputGain ? this.outputGain.gain.value : this.muted ? 0 : 1,
+    };
+  }
+
+  public subscribeMenuMusic(listener: (snap: MenuMusicSnapshot) => void): () => void {
+    this.menuMusicListeners.add(listener);
+    listener(this.getMenuMusicSnapshot());
+    return () => {
+      this.menuMusicListeners.delete(listener);
+    };
+  }
+
+  private notifyMenuMusic() {
+    const snap = this.getMenuMusicSnapshot();
+    for (const listener of this.menuMusicListeners) {
+      listener(snap);
     }
   }
 
-  public setVolume(vol: number) {
-    this.volume = Math.max(0, Math.min(1, vol));
-    if (this.masterGain && this.ctx && !this.muted) {
-      this.masterGain.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.05);
+  public setMuted(muted: boolean) {
+    this.muted = muted;
+    if (this.outputGain && this.ctx) {
+      const now = this.ctx.currentTime;
+      this.outputGain.gain.cancelScheduledValues(now);
+      this.outputGain.gain.setValueAtTime(this.outputGain.gain.value, now);
+      this.outputGain.gain.setTargetAtTime(muted ? 0 : 1, now, 0.03);
     }
+    this.notifyMenuMusic();
+  }
+
+  public setVolume(vol: number) {
+    this.volume = Math.max(0, Math.min(1, Number.isFinite(vol) ? vol : 0.65));
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.03);
+    }
+  }
+
+  public setMusicVolume(vol: number) {
+    this.musicVolume = Math.max(0, Math.min(1, Number.isFinite(vol) ? vol : 0.35));
+    if (this.musicVolumeGain && this.ctx) {
+      const now = this.ctx.currentTime;
+      this.musicVolumeGain.gain.cancelScheduledValues(now);
+      this.musicVolumeGain.gain.setValueAtTime(this.musicVolumeGain.gain.value, now);
+      this.musicVolumeGain.gain.setTargetAtTime(this.musicVolume, now, 0.03);
+    }
+    this.notifyMenuMusic();
   }
 
   public unlockFromGesture(): boolean {
@@ -405,6 +541,559 @@ class SoundEngine {
       ctx.resume().catch(() => {});
     }
     return true;
+  }
+
+  public attachMenuMusicLifecycle(): () => void {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return () => {};
+    }
+    this.lifecycleRefCount += 1;
+    if (!this.visibilityListenerAttached) {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+      this.visibilityListenerAttached = true;
+    }
+    return () => {
+      this.lifecycleRefCount = Math.max(0, this.lifecycleRefCount - 1);
+      if (this.lifecycleRefCount === 0) {
+        this.disposeMenuMusic();
+      }
+    };
+  }
+
+  public preloadMenuMusic(): Promise<ArrayBuffer | null> {
+    if (typeof window === 'undefined' || typeof fetch !== 'function') {
+      return Promise.resolve(null);
+    }
+    if (this.rawAudioBytes) {
+      return Promise.resolve(this.rawAudioBytes);
+    }
+    if (this.rawAudioPromise) {
+      return this.rawAudioPromise;
+    }
+
+    this.menuMusicError = null;
+    if (this.menuMusicStatus === 'idle' || this.menuMusicStatus === 'error') {
+      this.menuMusicStatus = this.gestureUnlocked ? 'loading' : 'awaiting_gesture';
+      this.notifyMenuMusic();
+    }
+
+    this.rawAudioPromise = fetch(MENU_SOUNDTRACK_URL)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const buf = await res.arrayBuffer();
+        if (!buf || buf.byteLength === 0) {
+          throw new Error('Empty audio payload');
+        }
+        this.rawAudioBytes = buf;
+        return buf;
+      })
+      .catch(() => {
+        this.menuMusicError = 'Menu soundtrack unavailable — menu & SFX remain active.';
+        this.menuMusicStatus = 'error';
+        this.teardownGestureListeners();
+        this.notifyMenuMusic();
+        return null;
+      });
+
+    return this.rawAudioPromise;
+  }
+
+  public retryMenuMusic(): Promise<boolean> {
+    this.rawAudioBytes = null;
+    this.rawAudioPromise = null;
+    this.menuMusicBuffer = null;
+    this.decodePromise = null;
+    this.menuMusicError = null;
+    this.menuMusicStatus = this.gestureUnlocked ? 'loading' : 'awaiting_gesture';
+    this.notifyMenuMusic();
+    if (this.menuMusicWanted) {
+      this.armGestureListeners();
+      return this.unlockMenuMusicFromGesture();
+    }
+    return Promise.resolve(false);
+  }
+
+  public setMenuMusicWanted(wanted: boolean, fadeSec = 1.0) {
+    if (wanted) {
+      if (this.ambientActive) {
+        this.stopAmbient();
+      }
+      this.menuMusicWanted = true;
+
+      // Cancel any pending stop-after-fade-out timer immediately
+      this.fadeEpoch += 1;
+      if (this.fadeOutStopTimerId !== null) {
+        window.clearTimeout(this.fadeOutStopTimerId);
+        this.fadeOutStopTimerId = null;
+      }
+
+      if (this.menuMusicError) {
+        this.menuMusicStatus = 'error';
+        this.notifyMenuMusic();
+        return;
+      }
+
+      const pageHidden = typeof document !== 'undefined' && document.hidden;
+      if (pageHidden) {
+        this.wasPlayingBeforeHide = true;
+        this.menuMusicStatus = 'paused';
+        this.notifyMenuMusic();
+        return;
+      }
+
+      if (this.menuMusicPlaying && this.ctx && this.musicFadeGain) {
+        // Already running (e.g. returned mid-fade-out): ramp back up smoothly
+        const now = this.ctx.currentTime;
+        const cur = Math.max(0, Math.min(1, this.musicFadeGain.gain.value));
+        this.musicFadeGain.gain.cancelScheduledValues(now);
+        this.musicFadeGain.gain.setValueAtTime(cur, now);
+        this.musicFadeGain.gain.linearRampToValueAtTime(1.0, now + 1.5);
+        this.menuMusicStatus = 'playing';
+        this.notifyMenuMusic();
+        return;
+      }
+
+      if (this.gestureUnlocked && !this.muted && this.ctx && this.ctx.state === 'running') {
+        void this.startOrResumeDecodedLoop(this.ctx, 1.5);
+      } else {
+        this.menuMusicStatus = 'awaiting_gesture';
+        this.armGestureListeners();
+        this.notifyMenuMusic();
+      }
+      return;
+    }
+
+    // wanted === false (e.g. PLAY clicked -> fade out cleanly over ~1s)
+    this.menuMusicWanted = false;
+    this.wasPlayingBeforeHide = false;
+    this.teardownGestureListeners();
+
+    this.fadeEpoch += 1;
+    const localFadeEpoch = this.fadeEpoch;
+    if (this.fadeOutStopTimerId !== null) {
+      window.clearTimeout(this.fadeOutStopTimerId);
+      this.fadeOutStopTimerId = null;
+    }
+
+    if (!this.menuMusicPlaying || !this.ctx || !this.musicFadeGain) {
+      this.menuMusicStatus = this.menuMusicError ? 'error' : 'paused';
+      this.notifyMenuMusic();
+      return;
+    }
+
+    const dur = Math.max(0.08, fadeSec);
+    const now = this.ctx.currentTime;
+    const currentGain = Math.max(0, Math.min(1, this.musicFadeGain.gain.value));
+    this.musicFadeGain.gain.cancelScheduledValues(now);
+    this.musicFadeGain.gain.setValueAtTime(currentGain, now);
+    this.musicFadeGain.gain.linearRampToValueAtTime(0, now + dur);
+
+    this.fadeOutStopTimerId = window.setTimeout(() => {
+      if (localFadeEpoch !== this.fadeEpoch || this.menuMusicWanted) return;
+      this.fadeOutStopTimerId = null;
+      this.pauseActiveMusicSources(true);
+      this.menuMusicStatus = this.menuMusicError ? 'error' : 'paused';
+      this.notifyMenuMusic();
+    }, Math.ceil(dur * 1000) + 50);
+    this.notifyMenuMusic();
+  }
+
+  public unlockMenuMusicFromGesture(): Promise<boolean> {
+    if (this.unlockPromise) return this.unlockPromise;
+    const task = this.runUnlockMenuMusicFromGesture().finally(() => {
+      if (this.unlockPromise === task) {
+        this.unlockPromise = null;
+      }
+    });
+    this.unlockPromise = task;
+    return task;
+  }
+
+  private async runUnlockMenuMusicFromGesture(): Promise<boolean> {
+    if (typeof window === 'undefined') return false;
+    if (!this.menuMusicWanted || this.muted || this.menuMusicError) {
+      return false;
+    }
+    const pageHidden = typeof document !== 'undefined' && document.hidden;
+    if (pageHidden) {
+      this.wasPlayingBeforeHide = true;
+      return false;
+    }
+
+    const ctx = this.ensureAudioContextRaw();
+    if (!ctx) return false;
+
+    try {
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+    } catch {
+      this.gestureUnlocked = false;
+      this.menuMusicStatus = 'blocked';
+      this.lastBlockedAttemptMs = performance.now();
+      this.armGestureListeners();
+      this.notifyMenuMusic();
+      return false;
+    }
+
+    if ((ctx.state as string) !== 'running') {
+      this.gestureUnlocked = false;
+      this.menuMusicStatus = 'blocked';
+      this.lastBlockedAttemptMs = performance.now();
+      this.armGestureListeners();
+      this.notifyMenuMusic();
+      return false;
+    }
+
+    this.gestureUnlocked = true;
+    this.teardownGestureListeners();
+
+    if (this.menuMusicPlaying) {
+      return true;
+    }
+
+    return this.startOrResumeDecodedLoop(ctx, 1.5);
+  }
+
+  private handleGestureUnlockEvent = (e: Event) => {
+    if (!this.menuMusicWanted || this.muted || this.menuMusicError) return;
+    if (
+      e.type !== 'keydown' &&
+      this.menuMusicStatus === 'blocked' &&
+      performance.now() - this.lastBlockedAttemptMs < 60
+    ) {
+      return;
+    }
+    void this.unlockMenuMusicFromGesture();
+  };
+
+  private armGestureListeners() {
+    if (typeof window === 'undefined' || this.gestureListenersAttached) return;
+    window.addEventListener('pointerdown', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('click', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('touchend', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('keydown', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
+    this.gestureListenersAttached = true;
+  }
+
+  private teardownGestureListeners() {
+    if (typeof window === 'undefined' || !this.gestureListenersAttached) return;
+    window.removeEventListener('pointerdown', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
+    window.removeEventListener('click', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
+    window.removeEventListener('touchend', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
+    window.removeEventListener('keydown', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
+    this.gestureListenersAttached = false;
+  }
+
+  private handleVisibilityChange = () => {
+    if (typeof document === 'undefined') return;
+    if (document.hidden) {
+      if (this.menuMusicPlaying) {
+        this.wasPlayingBeforeHide = this.menuMusicWanted;
+        this.pauseActiveMusicSources(false);
+        this.menuMusicStatus = 'paused';
+        this.notifyMenuMusic();
+        if (this.ctx && !this.ambientActive && this.ctx.state === 'running') {
+          this.ctx.suspend().catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // Page became visible again
+    if (this.wasPlayingBeforeHide && this.menuMusicWanted && !this.muted && !this.menuMusicError) {
+      this.wasPlayingBeforeHide = false;
+      const ctx = this.ensureAudioContextRaw();
+      if (!ctx) return;
+      ctx
+        .resume()
+        .then(() => {
+          if (
+            (ctx.state as string) === 'running' &&
+            this.menuMusicWanted &&
+            !this.muted &&
+            !document.hidden &&
+            !this.menuMusicPlaying
+          ) {
+            void this.startOrResumeDecodedLoop(ctx, 1.2);
+          }
+        })
+        .catch(() => {
+          this.gestureUnlocked = false;
+          this.menuMusicStatus = 'blocked';
+          this.armGestureListeners();
+          this.notifyMenuMusic();
+        });
+    }
+  };
+
+  private async ensureDecodedMenuBuffer(ctx: AudioContext): Promise<AudioBuffer | null> {
+    if (this.menuMusicBuffer) return this.menuMusicBuffer;
+    if (this.decodePromise) return this.decodePromise;
+
+    this.menuMusicStatus = 'loading';
+    this.notifyMenuMusic();
+
+    this.decodePromise = (async () => {
+      try {
+        const raw = await this.preloadMenuMusic();
+        if (!raw) {
+          this.decodePromise = null;
+          return null;
+        }
+        const decoded = await ctx.decodeAudioData(raw.slice(0));
+        this.menuMusicBuffer = decoded;
+        return decoded;
+      } catch {
+        this.menuMusicError = 'Soundtrack failed to decode cleanly.';
+        this.menuMusicStatus = 'error';
+        this.decodePromise = null;
+        this.teardownGestureListeners();
+        this.notifyMenuMusic();
+        return null;
+      }
+    })();
+
+    return this.decodePromise;
+  }
+
+  private getLoopBounds(buffer: AudioBuffer) {
+    const headTrim = buffer.duration > 1.0 ? Math.min(0.13, buffer.duration * 0.04) : 0;
+    const tailTrim =
+      buffer.duration > 10 ? 1.5 : Math.min(0.12, buffer.duration * 0.08);
+    const playableEnd = Math.max(headTrim + 0.35, buffer.duration - tailTrim);
+    const span = Math.max(0.35, playableEnd - headTrim);
+    const crossfadeSec = span > 8 ? 2.2 : Math.min(0.65, span * 0.28);
+    return { headTrim, playableEnd, span, crossfadeSec };
+  }
+
+  private async startOrResumeDecodedLoop(
+    ctx: AudioContext,
+    fadeInDurationSec: number
+  ): Promise<boolean> {
+    const buffer = await this.ensureDecodedMenuBuffer(ctx);
+    if (!buffer) return false;
+    if (!this.menuMusicWanted || this.muted || (typeof document !== 'undefined' && document.hidden)) {
+      this.menuMusicStatus = this.menuMusicError ? 'error' : 'paused';
+      this.notifyMenuMusic();
+      return false;
+    }
+    if (this.menuMusicPlaying) return true;
+    if (!this.musicFadeGain || !this.musicDeckGains) return false;
+
+    this.fadeEpoch += 1;
+    if (this.fadeOutStopTimerId !== null) {
+      window.clearTimeout(this.fadeOutStopTimerId);
+      this.fadeOutStopTimerId = null;
+    }
+    if (this.loopTimerId !== null) {
+      window.clearTimeout(this.loopTimerId);
+      this.loopTimerId = null;
+    }
+
+    this.loopEpoch += 1;
+    const myLoopEpoch = this.loopEpoch;
+    const now = ctx.currentTime;
+
+    const { headTrim, playableEnd } = this.getLoopBounds(buffer);
+    const startOffset =
+      this.pausedOffsetSec >= headTrim && this.pausedOffsetSec < playableEnd - 0.8
+        ? this.pausedOffsetSec
+        : headTrim;
+
+    this.musicDeckGains[0].gain.cancelScheduledValues(now);
+    this.musicDeckGains[1].gain.cancelScheduledValues(now);
+    this.musicDeckGains[0].gain.setValueAtTime(1, now);
+    this.musicDeckGains[1].gain.setValueAtTime(0, now);
+
+    this.musicFadeGain.gain.cancelScheduledValues(now);
+    this.musicFadeGain.gain.setValueAtTime(0, now);
+    this.musicFadeGain.gain.linearRampToValueAtTime(1.0, now + fadeInDurationSec);
+
+    if (this.outputGain) {
+      this.outputGain.gain.cancelScheduledValues(now);
+      this.outputGain.gain.setValueAtTime(this.muted ? 0 : 1, now);
+    }
+    if (this.musicVolumeGain) {
+      this.musicVolumeGain.gain.cancelScheduledValues(now);
+      this.musicVolumeGain.gain.setValueAtTime(this.musicVolume, now);
+    }
+
+    this.menuMusicPlaying = true;
+    this.menuMusicStatus = 'playing';
+    this.scheduleDeckPass(ctx, buffer, 0, now, startOffset, myLoopEpoch);
+    this.notifyMenuMusic();
+    return true;
+  }
+
+  private scheduleDeckPass(
+    ctx: AudioContext,
+    buffer: AudioBuffer,
+    deckIdx: 0 | 1,
+    startWhen: number,
+    offsetSec: number,
+    epoch: number
+  ) {
+    if (epoch !== this.loopEpoch || !this.menuMusicPlaying || !this.musicDeckGains) return;
+
+    const { headTrim, playableEnd, crossfadeSec } = this.getLoopBounds(buffer);
+    const safeOffset =
+      offsetSec >= playableEnd - 0.5 ? headTrim : Math.max(headTrim, offsetSec);
+    const remaining = Math.max(0.25, playableEnd - safeOffset);
+    const xfade = Math.min(crossfadeSec, remaining * 0.45);
+    const handoffDelta = Math.max(0.05, remaining - xfade);
+    const handoffWhen = startWhen + handoffDelta;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.musicDeckGains[deckIdx]);
+    this.activeMusicSources.add(src);
+    src.onended = () => {
+      this.activeMusicSources.delete(src);
+      try {
+        src.disconnect();
+      } catch {
+        // Ignore already disconnected source nodes
+      }
+    };
+
+    try {
+      src.start(startWhen, safeOffset, remaining + 0.05);
+    } catch {
+      this.activeMusicSources.delete(src);
+      return;
+    }
+
+    this.trackCtxStart = startWhen;
+    this.trackOffsetStart = safeOffset;
+
+    const scheduleLeadMs = Math.max(
+      25,
+      Math.round((handoffWhen - ctx.currentTime - 0.18) * 1000)
+    );
+
+    this.loopTimerId = window.setTimeout(() => {
+      if (
+        epoch !== this.loopEpoch ||
+        !this.menuMusicPlaying ||
+        !this.musicDeckGains ||
+        !this.ctx
+      ) {
+        return;
+      }
+
+      const nextIdx: 0 | 1 = deckIdx === 0 ? 1 : 0;
+      const now = this.ctx.currentTime;
+      const actualHandoff = Math.max(now + 0.02, handoffWhen);
+      const outGain = this.musicDeckGains[deckIdx].gain;
+      const inGain = this.musicDeckGains[nextIdx].gain;
+
+      try {
+        outGain.cancelScheduledValues(actualHandoff);
+        outGain.setValueCurveAtTime(COS_XFADE_CURVE, actualHandoff, xfade);
+        inGain.cancelScheduledValues(actualHandoff);
+        inGain.setValueAtTime(0, now);
+        inGain.setValueCurveAtTime(SIN_XFADE_CURVE, actualHandoff, xfade);
+      } catch {
+        // Fallback linear ramp if overlapping curves occur
+        outGain.setValueAtTime(1, actualHandoff);
+        outGain.linearRampToValueAtTime(0, actualHandoff + xfade);
+        inGain.setValueAtTime(0, actualHandoff);
+        inGain.linearRampToValueAtTime(1, actualHandoff + xfade);
+      }
+
+      this.scheduleDeckPass(this.ctx, buffer, nextIdx, actualHandoff, headTrim, epoch);
+    }, scheduleLeadMs);
+  }
+
+  private pauseActiveMusicSources(resetToStart = false) {
+    this.loopEpoch += 1;
+    if (this.loopTimerId !== null) {
+      window.clearTimeout(this.loopTimerId);
+      this.loopTimerId = null;
+    }
+
+    if (this.ctx && this.menuMusicBuffer) {
+      const { headTrim, span } = this.getLoopBounds(this.menuMusicBuffer);
+      if (resetToStart) {
+        const elapsed = Math.max(0, this.ctx.currentTime - this.trackCtxStart);
+        this.pausedOffsetSec =
+          headTrim + ((this.trackOffsetStart - headTrim + elapsed) % span);
+      } else {
+        const elapsed = Math.max(0, this.ctx.currentTime - this.trackCtxStart);
+        this.pausedOffsetSec =
+          headTrim + ((this.trackOffsetStart - headTrim + elapsed) % span);
+      }
+    }
+
+    if (this.ctx && this.musicDeckGains) {
+      const now = this.ctx.currentTime;
+      this.musicDeckGains[0].gain.cancelScheduledValues(now);
+      this.musicDeckGains[1].gain.cancelScheduledValues(now);
+      this.musicDeckGains[0].gain.setValueAtTime(0, now);
+      this.musicDeckGains[1].gain.setValueAtTime(0, now);
+    }
+    if (this.ctx && this.musicFadeGain) {
+      const now = this.ctx.currentTime;
+      this.musicFadeGain.gain.cancelScheduledValues(now);
+      this.musicFadeGain.gain.setValueAtTime(0, now);
+    }
+
+    for (const src of this.activeMusicSources) {
+      try {
+        src.onended = null;
+        src.stop();
+      } catch {
+        // Ignore already stopped sources
+      }
+      try {
+        src.disconnect();
+      } catch {
+        // Ignore already disconnected sources
+      }
+    }
+    this.activeMusicSources.clear();
+    this.menuMusicPlaying = false;
+  }
+
+  public disposeMenuMusic() {
+    this.teardownGestureListeners();
+    if (typeof document !== 'undefined' && this.visibilityListenerAttached) {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+      this.visibilityListenerAttached = false;
+    }
+    this.fadeEpoch += 1;
+    if (this.fadeOutStopTimerId !== null) {
+      window.clearTimeout(this.fadeOutStopTimerId);
+      this.fadeOutStopTimerId = null;
+    }
+    this.pauseActiveMusicSources(false);
+    this.menuMusicWanted = false;
+    this.wasPlayingBeforeHide = false;
+    this.menuMusicStatus = this.menuMusicError ? 'error' : 'idle';
+    this.notifyMenuMusic();
   }
 
   public playUiConfirm(soft = false) {
@@ -429,6 +1118,11 @@ class SoundEngine {
   }
 
   public startAmbient() {
+    // Coordinate smoothly if the menu soundtrack was still active or fading
+    if (this.menuMusicWanted || this.menuMusicPlaying) {
+      this.setMenuMusicWanted(false, 1.0);
+    }
+
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
     this.ambientActive = true;

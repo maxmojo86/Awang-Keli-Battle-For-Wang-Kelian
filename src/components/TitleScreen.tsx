@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, VolumeX } from 'lucide-react';
-import { soundEngine } from '../game/audio';
+import { MenuMusicSnapshot, soundEngine } from '../game/audio';
 import { AccessibilitySettings } from '../game/types';
 import { HowToPlayModal } from './HowToPlayModal';
 import { TitleSettingsModal } from './TitleSettingsModal';
@@ -50,6 +50,7 @@ export function getBackgroundForComposition(comp: TitleComposition): string {
 }
 
 const loadedImageUrls = new Set<string>();
+let hasPlayedTitleIntro = false;
 
 function preloadImage(url: string): Promise<void> {
   if (loadedImageUrls.has(url)) return Promise.resolve();
@@ -89,6 +90,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const [howToPlayOpen, setHowToPlayOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isEnteringPlay, setIsEnteringPlay] = useState(false);
+  const [menuMusic, setMenuMusic] = useState<MenuMusicSnapshot>(() =>
+    soundEngine.getMenuMusicSnapshot()
+  );
 
   const playButtonRef = useRef<HTMLButtonElement | null>(null);
   const howToPlayButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -170,13 +174,44 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     };
   }, [essentialUrls]);
 
+  useEffect(() => {
+    return soundEngine.subscribeMenuMusic(setMenuMusic);
+  }, []);
+
+  useEffect(() => {
+    if (!assetsReady) return;
+    void soundEngine.preloadMenuMusic();
+  }, [assetsReady]);
+
   const reducedMotion = settings.reducedMotion || osReducedMotion;
+  const [introActive, setIntroActive] = useState<boolean>(() => !hasPlayedTitleIntro);
+
+  useEffect(() => {
+    if (!introActive || !assetsReady) return;
+    hasPlayedTitleIntro = true;
+
+    if (reducedMotion) {
+      setIntroActive(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setIntroActive(false);
+    }, 2080);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [introActive, assetsReady, reducedMotion]);
+
+  const shouldAnimateIntro = introActive && assetsReady && !reducedMotion;
 
   const handlePlayClick = () => {
     if (isEnteringPlay) return;
     setIsEnteringPlay(true);
     soundEngine.unlockFromGesture();
     soundEngine.playUiConfirm(false);
+    soundEngine.setMenuMusicWanted(false, 1.0);
 
     const handoffMs = reducedMotion ? 90 : 180;
     playTimerRef.current = window.setTimeout(() => {
@@ -190,6 +225,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     onUpdateSettings({ muted: nextMuted });
     if (!nextMuted) {
       soundEngine.unlockFromGesture();
+      void soundEngine.unlockMenuMusicFromGesture();
       soundEngine.playUiConfirm(true);
     }
   };
@@ -212,20 +248,28 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const isTabletLandscape = composition === 'tablet_landscape';
 
   const logoWidthStyle = isPortrait
-    ? 'clamp(205px, 63vw, 400px)'
+    ? 'clamp(248px, 70vw, 450px)'
     : isPhoneLandscape
-      ? 'clamp(170px, 28.5vw, 248px)'
+      ? 'clamp(215px, 31vw, 285px)'
       : isTabletLandscape
-        ? 'clamp(270px, 37vw, 410px)'
-        : 'clamp(290px, 32.5vw, 505px)';
+        ? 'clamp(300px, 39vw, 440px)'
+        : 'clamp(340px, 34vw, 600px)';
 
   const menuWidthStyle = isPortrait
-    ? 'clamp(176px, 44vw, 286px)'
+    ? 'clamp(192px, 50vw, 290px)'
     : isPhoneLandscape
-      ? 'clamp(164px, 22.5vw, 212px)'
+      ? 'clamp(176px, 23vw, 220px)'
       : isTabletLandscape
-        ? 'clamp(215px, 26vw, 292px)'
-        : 'clamp(220px, 21vw, 326px)';
+        ? 'clamp(230px, 26vw, 310px)'
+        : 'clamp(236px, 21vw, 350px)';
+
+  // Reserve space on the right in landscape compositions so centering the logo + menu
+  // puts them optically in the middle of the screen without obscuring Awang Keli's face.
+  const landscapeRightReserve = isPortrait
+    ? undefined
+    : isTabletLandscape || isPhoneLandscape
+      ? 'max(14vw, env(safe-area-inset-right))'
+      : 'max(11vw, env(safe-area-inset-right))';
 
   const menuButtons = [
     {
@@ -300,32 +344,30 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
       {/* Main Title Screen Content Layer (inside device safe areas, strictly within 100dvh) */}
       <div
-        className={`relative z-10 w-full h-full flex flex-col justify-between overflow-hidden transition-opacity ${
+        className={`relative z-10 w-full h-full flex flex-col items-center justify-start overflow-hidden transition-opacity ${
           reducedMotion ? 'duration-100' : 'duration-300'
         } ${assetsReady ? 'opacity-100' : 'opacity-0'}`}
         style={{
           paddingTop: isPhoneLandscape
-            ? 'max(18px, env(safe-area-inset-top))'
+            ? 'max(16px, env(safe-area-inset-top))'
             : isPortrait
-              ? 'max(26px, clamp(24px, 4.2vh, 52px), env(safe-area-inset-top))'
+              ? viewport.width < 520
+                ? 'max(48px, clamp(44px, 5.6vh, 62px), env(safe-area-inset-top))'
+                : 'max(40px, clamp(36px, 4.5vh, 54px), env(safe-area-inset-top))'
               : isTabletLandscape
-                ? 'max(32px, env(safe-area-inset-top))'
-                : 'max(40px, clamp(36px, 6vh, 72px), env(safe-area-inset-top))',
+                ? 'max(28px, clamp(26px, 3.8vh, 42px), env(safe-area-inset-top))'
+                : 'max(34px, clamp(28px, 4.2vh, 52px), env(safe-area-inset-top))',
           paddingBottom: isPhoneLandscape
-            ? 'max(16px, env(safe-area-inset-bottom))'
+            ? 'max(14px, env(safe-area-inset-bottom))'
             : 'max(24px, env(safe-area-inset-bottom))',
           paddingLeft: isPhoneLandscape
-            ? 'max(32px, clamp(30px, 4.8vw, 48px), env(safe-area-inset-left))'
+            ? 'max(24px, env(safe-area-inset-left))'
             : isPortrait
-              ? 'max(24px, clamp(24px, 5.8vw, 56px), env(safe-area-inset-left))'
-              : isTabletLandscape
-                ? 'max(44px, clamp(40px, 5.6vw, 72px), env(safe-area-inset-left))'
-                : 'max(48px, clamp(44px, 6.2vw, 108px), env(safe-area-inset-left))',
-          paddingRight: isPhoneLandscape
-            ? 'max(24px, env(safe-area-inset-right))'
-            : isPortrait
-              ? 'max(24px, clamp(24px, 5.8vw, 56px), env(safe-area-inset-right))'
-              : 'max(32px, clamp(28px, 3.6vw, 60px), env(safe-area-inset-right))',
+              ? 'max(20px, clamp(20px, 5vw, 48px), env(safe-area-inset-left))'
+              : 'max(32px, clamp(28px, 3.5vw, 56px), env(safe-area-inset-left))',
+          paddingRight: isPortrait
+            ? 'max(20px, clamp(20px, 5vw, 48px), env(safe-area-inset-right))'
+            : landscapeRightReserve,
         }}
       >
         {/* Upper-Right Safe Area Sound Toggle Button */}
@@ -335,19 +377,20 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             top: isPhoneLandscape
               ? 'max(18px, env(safe-area-inset-top))'
               : isPortrait
-                ? 'max(22px, clamp(20px, 3vh, 36px), env(safe-area-inset-top))'
+                ? 'max(20px, clamp(18px, 2.8vh, 34px), env(safe-area-inset-top))'
                 : isTabletLandscape
                   ? 'max(26px, env(safe-area-inset-top))'
                   : 'max(28px, clamp(24px, 4.2vh, 48px), env(safe-area-inset-top))',
             right: isPhoneLandscape
               ? 'max(24px, env(safe-area-inset-right))'
               : isPortrait
-                ? 'max(22px, clamp(20px, 4.5vw, 40px), env(safe-area-inset-right))'
+                ? 'max(20px, clamp(18px, 4vw, 38px), env(safe-area-inset-right))'
                 : isTabletLandscape
                   ? 'max(28px, env(safe-area-inset-right))'
                   : 'max(28px, clamp(24px, 3.2vw, 52px), env(safe-area-inset-right))',
           }}
         >
+          <div className={shouldAnimateIntro ? 'animate-title-sound-intro' : undefined}>
           <button
             type="button"
             onClick={handleSoundToggle}
@@ -416,20 +459,18 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               </>
             )}
           </button>
+          </div>
         </div>
 
-        {/* Left / Top-Sky Title & Menu Cluster (clear of Awang Keli's face & body) */}
-        <main
-          className={`flex flex-col items-start min-w-0 max-w-full ${
-            isPhoneLandscape || isTabletLandscape
-              ? 'my-auto justify-center'
-              : 'justify-start'
-          }`}
-        >
-          {/* Decorative Title Logo (kept clear of top-right sound button) */}
+        {/* Centered Top-Middle Title Logo & Middle-Aligned Menu Stack (clear of Awang Keli) */}
+        <main className="flex flex-col items-center justify-start min-w-0 max-w-full">
+          {/* Decorative Prominent Top-Middle Title Logo */}
           <h1 className="sr-only">Awang Keli: Battle for Wang Kelian</h1>
           <div
-            className="shrink-0 max-w-[calc(100%-64px)] sm:max-w-full"
+            data-testid="title-logo-intro"
+            className={`shrink-0 max-w-full ${
+              shouldAnimateIntro ? 'animate-title-logo-intro' : ''
+            }`}
             style={{ width: logoWidthStyle }}
           >
             <img
@@ -439,7 +480,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               draggable={false}
               width={2055}
               height={765}
-              className="pointer-events-none select-none block w-full h-auto drop-shadow-[0_10px_22px_rgba(0,0,0,0.65)]"
+              className="pointer-events-none select-none block w-full h-auto drop-shadow-[0_10px_24px_rgba(0,0,0,0.68)]"
               style={{ aspectRatio: '2055 / 765' }}
             />
           </div>
@@ -449,61 +490,97 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             aria-label="Main Menu"
             className={`flex flex-col items-stretch ${
               isPhoneLandscape
-                ? 'mt-2 gap-2'
+                ? 'mt-[clamp(10px,3.5vh,18px)] gap-2'
                 : isPortrait
-                  ? 'mt-[clamp(10px,2vh,22px)] gap-2.5 sm:gap-3.5'
-                  : 'mt-[clamp(14px,2.4vh,28px)] gap-3 sm:gap-3.5'
+                  ? 'mt-[clamp(14px,2.2vh,24px)] gap-2.5 sm:gap-3.5'
+                  : isTabletLandscape
+                    ? 'mt-[clamp(24px,5.2vh,44px)] gap-3'
+                    : 'mt-[clamp(26px,5.5vh,62px)] gap-3 sm:gap-4'
             }`}
             style={{ width: menuWidthStyle }}
           >
-            {menuButtons.map((btn) => (
-              <button
+            {menuButtons.map((btn, idx) => (
+              <div
                 key={btn.id}
-                ref={btn.ref}
-                type="button"
-                onClick={btn.onClick}
-                disabled={btn.disabled}
-                aria-label={btn.label}
-                aria-busy={btn.id === 'play' && isEnteringPlay ? 'true' : undefined}
-                className={`relative appearance-none border-0 bg-transparent p-0 m-0 w-full flex items-center justify-center overflow-visible rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] focus-visible:ring-offset-2 focus-visible:ring-offset-[#091116] ${
-                  btn.disabled ? 'cursor-wait opacity-85' : `cursor-pointer ${buttonMotionClasses}`
+                data-testid={`title-btn-intro-${btn.id}`}
+                className={`w-full ${
+                  shouldAnimateIntro
+                    ? idx === 0
+                      ? 'animate-title-btn-1'
+                      : idx === 1
+                        ? 'animate-title-btn-2'
+                        : 'animate-title-btn-3'
+                    : ''
                 }`}
-                style={{
-                  aspectRatio: '4.6 / 1',
-                  minHeight: isPhoneLandscape ? '40px' : '44px',
-                }}
               >
-                <img
-                  src={btn.asset}
-                  alt=""
-                  aria-hidden="true"
-                  draggable={false}
-                  width={2172}
-                  height={724}
-                  className="pointer-events-none select-none block max-w-none h-auto"
+                <button
+                  ref={btn.ref}
+                  type="button"
+                  onClick={btn.onClick}
+                  disabled={btn.disabled}
+                  aria-label={btn.label}
+                  aria-busy={btn.id === 'play' && isEnteringPlay ? 'true' : undefined}
+                  className={`relative appearance-none border-0 bg-transparent p-0 m-0 w-full flex items-center justify-center overflow-visible rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] focus-visible:ring-offset-2 focus-visible:ring-offset-[#091116] ${
+                    btn.disabled ? 'cursor-wait opacity-85' : `cursor-pointer ${buttonMotionClasses}`
+                  }`}
                   style={{
-                    width: '108%',
-                    aspectRatio: '2172 / 724',
+                    aspectRatio: '4.6 / 1',
+                    minHeight: isPhoneLandscape ? '40px' : '44px',
                   }}
-                />
-                {btn.id === 'play' && isEnteringPlay && (
-                  <span
-                    role="status"
-                    aria-live="polite"
-                    className="pointer-events-none absolute inset-x-3 inset-y-1 flex items-center justify-center gap-1.5 rounded-[3px] bg-[#0b1218]/90 border border-[#f3d285] text-[11px] sm:text-xs font-mono-num font-semibold text-[#f3d285]"
-                  >
-                    <Loader2
-                      className={`w-3.5 h-3.5 shrink-0 ${reducedMotion ? '' : 'animate-spin'}`}
-                      aria-hidden="true"
-                    />
-                    <span>Entering…</span>
-                  </span>
-                )}
-              </button>
+                >
+                  <img
+                    src={btn.asset}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    width={2172}
+                    height={724}
+                    className="pointer-events-none select-none block max-w-none h-auto"
+                    style={{
+                      width: '108%',
+                      aspectRatio: '2172 / 724',
+                    }}
+                  />
+                  {btn.id === 'play' && isEnteringPlay && (
+                    <span
+                      role="status"
+                      aria-live="polite"
+                      className="pointer-events-none absolute inset-x-3 inset-y-1 flex items-center justify-center gap-1.5 rounded-[3px] bg-[#0b1218]/90 border border-[#f3d285] text-[11px] sm:text-xs font-mono-num font-semibold text-[#f3d285]"
+                    >
+                      <Loader2
+                        className={`w-3.5 h-3.5 shrink-0 ${reducedMotion ? '' : 'animate-spin'}`}
+                        aria-hidden="true"
+                      />
+                      <span>Entering…</span>
+                    </span>
+                  )}
+                </button>
+              </div>
             ))}
           </nav>
         </main>
       </div>
+
+      {/* Concise Non-Blocking Audio Failure Status */}
+      {menuMusic.status === 'error' && menuMusic.errorMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[92vw] compendium-plaque rounded-[2px] px-3 py-1.5 flex items-center gap-2.5 text-[11px] sm:text-xs text-[#fecaca]"
+          style={{
+            marginBottom: 'env(safe-area-inset-bottom)',
+          }}
+        >
+          <span className="truncate">{menuMusic.errorMessage}</span>
+          <button
+            type="button"
+            onClick={() => void soundEngine.retryMenuMusic()}
+            className="shrink-0 px-2 py-0.5 rounded-[2px] border border-[#f3d285]/60 bg-[#142029] text-[#f3d285] hover:border-[#f3d285] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Responsive Scrollable Rules & Device Controls Overlay */}
       <HowToPlayModal

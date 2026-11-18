@@ -334,6 +334,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   useEffect(() => {
     soundEngine.setMuted(settings.muted);
     soundEngine.setVolume(settings.volume);
+    soundEngine.setMusicVolume(settings.musicVolume ?? 0.35);
     sceneRef.current?.setReducedMotion(settings.reducedMotion);
   }, [settings]);
 
@@ -2353,6 +2354,46 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     checked={settings.muted}
                     onChange={(e) => onUpdateSettings({ muted: e.target.checked })}
                     className="accent-[#c99c4a] w-4 h-4"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3">
+                  <span className="text-[#e2e8f0]">
+                    Music Volume ({Math.round((settings.musicVolume ?? 0.35) * 100)}%)
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={settings.musicVolume ?? 0.35}
+                    aria-label="Music Volume"
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      soundEngine.setMusicVolume(v);
+                      onUpdateSettings({ musicVolume: v });
+                    }}
+                    className="accent-[#c99c4a] w-32"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-3">
+                  <span className="text-[#e2e8f0]">
+                    Effects Volume ({Math.round(settings.volume * 100)}%)
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={settings.volume}
+                    aria-label="Sound Effects Volume"
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      soundEngine.setVolume(v);
+                      onUpdateSettings({ volume: v });
+                    }}
+                    className="accent-[#c99c4a] w-32"
                   />
                 </label>
 

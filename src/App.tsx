@@ -92,15 +92,25 @@ export default function App() {
   useEffect(() => {
     soundEngine.setMuted(settings.muted);
     soundEngine.setVolume(settings.volume);
+    soundEngine.setMusicVolume(settings.musicVolume ?? 0.35);
     spatialVoice.setMasterMuted(settings.muted);
     spatialVoice.setVoiceVolume(settings.voiceVolume ?? 0.9);
     spatialVoice.setVoiceMode(settings.voiceMode ?? 'open');
   }, [
     settings.muted,
     settings.volume,
+    settings.musicVolume,
     settings.voiceVolume,
     settings.voiceMode,
   ]);
+
+  useEffect(() => {
+    return soundEngine.attachMenuMusicLifecycle();
+  }, []);
+
+  useEffect(() => {
+    soundEngine.setMenuMusicWanted(screen === 'title', 1.0);
+  }, [screen]);
 
   useEffect(() => {
     spatialVoice.init();
