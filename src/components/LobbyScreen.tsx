@@ -34,6 +34,7 @@ import {
 import { multiplayerClient, MultiplayerSnapshot } from '../game/multiplayerClient';
 import { spatialVoice, SpatialVoiceSnapshot } from '../game/spatialVoice';
 import { AccessibilitySettings, LobbySize, MatchMode } from '../game/types';
+import { resolveAssetUrl } from '../utils/assetUrl';
 import { DESIGN_PLATES } from './DesignCodexModal';
 
 export type LobbyPlayMode = MatchMode | 'multiplayer';
@@ -47,6 +48,8 @@ interface LobbyScreenProps {
   globalLeaderboard: GlobalLeaderboardResponse | null;
   globalLeaderboardLoading: boolean;
   globalLeaderboardError: string | null;
+  onlineLeaderboardAvailable?: boolean;
+  onlineMultiplayerAvailable?: boolean;
   globalRegionFilter: RegionFilter;
   globalSort: GlobalLeaderboardSort;
   epilogueUnlocked: boolean;
@@ -69,8 +72,8 @@ interface LobbyScreenProps {
 
 const LOBBY_SIZES: LobbySize[] = [5, 10, 20, 25, 50, 100];
 
-const HERO_ART = '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.png';
-const LINEUP_ART = '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.png';
+const HERO_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.png');
+const LINEUP_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.png');
 
 function formatRecordedDate(iso: string): string {
   const date = new Date(iso);
@@ -92,6 +95,8 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   globalLeaderboard,
   globalLeaderboardLoading,
   globalLeaderboardError,
+  onlineLeaderboardAvailable = true,
+  onlineMultiplayerAvailable = true,
   globalRegionFilter,
   globalSort,
   epilogueUnlocked,
@@ -112,7 +117,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   onReturnToTitle,
 }) => {
   const [nameDraft, setNameDraft] = useState(playerName);
-  const [boardScope, setBoardScope] = useState<'global' | 'local'>('global');
+  const [boardScope, setBoardScope] = useState<'global' | 'local'>(() =>
+    onlineLeaderboardAvailable ? 'global' : 'local'
+  );
   const [sortOrder, setSortOrder] = useState<LeaderboardSortOrder>('longest');
   const [confirmClear, setConfirmClear] = useState(false);
   const [joinCodeDraft, setJoinCodeDraft] = useState('');
@@ -230,15 +237,21 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           <div className="shrink-0">
             <button
               type="button"
+              disabled={
+                mode === 'multiplayer' &&
+                (!onlineMultiplayerAvailable || mpSnapshot.status !== 'connected')
+              }
               onClick={commitNameAndStart}
-              className="px-4 py-2 text-xs font-semibold rounded border border-[#f3d285]/40 bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap shrink-0"
+              className="px-4 py-2 text-xs font-semibold rounded border border-[#f3d285]/40 bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0"
             >
               {mode === 'multiplayer'
-                ? currentRoom
-                  ? isHost
-                    ? 'Launch Basin'
-                    : 'In Basin'
-                  : 'Host Basin'
+                ? !onlineMultiplayerAvailable || mpSnapshot.status === 'unavailable'
+                  ? 'Multiplayer Offline'
+                  : currentRoom
+                    ? isHost
+                      ? 'Launch Basin'
+                      : 'In Basin'
+                    : 'Host Basin'
                 : 'Enter Basin'}
             </button>
           </div>
@@ -379,6 +392,37 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
 
                 {mode === 'multiplayer' && (
                   <div className="space-y-3 pt-1 border-t border-[#22313d]">
+                    {!onlineMultiplayerAvailable || mpSnapshot.status === 'unavailable' ? (
+                      <div
+                        data-testid="multiplayer-unavailable-notice"
+                        className="rounded-[2px] border border-[#5b4724] bg-[#0b1218] p-3.5 space-y-2.5"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs font-semibold text-[#f3d285]">
+                          <span>Online Multiplayer Unavailable</span>
+                          <span className="font-mono-num text-[10.5px] text-[#9cb0ba]">Solo Mode Active</span>
+                        </div>
+                        <p className="text-xs text-[#b5c2c9] leading-relaxed">
+                          No multiplayer server is configured for this session. Solo Royale and Guide Mode remain fully playable offline; Basin rooms, rival bounties, and spatial voice chat activate once a backend WebSocket URL is configured.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          <button
+                            type="button"
+                            onClick={() => onSelectMode('royale')}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap"
+                          >
+                            Switch to Solo Royale
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onSelectMode('tutorial')}
+                            className="px-3 py-1.5 text-xs font-medium rounded-[2px] border border-[#3d311d] bg-[#142029] text-[#f3e6c8] hover:border-[#c99c4a] transition-colors whitespace-nowrap"
+                          >
+                            Play Guide Mode
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
                     <div className="flex items-center justify-between text-[11px] font-mono-num">
                       <span className="text-[#9cb0ba]">
                         Server:{' '}
@@ -800,12 +844,23 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                         </div>
                       </div>
                     )}
+                      </>
+                    )}
                   </div>
                 )}
 
                 <div className="flex flex-wrap items-center gap-2.5 pt-1">
                   {mode === 'multiplayer' ? (
-                    !currentRoom ? (
+                    !onlineMultiplayerAvailable || mpSnapshot.status === 'unavailable' ? (
+                      <button
+                        type="button"
+                        disabled
+                        className="flex-1 flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-[2px] border border-[#2d404d] bg-[#101a22] text-[#9cb0ba] opacity-65 cursor-not-allowed whitespace-nowrap"
+                      >
+                        <Users className="w-4 h-4" />
+                        Multiplayer Offline
+                      </button>
+                    ) : !currentRoom ? (
                       <button
                         type="button"
                         disabled={mpSnapshot.status !== 'connected'}
@@ -960,42 +1015,44 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
               </div>
 
               {boardScope === 'global' ? (
-                <>
-                  <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
-                    {(
-                      [
-                        { id: 'longest', label: 'Longest' },
-                        { id: 'fastest_king', label: 'Fastest King' },
-                        { id: 'kills', label: 'Most Kills' },
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => onSelectGlobalSort(opt.id)}
-                        className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
-                          globalSort === opt.id
-                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
-                            : 'text-[#a9b9c2] hover:text-white'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
+                onlineLeaderboardAvailable ? (
+                  <>
+                    <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
+                      {(
+                        [
+                          { id: 'longest', label: 'Longest' },
+                          { id: 'fastest_king', label: 'Fastest King' },
+                          { id: 'kills', label: 'Most Kills' },
+                        ] as const
+                      ).map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => onSelectGlobalSort(opt.id)}
+                          className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
+                            globalSort === opt.id
+                              ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                              : 'text-[#a9b9c2] hover:text-white'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
 
-                  <button
-                    type="button"
-                    onClick={onRefreshGlobalLeaderboard}
-                    disabled={globalLeaderboardLoading}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4a3c22] bg-[#101920] text-[#f3e6c8] hover:border-[#c99c4a] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <RefreshCw
-                      className={`w-3.5 h-3.5 ${globalLeaderboardLoading ? 'animate-spin' : ''}`}
-                    />
-                    Refresh
-                  </button>
-                </>
+                    <button
+                      type="button"
+                      onClick={onRefreshGlobalLeaderboard}
+                      disabled={globalLeaderboardLoading}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4a3c22] bg-[#101920] text-[#f3e6c8] hover:border-[#c99c4a] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${globalLeaderboardLoading ? 'animate-spin' : ''}`}
+                      />
+                      Refresh
+                    </button>
+                  </>
+                ) : null
               ) : (
                 <>
                   <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
@@ -1063,6 +1120,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           {boardScope === 'global' ? (
             <div className="space-y-3">
               {/* Regional Standings Filter Strip */}
+              {onlineLeaderboardAvailable && (
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                 <button
                   type="button"
@@ -1144,10 +1202,37 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                   );
                 })}
               </div>
+              )}
 
               {/* Global Top 100 Table */}
               <div className="compendium-plaque rounded-sm overflow-hidden">
-                {globalLeaderboardError ? (
+                {!onlineLeaderboardAvailable ? (
+                  <div
+                    data-testid="leaderboard-unavailable-notice"
+                    className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-[2px] border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
+                        <Globe className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-[#f3d285]">
+                          Global &amp; Regional Rankings Unavailable
+                        </div>
+                        <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
+                          Online Top 100 rankings require a hosted backend API. Your Solo Royale victories are still recorded locally on this device in Local Top 10 Records.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setBoardScope('local')}
+                      className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                    >
+                      View Local Top 10
+                    </button>
+                  </div>
+                ) : globalLeaderboardError ? (
                   <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div>
                       <div className="text-sm font-semibold text-[#fca5a5]">
@@ -1155,13 +1240,22 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                       </div>
                       <p className="text-xs text-[#9cb0ba] mt-1">{globalLeaderboardError}</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={onRefreshGlobalLeaderboard}
-                      className="px-4 py-2 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] transition-colors whitespace-nowrap shrink-0"
-                    >
-                      Retry Fetch
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setBoardScope('local')}
+                        className="px-3.5 py-2 text-xs font-medium rounded-[2px] border border-[#2d404d] bg-[#0b1218] text-[#c7d1cd] hover:border-[#c99c4a] hover:text-white transition-colors whitespace-nowrap"
+                      >
+                        Local Top 10
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onRefreshGlobalLeaderboard}
+                        className="px-4 py-2 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] transition-colors whitespace-nowrap"
+                      >
+                        Retry Fetch
+                      </button>
+                    </div>
                   </div>
                 ) : globalLeaderboardLoading && !globalLeaderboard ? (
                   <div className="px-6 py-8 text-sm text-[#9cb0ba]">
@@ -1475,7 +1569,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                       <td className="py-1.5 px-4">
                         <div className="w-11 h-11 rounded border border-[#3a301e] bg-[#0b1218] flex items-center justify-center p-1">
                           <img
-                            src={`/assets/sprites/keli_lv${m.level}.png`}
+                            src={resolveAssetUrl(`assets/sprites/keli_lv${m.level}.png`)}
                             alt={`Awang Keli Lv.${m.level} sprite`}
                             referrerPolicy="no-referrer"
                             className="max-w-full max-h-full object-contain"

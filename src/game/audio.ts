@@ -1,4 +1,5 @@
 import type { ArenaZoneId, EvolutionForm, HazardTileKind, TerrainType, WeatherKind } from './types.ts';
+import { resolveAssetUrl } from '../utils/assetUrl.ts';
 
 export interface AmbientEnvironmentState {
   dt: number;
@@ -316,7 +317,9 @@ export function getAmbientProfile(
   return profile;
 }
 
-export const MENU_SOUNDTRACK_URL = '/assets/aistudio/Panggilan_Lubuk_Hitam_8b130ca5.mp3';
+export const MENU_SOUNDTRACK_URL = resolveAssetUrl(
+  'assets/aistudio/Panggilan_Lubuk_Hitam_8b130ca5.mp3'
+);
 
 export type MenuMusicStatus =
   | 'idle'

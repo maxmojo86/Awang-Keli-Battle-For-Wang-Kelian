@@ -1,5 +1,6 @@
 import type { EmoteId } from '../data/emotes';
 import { soundEngine } from './audio';
+import { getMultiplayerWsUrl } from './backendConfig';
 import {
   ClientMessage,
   ClientSfxEvent,
@@ -392,7 +393,12 @@ export class RemoteSimulationView implements RenderableSimulation {
   }
 }
 
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+export type ConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'unavailable';
 
 export interface MultiplayerSnapshot {
   status: ConnectionStatus;
@@ -417,7 +423,7 @@ export class MultiplayerClient {
   private lastSentInput = { moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: false };
 
   private state: MultiplayerSnapshot = {
-    status: 'disconnected',
+    status: getMultiplayerWsUrl() ? 'disconnected' : 'unavailable',
     clientId: this.readStoredClientId(),
     latencyMs: null,
     rooms: [],
@@ -514,17 +520,36 @@ export class MultiplayerClient {
   }
 
   public connect() {
+    const url = getMultiplayerWsUrl();
+    if (!url) {
+      this.shouldStayConnected = false;
+      this.state.status = 'unavailable';
+      this.state.error = null;
+      this.state.latencyMs = null;
+      this.state.rooms = [];
+      this.state.currentRoom = null;
+      this.emitState();
+      return;
+    }
+
     this.shouldStayConnected = true;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/ws`;
     this.state.status = this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
     this.emitState();
 
-    const ws = new WebSocket(url);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      this.shouldStayConnected = false;
+      this.state.status = 'unavailable';
+      this.state.error = 'Online multiplayer server URL is invalid or unreachable.';
+      this.emitState();
+      return;
+    }
     this.ws = ws;
 
     ws.onopen = () => {

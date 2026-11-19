@@ -4,6 +4,7 @@ import { MenuMusicSnapshot, soundEngine } from '../game/audio';
 import { AccessibilitySettings } from '../game/types';
 import { HowToPlayModal } from './HowToPlayModal';
 import { TitleSettingsModal } from './TitleSettingsModal';
+import { resolveAssetUrl } from '../utils/assetUrl';
 
 export type TitleComposition =
   | 'pc_landscape'
@@ -12,14 +13,14 @@ export type TitleComposition =
   | 'phone_landscape';
 
 export const TITLE_ASSETS = {
-  backgroundPc: '/assets/aistudio/background_pc_3a680506.png',
-  backgroundTablet: '/assets/aistudio/background_tablet_b14c26bb.png',
-  backgroundMobile: '/assets/aistudio/background_mobile_7814b36a.png',
-  titleLogo: '/assets/aistudio/title_logo_8afae8a7.png',
-  buttonPlay: '/assets/aistudio/button_play_4a10f5b1.png',
-  buttonHowToPlay: '/assets/aistudio/button_how_to_play_76f4c34d.png',
-  buttonSettings: '/assets/aistudio/button_settings_d47aea02.png',
-  buttonSound: '/assets/aistudio/button_sound_e94609b9.png',
+  backgroundPc: resolveAssetUrl('assets/aistudio/background_pc_3a680506.png'),
+  backgroundTablet: resolveAssetUrl('assets/aistudio/background_tablet_b14c26bb.png'),
+  backgroundMobile: resolveAssetUrl('assets/aistudio/background_mobile_7814b36a.png'),
+  titleLogo: resolveAssetUrl('assets/aistudio/title_logo_8afae8a7.png'),
+  buttonPlay: resolveAssetUrl('assets/aistudio/button_play_4a10f5b1.png'),
+  buttonHowToPlay: resolveAssetUrl('assets/aistudio/button_how_to_play_76f4c34d.png'),
+  buttonSettings: resolveAssetUrl('assets/aistudio/button_settings_d47aea02.png'),
+  buttonSound: resolveAssetUrl('assets/aistudio/button_sound_e94609b9.png'),
 } as const;
 
 export function selectTitleComposition(width: number, height: number): TitleComposition {

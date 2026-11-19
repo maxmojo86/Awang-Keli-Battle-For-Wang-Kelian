@@ -11,10 +11,13 @@ import {
   X,
 } from 'lucide-react';
 import { COMIC_PAGES } from '../data/comicPages';
+import { resolveAssetUrl } from '../utils/assetUrl';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-export const COMIC_PDF_URL = '/assets/aistudio/AWANG_KELI_Vol_1_MOJO_COMIX_0580ad21.pdf';
+export const COMIC_PDF_URL = resolveAssetUrl(
+  'assets/aistudio/AWANG_KELI_Vol_1_MOJO_COMIX_0580ad21.pdf'
+);
 
 interface ComicPdfPageMeta {
   pdfPage: number;

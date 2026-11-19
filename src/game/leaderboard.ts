@@ -5,6 +5,7 @@ import {
   VALID_REGION_CODES,
 } from '../data/regions';
 import { HudSnapshot, LobbySize, MatchMode } from './types';
+import { buildApiUrl } from './backendConfig';
 
 export const SURVIVAL_LEADERBOARD_STORAGE_KEY = 'awang_keli_top_survival_times';
 export const PLAYER_NAME_STORAGE_KEY = 'awang_keli_player_name';
@@ -248,21 +249,65 @@ export interface GlobalSubmissionResult {
   totalRegional: number;
 }
 
+export class LeaderboardUnavailableError extends Error {
+  constructor(message = 'Global leaderboard backend is not configured for this build.') {
+    super(message);
+    this.name = 'LeaderboardUnavailableError';
+  }
+}
+
 export async function fetchGlobalLeaderboard(
   region: RegionFilter = 'ALL',
   sort: GlobalLeaderboardSort = 'longest',
   limit = 100
 ): Promise<GlobalLeaderboardResponse> {
+  const endpoint = buildApiUrl('/api/leaderboard');
+  if (!endpoint) {
+    throw new LeaderboardUnavailableError();
+  }
+
   const params = new URLSearchParams({
     region,
     sort,
     limit: String(Math.max(1, Math.min(100, limit))),
   });
-  const res = await fetch(`/api/leaderboard?${params.toString()}`);
-  if (!res.ok) {
-    throw new Error(`Leaderboard request failed (${res.status})`);
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId =
+    controller && typeof window !== 'undefined'
+      ? window.setTimeout(() => controller.abort(), 8000)
+      : null;
+
+  try {
+    const res = await fetch(`${endpoint}?${params.toString()}`, {
+      signal: controller?.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Leaderboard service responded with HTTP ${res.status}.`);
+    }
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('Leaderboard service returned an unexpected response format.');
+    }
+    const payload = (await res.json()) as Partial<GlobalLeaderboardResponse>;
+    if (!payload || !Array.isArray(payload.entries) || !Array.isArray(payload.regionSummary)) {
+      throw new Error('Leaderboard response was incomplete.');
+    }
+    return payload as GlobalLeaderboardResponse;
+  } catch (err) {
+    if (err instanceof LeaderboardUnavailableError) throw err;
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Global rankings request timed out. Local records remain available.');
+    }
+    if (err instanceof Error && err.message) {
+      throw err;
+    }
+    throw new Error('Unable to reach global rankings service. Local records remain available.');
+  } finally {
+    if (timeoutId !== null && typeof window !== 'undefined') {
+      window.clearTimeout(timeoutId);
+    }
   }
-  return (await res.json()) as GlobalLeaderboardResponse;
 }
 
 export async function submitGlobalSurvivalTime(
@@ -273,26 +318,48 @@ export async function submitGlobalSurvivalTime(
   submissionId: string
 ): Promise<GlobalSubmissionResult | null> {
   if (snap.mode === 'tutorial') return null;
+  const endpoint = buildApiUrl('/api/leaderboard');
+  if (!endpoint) return null;
+
   const survivalTime = Math.max(0, Number(snap.matchResult.survivalTime.toFixed(2)));
   if (survivalTime < 1) return null;
 
-  const res = await fetch('/api/leaderboard', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      submissionId,
-      playerName: sanitizePlayerName(playerName || snap.player.name),
-      region,
-      survivalTime,
-      finalLevel: Math.max(1, Math.min(100, Math.round(snap.matchResult.finalLevel))),
-      kills: Math.max(0, Math.floor(snap.matchResult.kills)),
-      victory: snap.matchResult.status === 'victory',
-      lobbySize: snap.lobbySize,
-      mode: isMultiplayer ? 'multiplayer' : 'royale',
-    }),
-  });
-  if (!res.ok) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId =
+    controller && typeof window !== 'undefined'
+      ? window.setTimeout(() => controller.abort(), 8000)
+      : null;
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller?.signal,
+      body: JSON.stringify({
+        submissionId,
+        playerName: sanitizePlayerName(playerName || snap.player.name),
+        region,
+        survivalTime,
+        finalLevel: Math.max(1, Math.min(100, Math.round(snap.matchResult.finalLevel))),
+        kills: Math.max(0, Math.floor(snap.matchResult.kills)),
+        victory: snap.matchResult.status === 'victory',
+        lobbySize: snap.lobbySize,
+        mode: isMultiplayer ? 'multiplayer' : 'royale',
+      }),
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return null;
+    }
+    return (await res.json()) as GlobalSubmissionResult;
+  } catch {
     return null;
+  } finally {
+    if (timeoutId !== null && typeof window !== 'undefined') {
+      window.clearTimeout(timeoutId);
+    }
   }
-  return (await res.json()) as GlobalSubmissionResult;
 }

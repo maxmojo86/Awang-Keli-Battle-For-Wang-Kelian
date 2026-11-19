@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { resolveAssetUrl } from '../utils/assetUrl';
 import {
   getEvolutionForm,
   getMilestoneTier,
@@ -54,17 +55,17 @@ export interface SpriteSet {
 const SIZE = 160;
 
 const CODEX_SPRITE_PATHS: Record<MilestoneTier, string> = {
-  1: '/assets/sprites/keli_lv1.png',
-  10: '/assets/sprites/keli_lv10.png',
-  20: '/assets/sprites/keli_lv20.png',
-  30: '/assets/sprites/keli_lv30.png',
-  40: '/assets/sprites/keli_lv40.png',
-  50: '/assets/sprites/keli_lv50.png',
-  60: '/assets/sprites/keli_lv60.png',
-  70: '/assets/sprites/keli_lv70.png',
-  80: '/assets/sprites/keli_lv80.png',
-  90: '/assets/sprites/keli_lv90.png',
-  100: '/assets/sprites/keli_lv100.png',
+  1: resolveAssetUrl('assets/sprites/keli_lv1.png'),
+  10: resolveAssetUrl('assets/sprites/keli_lv10.png'),
+  20: resolveAssetUrl('assets/sprites/keli_lv20.png'),
+  30: resolveAssetUrl('assets/sprites/keli_lv30.png'),
+  40: resolveAssetUrl('assets/sprites/keli_lv40.png'),
+  50: resolveAssetUrl('assets/sprites/keli_lv50.png'),
+  60: resolveAssetUrl('assets/sprites/keli_lv60.png'),
+  70: resolveAssetUrl('assets/sprites/keli_lv70.png'),
+  80: resolveAssetUrl('assets/sprites/keli_lv80.png'),
+  90: resolveAssetUrl('assets/sprites/keli_lv90.png'),
+  100: resolveAssetUrl('assets/sprites/keli_lv100.png'),
 };
 
 const loadedCodexImages: Partial<Record<MilestoneTier, HTMLImageElement>> = {};

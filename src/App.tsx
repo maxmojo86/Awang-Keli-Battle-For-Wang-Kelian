@@ -7,6 +7,7 @@ import { PostMatchScreen } from './components/PostMatchScreen';
 import { TitleScreen } from './components/TitleScreen';
 import { RegionCode, RegionFilter } from './data/regions';
 import { soundEngine } from './game/audio';
+import { getBackendConfig } from './game/backendConfig';
 import { loadSavedSettings, saveSettings } from './game/settings';
 import {
   clearTopSurvivalTimes,
@@ -50,10 +51,16 @@ export default function App() {
     getTopSurvivalTimes()
   );
   const [lastLeaderboardRank, setLastLeaderboardRank] = useState<number | null>(null);
+  const backendConfig = getBackendConfig();
+  const onlineLeaderboardAvailable = backendConfig.isApiConfigured;
+  const onlineMultiplayerAvailable = backendConfig.isWsConfigured;
+
   const [globalLeaderboard, setGlobalLeaderboard] = useState<GlobalLeaderboardResponse | null>(
     null
   );
-  const [globalLeaderboardLoading, setGlobalLeaderboardLoading] = useState<boolean>(true);
+  const [globalLeaderboardLoading, setGlobalLeaderboardLoading] = useState<boolean>(
+    onlineLeaderboardAvailable
+  );
   const [globalLeaderboardError, setGlobalLeaderboardError] = useState<string | null>(null);
   const [globalRegionFilter, setGlobalRegionFilter] = useState<RegionFilter>('ALL');
   const [globalSort, setGlobalSort] = useState<GlobalLeaderboardSort>('longest');
@@ -113,7 +120,6 @@ export default function App() {
   }, [screen]);
 
   useEffect(() => {
-    spatialVoice.init();
     const unsubState = multiplayerClient.subscribe(setMpSnapshot);
     const unsubStart = multiplayerClient.onMatchStarted((info) => {
       setFinalHud(null);
@@ -126,28 +132,32 @@ export default function App() {
       setScreen('playing');
     });
 
-    multiplayerClient.connect();
+    if (onlineMultiplayerAvailable) {
+      spatialVoice.init();
+      multiplayerClient.connect();
+    }
 
-    // Auto-join Basin if ?room=CODE is present in the URL
+    // Auto-join Basin if ?room=CODE is present in the URL and multiplayer is available
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room')?.trim().toUpperCase();
     let joinedInitial = false;
-    const unsubWelcome = roomParam
-      ? multiplayerClient.subscribe((snap) => {
-          if (!joinedInitial && snap.status === 'connected' && !snap.currentRoom) {
-            joinedInitial = true;
-            setMode('multiplayer');
-            multiplayerClient.joinRoom(roomParam, getSavedPlayerName());
-          }
-        })
-      : () => {};
+    const unsubWelcome =
+      roomParam && onlineMultiplayerAvailable
+        ? multiplayerClient.subscribe((snap) => {
+            if (!joinedInitial && snap.status === 'connected' && !snap.currentRoom) {
+              joinedInitial = true;
+              setMode('multiplayer');
+              multiplayerClient.joinRoom(roomParam, getSavedPlayerName());
+            }
+          })
+        : () => {};
 
     return () => {
       unsubWelcome();
       unsubStart();
       unsubState();
     };
-  }, []);
+  }, [onlineMultiplayerAvailable]);
 
   const handleUpdateSettings = useCallback((patch: Partial<AccessibilitySettings>) => {
     setSettings((prev) => {
@@ -159,6 +169,11 @@ export default function App() {
 
   const refreshGlobalLeaderboard = useCallback(
     async (regionFilter: RegionFilter = globalRegionFilter, sort: GlobalLeaderboardSort = globalSort) => {
+      if (!onlineLeaderboardAvailable) {
+        setGlobalLeaderboardLoading(false);
+        setGlobalLeaderboardError(null);
+        return;
+      }
       setGlobalLeaderboardLoading(true);
       setGlobalLeaderboardError(null);
       try {
@@ -172,12 +187,13 @@ export default function App() {
         setGlobalLeaderboardLoading(false);
       }
     },
-    [globalRegionFilter, globalSort]
+    [globalRegionFilter, globalSort, onlineLeaderboardAvailable]
   );
 
   useEffect(() => {
+    if (!onlineLeaderboardAvailable) return;
     void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
-  }, [globalRegionFilter, globalSort, refreshGlobalLeaderboard]);
+  }, [globalRegionFilter, globalSort, onlineLeaderboardAvailable, refreshGlobalLeaderboard]);
 
   const handlePlayerNameChange = useCallback((nextName: string) => {
     const saved = savePlayerName(nextName);
@@ -223,7 +239,7 @@ export default function App() {
         setLastLeaderboardRank(null);
       }
 
-      if (snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
+      if (onlineLeaderboardAvailable && snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
         const subId = `run-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         void submitGlobalSurvivalTime(
           snap,
@@ -231,16 +247,20 @@ export default function App() {
           playerRegion,
           Boolean(activeMpSession),
           subId
-        ).then((res) => {
-          if (res) {
-            setLastGlobalRank({
-              globalRank: res.globalRank,
-              regionalRank: res.regionalRank,
-              region: res.entry.region,
-            });
-            void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
-          }
-        });
+        )
+          .then((res) => {
+            if (res) {
+              setLastGlobalRank({
+                globalRank: res.globalRank,
+                regionalRank: res.regionalRank,
+                region: res.entry.region,
+              });
+              void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
+            }
+          })
+          .catch(() => {
+            // Keep solo summary unaffected if global leaderboard submission fails
+          });
       } else {
         setLastGlobalRank(null);
       }
@@ -252,6 +272,7 @@ export default function App() {
       globalRegionFilter,
       globalSort,
       matchKey,
+      onlineLeaderboardAvailable,
       playerName,
       playerRegion,
       refreshGlobalLeaderboard,
@@ -314,6 +335,8 @@ export default function App() {
           globalLeaderboard={globalLeaderboard}
           globalLeaderboardLoading={globalLeaderboardLoading}
           globalLeaderboardError={globalLeaderboardError}
+          onlineLeaderboardAvailable={onlineLeaderboardAvailable}
+          onlineMultiplayerAvailable={onlineMultiplayerAvailable}
           globalRegionFilter={globalRegionFilter}
           globalSort={globalSort}
           epilogueUnlocked={epilogueUnlocked}

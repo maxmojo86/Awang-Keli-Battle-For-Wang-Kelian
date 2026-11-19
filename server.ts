@@ -716,6 +716,17 @@ function handleMessage(client: ConnectedClient, raw: string) {
 
 async function bootstrap() {
   const app = express();
+  const corsOrigin = process.env.CORS_ORIGIN || '*';
+  app.use('/api', (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', corsOrigin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
   app.use(express.json());
   const leaderboardStore = new GlobalLeaderboardStore();
 

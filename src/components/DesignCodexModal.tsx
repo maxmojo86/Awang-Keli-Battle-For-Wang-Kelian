@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { resolveAssetUrl } from '../utils/assetUrl';
 
 export interface DesignPlate {
   id: string;
@@ -13,43 +14,43 @@ export const DESIGN_PLATES: DesignPlate[] = [
     id: 'overview',
     title: 'Game Design Overview',
     subtitle: 'Awang Keli: Battle for Wang Kelian · Core fantasy & evolution',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_00_PM_9939185b.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_00_PM_9939185b.png'),
   },
   {
     id: 'gameplay',
     title: '2.5D Elevated Gameplay View',
     subtitle: 'Directional 2D sprites on 3D lakeside jetty & glowing cavern',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.png'),
   },
   {
     id: 'lineup',
     title: 'Evolution & Class Lineup',
     subtitle: '11 level milestones from Lv.1 fry to Lv.100 Keli King',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.png'),
   },
   {
     id: 'systems',
     title: 'Core Systems & Evolution Rules',
     subtitle: 'Mass conservation, combat loop, and shore exposure thresholds',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_02_PM_3be55285.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_02_PM_3be55285.png'),
   },
   {
     id: 'bestiary-1',
     title: 'Bestiary: Levels 1–39',
     subtitle: 'Early Aquatic Form · Limbless catfish & early Echo Sonar',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_10_PM_bc6f2c88.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_10_PM_bc6f2c88.png'),
   },
   {
     id: 'bestiary-2',
     title: 'Bestiary: Levels 40–79',
     subtitle: 'Crawling Form · Two arms, fish tail & 10-second shore raids',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_14_PM_8aa20377.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_14_PM_8aa20377.png'),
   },
   {
     id: 'bestiary-3',
     title: 'Bestiary: Levels 80–100',
     subtitle: 'Keli King Ascension · Fully amphibious biped & Hunter Sonar',
-    src: '/assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_18_PM_341b30a9.png',
+    src: resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_54_18_PM_341b30a9.png'),
   },
 ];
 
