@@ -74,8 +74,8 @@ interface LobbyScreenProps {
 
 const LOBBY_SIZES: LobbySize[] = [5, 10, 20, 25, 50, 100];
 
-const HERO_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.png');
-const LINEUP_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.png');
+const HERO_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_25_PM_036eb1d0.webp');
+const LINEUP_ART = resolveAssetUrl('assets/aistudio/ChatGPT_Image_Nov_17__2026__03_53_55_PM_8cc3d559.webp');
 
 function formatRecordedDate(iso: string): string {
   const date = new Date(iso);

@@ -14,14 +14,14 @@ export type TitleComposition =
   | 'phone_landscape';
 
 export const TITLE_ASSETS = {
-  backgroundPc: resolveAssetUrl('assets/aistudio/background_pc_3a680506.png'),
-  backgroundTablet: resolveAssetUrl('assets/aistudio/background_tablet_b14c26bb.png'),
-  backgroundMobile: resolveAssetUrl('assets/aistudio/background_mobile_7814b36a.png'),
-  titleLogo: resolveAssetUrl('assets/aistudio/title_logo_8afae8a7.png'),
-  buttonPlay: resolveAssetUrl('assets/aistudio/button_play_4a10f5b1.png'),
-  buttonHowToPlay: resolveAssetUrl('assets/aistudio/button_how_to_play_76f4c34d.png'),
-  buttonSettings: resolveAssetUrl('assets/aistudio/button_settings_d47aea02.png'),
-  buttonSound: resolveAssetUrl('assets/aistudio/button_sound_e94609b9.png'),
+  backgroundPc: resolveAssetUrl('assets/aistudio/background_pc_3a680506.webp'),
+  backgroundTablet: resolveAssetUrl('assets/aistudio/background_tablet_b14c26bb.webp'),
+  backgroundMobile: resolveAssetUrl('assets/aistudio/background_mobile_7814b36a.webp'),
+  titleLogo: resolveAssetUrl('assets/aistudio/title_logo_8afae8a7.webp'),
+  buttonPlay: resolveAssetUrl('assets/aistudio/button_play_4a10f5b1.webp'),
+  buttonHowToPlay: resolveAssetUrl('assets/aistudio/button_how_to_play_76f4c34d.webp'),
+  buttonSettings: resolveAssetUrl('assets/aistudio/button_settings_d47aea02.webp'),
+  buttonSound: resolveAssetUrl('assets/aistudio/button_sound_e94609b9.webp'),
 } as const;
 
 export function selectTitleComposition(width: number, height: number): TitleComposition {

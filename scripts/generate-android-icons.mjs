@@ -16,7 +16,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 
-const SOURCE_ICON = path.join(ROOT, 'public', 'favicon.ico');
+const PLAY_STORE_SOURCE = path.join(ROOT, 'resources', 'play-store-icon-512.png');
+const SOURCE_ICON = fs.existsSync(PLAY_STORE_SOURCE)
+  ? PLAY_STORE_SOURCE
+  : path.join(ROOT, 'public', 'favicon.ico');
 const ANDROID_RES = path.join(ROOT, 'android', 'app', 'src', 'main', 'res');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
