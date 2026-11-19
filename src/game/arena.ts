@@ -521,7 +521,7 @@ export function getHazardModifierForForm(
       if (form === 1) {
         return {
           kind,
-          label: 'Toxic Sludge',
+          label: 'Tin Toxicity',
           speedMult: 0.68,
           staminaRate: -18,
           shoreReserveMult: 1,
@@ -532,7 +532,7 @@ export function getHazardModifierForForm(
       if (form === 2) {
         return {
           kind,
-          label: 'Toxic Sludge',
+          label: 'Tin Toxicity',
           speedMult: 0.78,
           staminaRate: -11,
           shoreReserveMult: 1,
@@ -542,7 +542,7 @@ export function getHazardModifierForForm(
       }
       return {
         kind,
-        label: 'Toxic Sludge',
+        label: 'Tin Toxicity',
         speedMult: 0.88,
         staminaRate: -5,
         shoreReserveMult: 1,
@@ -554,7 +554,7 @@ export function getHazardModifierForForm(
       if (form === 1) {
         return {
           kind,
-          label: 'Riptide Rapids',
+          label: 'Flooded Velocity',
           speedMult: 1.24,
           staminaRate: 2,
           shoreReserveMult: 1,
@@ -565,7 +565,7 @@ export function getHazardModifierForForm(
       if (form === 2) {
         return {
           kind,
-          label: 'Riptide Rapids',
+          label: 'Riptide Drag',
           speedMult: 0.88,
           staminaRate: -10,
           shoreReserveMult: 1,
@@ -575,7 +575,7 @@ export function getHazardModifierForForm(
       }
       return {
         kind,
-        label: 'Riptide Rapids',
+        label: 'Riptide Drag',
         speedMult: 0.74,
         staminaRate: -17,
         shoreReserveMult: 1,
@@ -587,7 +587,7 @@ export function getHazardModifierForForm(
       if (form === 1) {
         return {
           kind,
-          label: 'Sinking Quagmire',
+          label: 'Mire Glide',
           speedMult: 1.05,
           staminaRate: 0,
           shoreReserveMult: 1,
@@ -598,7 +598,7 @@ export function getHazardModifierForForm(
       if (form === 2) {
         return {
           kind,
-          label: 'Sinking Quagmire',
+          label: 'Quagmire Snare',
           speedMult: 0.66,
           staminaRate: -14,
           shoreReserveMult: 1,
@@ -608,7 +608,7 @@ export function getHazardModifierForForm(
       }
       return {
         kind,
-        label: 'Sinking Quagmire',
+        label: 'Quagmire Snare',
         speedMult: 0.84,
         staminaRate: -7,
         shoreReserveMult: 1,
@@ -620,7 +620,7 @@ export function getHazardModifierForForm(
       if (form === 1) {
         return {
           kind,
-          label: 'Scorched Brine Vent',
+          label: 'Brine Scorch',
           speedMult: 0.84,
           staminaRate: -14,
           shoreReserveMult: 1,
@@ -631,7 +631,7 @@ export function getHazardModifierForForm(
       if (form === 2) {
         return {
           kind,
-          label: 'Scorched Brine Vent',
+          label: 'Brine Scorch',
           speedMult: 0.86,
           staminaRate: -16,
           shoreReserveMult: 2.2,
@@ -641,7 +641,7 @@ export function getHazardModifierForForm(
       }
       return {
         kind,
-        label: 'Scorched Brine Vent',
+        label: 'Thermal Surge',
         speedMult: 1.04,
         staminaRate: -3,
         shoreReserveMult: 1,

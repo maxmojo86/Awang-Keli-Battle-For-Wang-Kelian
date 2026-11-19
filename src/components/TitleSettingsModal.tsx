@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Music, Settings, Volume2, VolumeX, X } from 'lucide-react';
 import { MenuMusicSnapshot, soundEngine } from '../game/audio';
+import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import { AccessibilitySettings } from '../game/types';
+import { HudVisibilityControls } from './HudVisibilityControls';
 
 interface TitleSettingsModalProps {
   open: boolean;
@@ -322,6 +324,13 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
                     </button>
                   ))}
                 </div>
+              </div>
+
+              <div className="pt-3 border-t border-[#22323e]">
+                <HudVisibilityControls
+                  hudVisibility={settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY}
+                  onChange={(hudVisibility) => onUpdateSettings({ hudVisibility })}
+                />
               </div>
             </div>
           </section>

@@ -50,6 +50,7 @@ import { ArenaScene3D } from '../game/scene3d';
 import { GameSimulation, PlayerInputState } from '../game/simulation';
 import { spatialVoice, SpatialVoiceSnapshot } from '../game/spatialVoice';
 import { drawPortraitToCanvas, subscribeCodexSpritesLoaded } from '../game/sprites';
+import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import {
   AccessibilitySettings,
   AbilityId,
@@ -61,6 +62,7 @@ import { DamageHitOverlay } from './DamageHitOverlay';
 import { EmoteWheel, pickEmoteIndexFromDelta } from './EmoteWheel';
 import { EvolutionFormToast, EvolutionToastEvent } from './EvolutionFormToast';
 import { EvolutionOverlay, EvolutionOverlayEvent } from './EvolutionOverlay';
+import { HudVisibilityControls } from './HudVisibilityControls';
 import { Minimap } from './Minimap';
 
 interface GameViewportProps {
@@ -336,6 +338,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     soundEngine.setVolume(settings.volume);
     soundEngine.setMusicVolume(settings.musicVolume ?? 0.35);
     sceneRef.current?.setReducedMotion(settings.reducedMotion);
+    sceneRef.current?.setShowStatusIcons(
+      (settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY).statusEffects
+    );
   }, [settings]);
 
   // Update portrait medallion whenever active (player or spectated) milestone sprite tier changes
@@ -368,6 +373,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
     const arena = new ArenaScene3D(container, settingsRef.current.reducedMotion, () =>
       setContextLost(true)
+    );
+    arena.setShowStatusIcons(
+      (settingsRef.current.hudVisibility ?? DEFAULT_HUD_VISIBILITY).statusEffects
     );
     sceneRef.current = arena;
 
@@ -922,15 +930,26 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
   const sonarSpec = ACTIVE_ABILITIES.find((a) => a.id === 'sonar')!;
   const selfBounty = hud?.bountyTargets?.find((b) => b.isSelf) ?? null;
+  const hudVis = settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY;
   const showMobileControls = !isSpectating && (isTouchDevice || isMobileViewport);
   const hotbarAbilities = ACTIVE_ABILITIES.filter(
     (a) => a.id !== 'sonar' && !(showMobileControls && a.id === 'bite')
   );
 
+  const activeFloatingStatuses = hudVis.statusEffects
+    ? sceneRef.current?.getActiveFloatingStatusIds() ?? []
+    : [];
+
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#162b35] select-none">
+    <div
+      className="relative w-full h-full overflow-hidden bg-[#162b35] select-none"
+      data-floating-status-icons={activeFloatingStatuses.join(',')}
+    >
       {/* Isolated WebGL Mount */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
+      <div className="sr-only" role="status" aria-live="polite">
+        {displayHazard ? `Environmental condition: ${displayHazard.label}. ${displayHazard.summary}` : ''}
+      </div>
 
       {/* Dynamic Weather Visibility Vignette (non-blocking, no backdrop-filter) */}
       {hud?.weather && hud.weather.intensity > 0.02 && (
@@ -1063,21 +1082,27 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   </div>
 
                   {/* Condensed Cerulean Fragments Bar */}
-                  <div className="flex items-center gap-1" title={`Fragments ${displayLevel} / 100`}>
-                    <Sparkles className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" />
-                    <div className="compendium-track relative flex-1 h-2 rounded-[2px] overflow-hidden">
-                      <div
-                        className="h-full transition-all duration-150"
-                        style={{
-                          width: `${displayLevel}%`,
-                          background: 'linear-gradient(180deg, #38bdf8 0%, #075985 100%)',
-                        }}
-                      />
+                  {hudVis.evolutionProgress && (
+                    <div
+                      data-hud-element="evolutionProgress"
+                      className="flex items-center gap-1"
+                      title={`Fragments ${displayLevel} / 100`}
+                    >
+                      <Sparkles className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" />
+                      <div className="compendium-track relative flex-1 h-2 rounded-[2px] overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-150"
+                          style={{
+                            width: `${displayLevel}%`,
+                            background: 'linear-gradient(180deg, #38bdf8 0%, #075985 100%)',
+                          }}
+                        />
+                      </div>
+                      <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#bae6fd] shrink-0">
+                        {displayLevel}%
+                      </span>
                     </div>
-                    <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#bae6fd] shrink-0">
-                      {displayLevel}%
-                    </span>
-                  </div>
+                  )}
 
                   {/* Condensed Emerald / Amber Stamina Bar */}
                   <div className="flex items-center gap-1" title={`Stamina ${Math.round(displayStamina)} / ${displayMaxStamina}`}>
@@ -1121,82 +1146,90 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
                   {/* Compact Icon Buffs & Alerts Row */}
                   {!isSpectating &&
-                    (Boolean(selfBounty) ||
-                      p.dewTimeLeft > 0 ||
-                      p.stormFinTimeLeft > 0 ||
-                      p.thunderRoeTimeLeft > 0 ||
-                      p.surgeTimeLeft > 0 ||
-                      p.predatorTimeLeft > 0 ||
-                      p.aegisTimeLeft > 0 ||
-                      p.venomActive ||
-                      p.stunned ||
-                      displayFatigued ||
-                      Boolean(displayHazard) ||
+                    ((hudVis.statusEffects &&
+                      (Boolean(selfBounty) ||
+                        p.dewTimeLeft > 0 ||
+                        p.stormFinTimeLeft > 0 ||
+                        p.thunderRoeTimeLeft > 0 ||
+                        p.surgeTimeLeft > 0 ||
+                        p.predatorTimeLeft > 0 ||
+                        p.aegisTimeLeft > 0 ||
+                        p.venomActive ||
+                        p.stunned ||
+                        displayFatigued ||
+                        Boolean(displayHazard))) ||
                       !p.inSafeZone) && (
-                      <div className="pt-0.5 border-t border-[#202d37] flex flex-wrap items-center gap-1 text-[8.5px] font-mono-num font-semibold">
-                        {selfBounty && (
-                          <span
-                            title={`You are marked on the minimap (+${selfBounty.rewardPoints} Evo Pts bounty)`}
-                            className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a]"
-                          >
-                            ◎ +{selfBounty.rewardPoints}
-                          </span>
-                        )}
-                        {p.dewTimeLeft > 0 && (
-                          <span title="Monsoon Dew" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0b2726] border border-[#2dd4bf]/70 text-[#5eead4]">
-                            <Droplets className="w-2.5 h-2.5" />
-                            {Math.ceil(p.dewTimeLeft)}s
-                          </span>
-                        )}
-                        {p.stormFinTimeLeft > 0 && (
-                          <span title="Stormfin Catalyst" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0d2138] border border-[#60a5fa]/70 text-[#93c5fd]">
-                            <Wind className="w-2.5 h-2.5" />
-                            {Math.ceil(p.stormFinTimeLeft)}s
-                          </span>
-                        )}
-                        {p.thunderRoeTimeLeft > 0 && (
-                          <span title="Thunder Roe" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#241338] border border-[#c084fc]/70 text-[#d8b4fe]">
-                            <Zap className="w-2.5 h-2.5" />
-                            {Math.ceil(p.thunderRoeTimeLeft)}s
-                          </span>
-                        )}
-                        {p.surgeTimeLeft > 0 && (
-                          <span title="Amphetide Surge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0a2130] border border-[#38bdf8]/65 text-[#7dd3fc]">
-                            <Gauge className="w-2.5 h-2.5" />
-                            {Math.ceil(p.surgeTimeLeft)}s
-                          </span>
-                        )}
-                        {p.predatorTimeLeft > 0 && (
-                          <span title="Fang Charge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f18] border border-[#fb7185]/65 text-[#fda4af]">
-                            <Swords className="w-2.5 h-2.5" />
-                            {Math.ceil(p.predatorTimeLeft)}s
-                          </span>
-                        )}
-                        {p.aegisTimeLeft > 0 && (
-                          <span title="Carapace Aegis" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a1f0b] border border-[#fbbf24]/65 text-[#fde68a]">
-                            <Shield className="w-2.5 h-2.5" />
-                            {Math.ceil(p.aegisTimeLeft)}s
-                          </span>
-                        )}
-                        {p.venomActive && (
-                          <span title="Venom Active" className="inline-flex items-center text-[#4ade80]">
-                            <Skull className="w-2.5 h-2.5" />
-                          </span>
-                        )}
-                        {displayFatigued && (
-                          <span title="Fatigued" className="inline-flex items-center text-[#f59e0b]">
-                            <BatteryLow className="w-2.5 h-2.5" />
-                          </span>
-                        )}
-                        {displayHazard && (
-                          <span
-                            title={displayHazard.label}
-                            className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#081016] border"
-                            style={{ borderColor: displayHazard.color, color: displayHazard.color }}
-                          >
-                            <AlertTriangle className="w-2.5 h-2.5" />
-                            <span className="truncate max-w-[54px]">{displayHazard.label.split(' ')[0]}</span>
-                          </span>
+                      <div
+                        data-hud-element="statusEffects"
+                        className="pt-0.5 border-t border-[#202d37] flex flex-wrap items-center gap-1 text-[8.5px] font-mono-num font-semibold"
+                      >
+                        {hudVis.statusEffects && (
+                          <>
+                            {selfBounty && (
+                              <span
+                                title={`You are marked on the minimap (+${selfBounty.rewardPoints} Evo Pts bounty)`}
+                                className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a]"
+                              >
+                                ◎ +{selfBounty.rewardPoints}
+                              </span>
+                            )}
+                            {p.dewTimeLeft > 0 && (
+                              <span title="Monsoon Dew" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0b2726] border border-[#2dd4bf]/70 text-[#5eead4]">
+                                <Droplets className="w-2.5 h-2.5" />
+                                {Math.ceil(p.dewTimeLeft)}s
+                              </span>
+                            )}
+                            {p.stormFinTimeLeft > 0 && (
+                              <span title="Stormfin Catalyst" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0d2138] border border-[#60a5fa]/70 text-[#93c5fd]">
+                                <Wind className="w-2.5 h-2.5" />
+                                {Math.ceil(p.stormFinTimeLeft)}s
+                              </span>
+                            )}
+                            {p.thunderRoeTimeLeft > 0 && (
+                              <span title="Thunder Roe" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#241338] border border-[#c084fc]/70 text-[#d8b4fe]">
+                                <Zap className="w-2.5 h-2.5" />
+                                {Math.ceil(p.thunderRoeTimeLeft)}s
+                              </span>
+                            )}
+                            {p.surgeTimeLeft > 0 && (
+                              <span title="Amphetide Surge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#0a2130] border border-[#38bdf8]/65 text-[#7dd3fc]">
+                                <Gauge className="w-2.5 h-2.5" />
+                                {Math.ceil(p.surgeTimeLeft)}s
+                              </span>
+                            )}
+                            {p.predatorTimeLeft > 0 && (
+                              <span title="Fang Charge" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f18] border border-[#fb7185]/65 text-[#fda4af]">
+                                <Swords className="w-2.5 h-2.5" />
+                                {Math.ceil(p.predatorTimeLeft)}s
+                              </span>
+                            )}
+                            {p.aegisTimeLeft > 0 && (
+                              <span title="Carapace Aegis" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a1f0b] border border-[#fbbf24]/65 text-[#fde68a]">
+                                <Shield className="w-2.5 h-2.5" />
+                                {Math.ceil(p.aegisTimeLeft)}s
+                              </span>
+                            )}
+                            {p.venomActive && (
+                              <span title="Venom Active" className="inline-flex items-center text-[#4ade80]">
+                                <Skull className="w-2.5 h-2.5" />
+                              </span>
+                            )}
+                            {displayFatigued && (
+                              <span title="Fatigued" className="inline-flex items-center text-[#f59e0b]">
+                                <BatteryLow className="w-2.5 h-2.5" />
+                              </span>
+                            )}
+                            {displayHazard && (
+                              <span
+                                title={displayHazard.label}
+                                className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#081016] border"
+                                style={{ borderColor: displayHazard.color, color: displayHazard.color }}
+                              >
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                                <span className="truncate max-w-[54px]">{displayHazard.label.split(' ')[0]}</span>
+                              </span>
+                            )}
+                          </>
                         )}
                         {!p.inSafeZone && (
                           <span title="Radioactive Water" className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#5c1616] border border-[#f59e0b] text-[#fef3c7]">
@@ -1288,24 +1321,26 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   </div>
 
                   {/* Metallic Beveled Cerulean Fragments / EXP Gauge */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
-                      EXP
-                    </span>
-                    <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
-                      <div
-                        className="h-full transition-all duration-150"
-                        style={{
-                          width: `${displayLevel}%`,
-                          background: 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
-                        }}
-                      />
-                      <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
-                      <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
-                        FRAGMENTS {displayLevel} / 100
+                  {hudVis.evolutionProgress && (
+                    <div data-hud-element="evolutionProgress" className="flex items-center gap-1.5">
+                      <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
+                        EXP
                       </span>
+                      <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-150"
+                          style={{
+                            width: `${displayLevel}%`,
+                            background: 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
+                          }}
+                        />
+                        <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
+                        <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
+                          FRAGMENTS {displayLevel} / 100
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Emerald / Amber Stamina Gauge */}
                   <div className="flex items-center gap-1.5">
@@ -1365,7 +1400,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   {/* Unboxed Compendium Metadata Footer */}
                   <div className="pt-1 border-t border-[#2a3844] flex items-center justify-between gap-2 text-[10px] text-[#a9b9c2]">
                     <span className="truncate">
-                      {nextMilestone ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}` : getFormLabel(displayForm)}
+                      {hudVis.evolutionProgress && nextMilestone
+                        ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}`
+                        : getFormLabel(displayForm)}
                     </span>
                     <span className="font-mono-num text-[#f3d285] shrink-0">
                       {displayKills} Kills
@@ -1373,7 +1410,8 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   </div>
 
                   {/* Active Status & Power-Up Buff Strip (beveled micro-plates) */}
-                  {!isSpectating &&
+                  {hudVis.statusEffects &&
+                    !isSpectating &&
                     (Boolean(selfBounty) ||
                       p.venomActive ||
                       p.frenzyActive ||
@@ -1386,7 +1424,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       p.veilActive ||
                       p.stunned ||
                       displayFatigued) && (
-                      <div className="pt-1 border-t border-[#202d37] flex flex-wrap items-center gap-1.5 text-[9.5px] font-mono-num font-semibold">
+                      <div
+                        data-hud-element="statusEffects"
+                        className="pt-1 border-t border-[#202d37] flex flex-wrap items-center gap-1.5 text-[9.5px] font-mono-num font-semibold"
+                      >
                         {selfBounty && (
                           <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a] whitespace-nowrap">
                             ◎ Bounty +{selfBounty.rewardPoints} Evo
@@ -1430,8 +1471,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       </div>
                     )}
 
-                  {displayHazard && (
+                  {hudVis.statusEffects && displayHazard && (
                     <div
+                      data-hud-element="statusEffects"
                       className="mt-1 px-2 py-1 rounded-[2px] bg-[#081016]/95 border text-[10px]"
                       style={{ borderColor: displayHazard.color }}
                     >
@@ -1495,8 +1537,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </div>
             )}
 
-            {!evolutionEvent && hud.recentBanner && (
+            {hudVis.banners && !evolutionEvent && hud.recentBanner && (
               <div
+                data-hud-element="banners"
                 className={`compendium-plaque rounded-sm text-center ${
                   isCompactMode ? 'px-2.5 py-1' : 'px-5 py-2'
                 }`}
@@ -1534,8 +1577,8 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             )}
 
             {/* Incoming Emote Signal / Taunt Feed */}
-            {hud.recentEmotes && hud.recentEmotes.length > 0 && (
-              <div className="flex flex-col items-center gap-1">
+            {hudVis.banners && hud.recentEmotes && hud.recentEmotes.length > 0 && (
+              <div data-hud-element="banners" className="flex flex-col items-center gap-1">
                 {hud.recentEmotes.slice(0, isCompactMode ? 1 : 2).map((em) => {
                   const spec = getEmoteSpec(em.emoteId);
                   if (!spec) return null;
@@ -1691,8 +1734,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </button>
             </div>
 
-            {isCompactMode && (
+            {isCompactMode && hudVis.matchTelemetry && (
               <div
+                data-hud-element="matchTelemetry"
                 style={{ width: 102 }}
                 className="compendium-plaque-subtle flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-[2px] text-[9px] font-mono-num text-[#d6d3c9] whitespace-nowrap"
               >
@@ -1711,12 +1755,16 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </div>
             )}
 
-            <Minimap
-              hud={hud}
-              showVoiceHorizon={isMultiplayer && (voiceSnap.micEnabled || voiceSnap.peers.length > 0)}
-              voicePeers={voiceSnap.peers}
-              compact={isCompactMode}
-            />
+            {hudVis.minimap && (
+              <div data-hud-element="minimap">
+                <Minimap
+                  hud={hud}
+                  showVoiceHorizon={isMultiplayer && (voiceSnap.micEnabled || voiceSnap.peers.length > 0)}
+                  voicePeers={voiceSnap.peers}
+                  compact={isCompactMode}
+                />
+              </div>
+            )}
 
             {/* Spatial Proximity Voice Roster (Multiplayer) */}
             {isMultiplayer && (voiceSnap.error || voiceSnap.peers.length > 0) && (
@@ -1817,8 +1865,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           </div>
 
           {/* Bottom-Right: Battle for Wang Kelian Ornate Plaque (Full Mode Only) */}
-          {!isCompactMode && (
-            <div className={`compendium-plaque pointer-events-auto hidden md:block absolute bottom-3 right-3 w-60 rounded-sm overflow-hidden origin-bottom-right ${scaleClass}`}>
+          {!isCompactMode && hudVis.matchTelemetry && (
+            <div
+              data-hud-element="matchTelemetry"
+              className={`compendium-plaque pointer-events-auto hidden md:block absolute bottom-3 right-3 w-60 rounded-sm overflow-hidden origin-bottom-right ${scaleClass}`}
+            >
               <div className="compendium-ribbon flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-display font-semibold text-[#f3d285]">
                 <Swords className="w-3.5 h-3.5 text-[#c99c4a]" />
                 <span>Battle for Wang Kelian</span>
@@ -1900,7 +1951,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
           {/* Bottom-Center: Compendium RPG Action Bar + Circular Concentric Sonar Dish */}
           {!isSpectating ? (
+            hudVis.abilityBar ? (
             <div
+              data-hud-element="abilityBar"
               className={`pointer-events-auto absolute left-1/2 -translate-x-1/2 flex items-end origin-bottom ${
                 isCompactMode ? 'bottom-2 gap-1.5' : `bottom-3 gap-2.5 ${scaleClass}`
               }`}
@@ -2048,6 +2101,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 );
               })()}
             </div>
+            ) : null
           ) : hud.matchResult.status === 'playing' && isDeathCam && deathCam ? (
             <div
               data-death-cam="active"
@@ -2288,15 +2342,17 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           )}
 
           {/* New Evolution Form Visual Notification Toast (with Temporary Stat Boost Icon) */}
-          <EvolutionFormToast
-            toast={p.alive ? evolutionToast : null}
-            boostTimeLeft={p.evoBoostTimeLeft}
-            paused={paused}
-            compact={isCompactMode}
-            canPlaceControlsBesideBar={canPlaceControlsBesideBar}
-            reducedMotion={settings.reducedMotion}
-            onDismiss={(key) => setEvolutionToast((prev) => (prev?.key === key ? null : prev))}
-          />
+          {hudVis.banners && (
+            <EvolutionFormToast
+              toast={p.alive ? evolutionToast : null}
+              boostTimeLeft={p.evoBoostTimeLeft}
+              paused={paused}
+              compact={isCompactMode}
+              canPlaceControlsBesideBar={canPlaceControlsBesideBar}
+              reducedMotion={settings.reducedMotion}
+              onDismiss={(key) => setEvolutionToast((prev) => (prev?.key === key ? null : prev))}
+            />
+          )}
 
           {/* Quick-Access Radial Emote Wheel */}
           <EmoteWheel
@@ -2317,15 +2373,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       {/* Pause & Accessibility Overlay */}
       {paused && (
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4">
-          <div className="compendium-plaque w-full max-w-md rounded-sm overflow-hidden">
-            <div className="compendium-ribbon flex items-center justify-between px-5 py-3">
+          <div className="compendium-plaque w-full max-w-md max-h-[90dvh] flex flex-col rounded-sm overflow-hidden">
+            <div className="compendium-ribbon flex items-center justify-between px-5 py-3 shrink-0">
               <h2 className="font-display text-xl font-semibold text-[#f3d285]">
                 {isMultiplayer ? '◆ Live Basin Options' : '◆ Match Paused'}
               </h2>
               <span className="text-xs font-mono-num text-[#d9b25f]">Esc</span>
             </div>
 
-            <div className="p-6 space-y-5">
+            <div className="p-5 sm:p-6 space-y-5 overflow-y-auto overscroll-contain">
               <div className="space-y-3 border-b border-[#253642] pb-4 text-sm">
                 <label className="flex items-center justify-between gap-3 cursor-pointer">
                   <span className="text-[#e2e8f0]">Reduced Camera Shake</span>
@@ -2415,6 +2471,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="pt-2.5 border-t border-[#202e38]">
+                  <HudVisibilityControls
+                    hudVisibility={hudVis}
+                    onChange={(hudVisibility) => onUpdateSettings({ hudVisibility })}
+                    compact
+                  />
                 </div>
 
                 {isMultiplayer && (

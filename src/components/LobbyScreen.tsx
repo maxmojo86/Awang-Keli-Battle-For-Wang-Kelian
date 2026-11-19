@@ -32,10 +32,12 @@ import {
   SurvivalLeaderboardEntry,
 } from '../game/leaderboard';
 import { multiplayerClient, MultiplayerSnapshot } from '../game/multiplayerClient';
+import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import { spatialVoice, SpatialVoiceSnapshot } from '../game/spatialVoice';
 import { AccessibilitySettings, LobbySize, MatchMode } from '../game/types';
 import { resolveAssetUrl } from '../utils/assetUrl';
 import { DESIGN_PLATES } from './DesignCodexModal';
+import { HudVisibilityControls } from './HudVisibilityControls';
 
 export type LobbyPlayMode = MatchMode | 'multiplayer';
 
@@ -1654,6 +1656,13 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                   {settings.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
                   {settings.muted ? 'Muted' : 'Sound On'}
                 </button>
+              </div>
+              <div className="pt-3 border-t border-[#22323e]">
+                <HudVisibilityControls
+                  hudVisibility={settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY}
+                  onChange={(hudVisibility) => onUpdateSettings({ hudVisibility })}
+                  compact
+                />
               </div>
             </div>
           </div>

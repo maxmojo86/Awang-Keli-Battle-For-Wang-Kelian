@@ -25,6 +25,13 @@ import {
   SpriteSet,
 } from './sprites';
 import {
+  collectActiveStatusIndicators,
+  MAX_FLOATING_STATUS_ICONS,
+  StatusIconTextureCache,
+  StatusIndicatorId,
+  StatusIndicatorSpec,
+} from './statusIcons';
+import {
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
@@ -146,6 +153,18 @@ export class ArenaScene3D {
     speedZ: number;
   }> = [];
   private ambientParticles!: AmbientHazardParticles;
+  private statusIconCache!: StatusIconTextureCache;
+  private statusIconGroup!: THREE.Group;
+  private statusIconSlots: Array<{
+    mesh: THREE.Mesh;
+    mat: THREE.MeshBasicMaterial;
+    currentId: StatusIndicatorId | null;
+    opacity: number;
+    scale: number;
+  }> = [];
+  private activeStatusScratch: StatusIndicatorSpec[] = [];
+  private activeFloatingStatusIds: StatusIndicatorId[] = [];
+  private showStatusIcons = true;
 
   private sharedQuadGeo = new THREE.PlaneGeometry(1, 1);
   private sharedRingGeo = new THREE.RingGeometry(0.76, 1.0, 32);
@@ -232,6 +251,7 @@ export class ArenaScene3D {
     this.buildCompositeLandmarks();
     this.buildZoneBoundary();
     this.initWeatherVisuals();
+    this.initFloatingStatusIcons();
     this.ambientParticles = new AmbientHazardParticles(
       this.scene,
       this.renderer.getPixelRatio()
@@ -244,6 +264,17 @@ export class ArenaScene3D {
 
   public setReducedMotion(val: boolean) {
     this.reducedMotion = val;
+  }
+
+  public setShowStatusIcons(val: boolean) {
+    this.showStatusIcons = val;
+    if (!val && this.statusIconGroup) {
+      this.statusIconGroup.visible = false;
+    }
+  }
+
+  public getActiveFloatingStatusIds(): readonly StatusIndicatorId[] {
+    return this.activeFloatingStatusIds;
   }
 
   public resize() {
@@ -1320,6 +1351,129 @@ export class ArenaScene3D {
     }
   }
 
+  private initFloatingStatusIcons() {
+    this.statusIconCache = new StatusIconTextureCache(
+      this.renderer.capabilities.getMaxAnisotropy()
+    );
+    this.statusIconGroup = new THREE.Group();
+    this.statusIconGroup.visible = false;
+    this.statusIconGroup.renderOrder = 16;
+
+    for (let i = 0; i < MAX_FLOATING_STATUS_ICONS; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        depthTest: false,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(this.sharedQuadGeo, mat);
+      mesh.visible = false;
+      mesh.renderOrder = 16;
+      this.statusIconGroup.add(mesh);
+      this.statusIconSlots.push({
+        mesh,
+        mat,
+        currentId: null,
+        opacity: 0,
+        scale: 0.72,
+      });
+    }
+
+    this.scene.add(this.statusIconGroup);
+  }
+
+  private updateFloatingStatusIcons(
+    target: KeliEntity | null,
+    vis: ActorVisual | undefined,
+    sim: RenderableSimulation,
+    dt: number,
+    elapsed: number
+  ) {
+    this.activeFloatingStatusIds.length = 0;
+
+    if (!this.showStatusIcons || !target || !target.alive || !vis) {
+      this.statusIconGroup.visible = false;
+      for (let i = 0; i < this.statusIconSlots.length; i++) {
+        const slot = this.statusIconSlots[i];
+        slot.mesh.visible = false;
+        slot.currentId = null;
+        slot.opacity = 0;
+        slot.scale = 0.72;
+      }
+      return;
+    }
+
+    const count = collectActiveStatusIndicators(target, sim, this.activeStatusScratch);
+    if (count === 0) {
+      this.statusIconGroup.visible = false;
+      for (let i = 0; i < this.statusIconSlots.length; i++) {
+        const slot = this.statusIconSlots[i];
+        slot.mesh.visible = false;
+        slot.currentId = null;
+        slot.opacity = 0;
+        slot.scale = 0.72;
+      }
+      return;
+    }
+
+    const hasTopRibbon = Boolean(
+      getEmoteSpec(target.activeEmote) || (target.bountyReward ?? 0) > 0
+    );
+    const anchorY = vis.group.position.y + vis.badgeMesh.position.y + (hasTopRibbon ? 2.52 : 1.62);
+    this.statusIconGroup.visible = true;
+    this.statusIconGroup.position.set(vis.group.position.x, anchorY, vis.group.position.z);
+    this.statusIconGroup.quaternion.copy(this.camera.quaternion);
+
+    const iconW = 1.62;
+    const iconH = 1.88;
+    const spacing = 1.74;
+
+    for (let i = 0; i < MAX_FLOATING_STATUS_ICONS; i++) {
+      const slot = this.statusIconSlots[i];
+      if (i >= count) {
+        slot.mesh.visible = false;
+        slot.currentId = null;
+        slot.opacity = 0;
+        slot.scale = 0.72;
+        continue;
+      }
+
+      const spec = this.activeStatusScratch[i];
+      this.activeFloatingStatusIds.push(spec.id);
+
+      if (slot.currentId !== spec.id) {
+        slot.currentId = spec.id;
+        slot.mat.map = this.statusIconCache.getTexture(spec.id);
+        slot.mat.needsUpdate = true;
+        slot.opacity = this.reducedMotion ? 1 : Math.min(slot.opacity, 0.35);
+        slot.scale = this.reducedMotion ? 1 : 0.78;
+      }
+
+      slot.mesh.visible = true;
+      slot.opacity = this.reducedMotion
+        ? 1
+        : THREE.MathUtils.damp(slot.opacity, 1, 11, dt);
+      slot.scale = this.reducedMotion
+        ? 1
+        : THREE.MathUtils.damp(slot.scale, 1, 12, dt);
+
+      const xOffset = (i - (count - 1) * 0.5) * spacing;
+      const bobY = this.reducedMotion
+        ? 0
+        : Math.sin(elapsed * 3.1 + i * 1.15) * 0.085;
+      const urgencyPulse =
+        !this.reducedMotion && spec.category === 'critical'
+          ? 1 + Math.sin(elapsed * 6.5) * 0.055
+          : 1;
+      const s = slot.scale * urgencyPulse;
+
+      slot.mesh.position.set(xOffset, bobY, 0.06);
+      slot.mesh.scale.set(iconW * s, iconH * s, 1);
+      slot.mat.opacity = slot.opacity;
+    }
+  }
+
   private updateWeatherVisuals(weather: WeatherState, dt: number, elapsed: number) {
     const kind = weather?.kind ?? 'clear';
     const intensity = weather?.intensity ?? 0;
@@ -1970,6 +2124,14 @@ export class ArenaScene3D {
       }
     }
 
+    this.updateFloatingStatusIcons(
+      focus,
+      this.actorPool.get(focus.id),
+      sim,
+      visualDt,
+      elapsed
+    );
+
     const activeCarcs = new Set<string>();
     for (const c of sim.carcasses) {
       activeCarcs.add(c.id);
@@ -2145,6 +2307,7 @@ export class ArenaScene3D {
     clearTimeout(this.frameId);
 
     this.arenaTextures?.dispose();
+    this.statusIconCache?.dispose();
     this.sharedQuadGeo.dispose();
     this.sharedRingGeo.dispose();
     this.sharedDiscGeo.dispose();

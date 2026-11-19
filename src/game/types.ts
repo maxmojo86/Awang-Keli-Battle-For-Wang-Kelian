@@ -414,10 +414,20 @@ export interface DeathCamState {
   duration: number;
 }
 
+export interface HudVisibilitySettings {
+  minimap: boolean;
+  evolutionProgress: boolean;
+  statusEffects: boolean;
+  matchTelemetry: boolean;
+  abilityBar: boolean;
+  banners: boolean;
+}
+
 export interface AccessibilitySettings {
   reducedMotion: boolean;
   visualSoundCues: boolean;
   hudScale: 'compact' | 'standard' | 'large';
+  hudVisibility: HudVisibilitySettings;
   muted: boolean;
   volume: number;
   musicVolume?: number;
