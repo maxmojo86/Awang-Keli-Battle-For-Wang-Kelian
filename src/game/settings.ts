@@ -69,6 +69,7 @@ export const DEFAULT_SETTINGS: AccessibilitySettings = {
   musicVolume: 0.35,
   voiceVolume: 0.9,
   voiceMode: 'open',
+  evadeKey: 'KeyC',
 };
 
 function sanitizeHudVisibility(raw: unknown): HudVisibilitySettings {
@@ -125,6 +126,11 @@ export function loadSavedSettings(): AccessibilitySettings {
         ? parsed.voiceMode
         : DEFAULT_SETTINGS.voiceMode;
 
+    const evadeKey =
+      typeof parsed.evadeKey === 'string' && /^(Key[A-Z]|Digit[0-9]|AltLeft|ControlLeft|Key[A-Z])$/.test(parsed.evadeKey)
+        ? parsed.evadeKey
+        : DEFAULT_SETTINGS.evadeKey;
+
     const clamp01 = (v: unknown, fallback: number) =>
       typeof v === 'number' && Number.isFinite(v)
         ? Math.max(0, Math.min(1, v))
@@ -150,6 +156,7 @@ export function loadSavedSettings(): AccessibilitySettings {
       ),
       voiceVolume: clamp01(parsed.voiceVolume, DEFAULT_SETTINGS.voiceVolume ?? 0.9),
       voiceMode,
+      evadeKey,
     };
   } catch {
     return {

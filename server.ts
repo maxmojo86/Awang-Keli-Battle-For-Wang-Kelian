@@ -25,6 +25,7 @@ const PORT = Number(process.env.PORT || 3000);
 const VALID_LOBBY_SIZES = new Set<LobbySize>([5, 10, 20, 25, 50, 100]);
 const VALID_ABILITIES = new Set<AbilityId>([
   'bite',
+  'evade',
   'dash',
   'sonar',
   'veil',
@@ -37,6 +38,7 @@ interface ConnectedClient {
   name: string;
   ws: WebSocket;
   roomCode: string | null;
+  lastAbilityAtByType: Partial<Record<AbilityId, number>>;
 }
 
 interface RoomMember {
@@ -62,6 +64,7 @@ interface RoomRecord {
   loopTimer: NodeJS.Timeout | null;
   broadcastCounter: number;
   cleanupTimer: NodeJS.Timeout | null;
+  matchEndedSent: boolean;
 }
 
 const clients = new Map<WebSocket, ConnectedClient>();
@@ -140,7 +143,7 @@ function serializeRoomState(room: RoomRecord): RoomState {
       isHost: member.id === room.hostId,
       ready: member.ready,
       connected: member.connected,
-      keliLevel: keli?.level ?? 1,
+      keliLevel: keli ? (keli.alive ? keli.level : (keli.eliminatedAtLevel ?? 0)) : 1,
       alive: keli?.alive ?? true,
       kills: keli?.kills ?? 0,
       voiceEnabled: member.voiceEnabled,
@@ -288,6 +291,7 @@ function startRoomMatch(room: RoomRecord) {
   room.status = 'playing';
   room.tick = 0;
   room.broadcastCounter = 0;
+  room.matchEndedSent = false;
 
   pushSystemChat(
     room,
@@ -336,13 +340,14 @@ function startRoomMatch(room: RoomRecord) {
         if (!client) continue;
         const packet = room.sim.getRemoteWorldStateFor(m.id, room.tick);
         sendToClient(client, { type: 'world:state', state: packet });
-        if (finished) {
+        if (finished && !room.matchEndedSent) {
           sendToClient(client, { type: 'match:ended', hud: packet.hud });
         }
       }
     }
 
-    if (finished) {
+    if (finished && !room.matchEndedSent) {
+      room.matchEndedSent = true;
       room.status = 'finished';
       stopRoomLoop(room);
       for (const m of room.members.values()) {
@@ -417,6 +422,7 @@ function handleMessage(client: ConnectedClient, raw: string) {
         loopTimer: null,
         broadcastCounter: 0,
         cleanupTimer: null,
+        matchEndedSent: false,
       };
       pushSystemChat(room, `Basin ${code} opened by ${client.name}.`);
       rooms.set(code, room);
@@ -620,7 +626,7 @@ function handleMessage(client: ConnectedClient, raw: string) {
     case 'player:input': {
       if (!client.roomCode) return;
       const room = rooms.get(client.roomCode);
-      if (!room || room.status !== 'playing' || !room.sim) return;
+      if (!room || room.status !== 'playing' || !room.sim || room.sim.status !== 'playing') return;
       const moveX = Number.isFinite(msg.moveX) ? Math.max(-1, Math.min(1, msg.moveX)) : 0;
       const moveZ = Number.isFinite(msg.moveZ) ? Math.max(-1, Math.min(1, msg.moveZ)) : 0;
       const aimAngle = Number.isFinite(msg.aimAngle) ? msg.aimAngle : 0;
@@ -632,8 +638,13 @@ function handleMessage(client: ConnectedClient, raw: string) {
     case 'player:ability': {
       if (!client.roomCode) return;
       const room = rooms.get(client.roomCode);
-      if (!room || room.status !== 'playing' || !room.sim) return;
+      if (!room || room.status !== 'playing' || !room.sim || room.sim.status !== 'playing') return;
       if (!VALID_ABILITIES.has(msg.ability)) return;
+      // Network duplicate-packet deduplication (prevents duplicate packet bursts from double-triggering)
+      const nowMs = Date.now();
+      const lastAt = client.lastAbilityAtByType[msg.ability] ?? 0;
+      if (nowMs - lastAt < 40) return;
+      client.lastAbilityAtByType[msg.ability] = nowMs;
       room.sim.triggerAbilityForPlayer(client.id, msg.ability);
       break;
     }
@@ -641,7 +652,7 @@ function handleMessage(client: ConnectedClient, raw: string) {
     case 'player:emote': {
       if (!client.roomCode) return;
       const room = rooms.get(client.roomCode);
-      if (!room || room.status !== 'playing' || !room.sim) return;
+      if (!room || room.status !== 'playing' || !room.sim || room.sim.status !== 'playing') return;
       if (!VALID_EMOTE_IDS.has(msg.emoteId)) return;
       room.sim.triggerEmoteForPlayer(client.id, msg.emoteId);
       break;
@@ -769,6 +780,7 @@ async function bootstrap() {
       name: 'Awang',
       ws,
       roomCode: null,
+      lastAbilityAtByType: {},
     };
     clients.set(ws, client);
     clientsById.set(client.id, client);

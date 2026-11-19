@@ -61,9 +61,19 @@ export interface WeatherState {
 
 export type BitePhase = 'idle' | 'windup' | 'strike' | 'recovery';
 
-export type AbilityId = 'bite' | 'dash' | 'sonar' | 'veil' | 'electroshock' | 'maelstrom';
+export type HitReactKind = 'normal' | 'crit' | 'stun' | 'mitigated';
+
+export type AbilityId =
+  | 'bite'
+  | 'evade'
+  | 'dash'
+  | 'sonar'
+  | 'veil'
+  | 'electroshock'
+  | 'maelstrom';
 
 export interface AbilityCooldowns {
+  evade: number;
   dash: number;
   sonar: number;
   veil: number;
@@ -92,6 +102,7 @@ export interface KeliEntity {
   maxShoreReserve: number;
   stamina: number;
   maxStamina: number;
+  staminaRegenDelay: number;
   fatigued: boolean;
   activeHazard: HazardTileKind | null;
 
@@ -101,8 +112,26 @@ export interface KeliEntity {
   biteCooldown: number;
   biteAimAngle: number;
   biteHitApplied: boolean;
+  biteBufferTimer: number;
+  biteAttackSeq: number;
+  biteHitTargetIds?: string[];
+  biteDidHit?: boolean;
+  biteFatigued?: boolean;
 
+  evadeTimer: number;
+  evadeDirX: number;
+  evadeDirZ: number;
+  staggerTimer: number;
   stunTimer: number;
+  stunResistTimer: number;
+  stunStacks: number;
+  stunStackDecayTimer: number;
+  recoilTimer: number;
+  recoilDirX: number;
+  recoilDirZ: number;
+  recoilStrength: number;
+  lastHitKind?: HitReactKind | null;
+
   venomTimer: number;
   venomDps: number;
   venomSourceId: string | null;
@@ -133,6 +162,9 @@ export interface KeliEntity {
   kills: number;
   rivalsConsumed?: number;
   bountyReward?: number;
+  bountyPoints?: number;
+  bountyBoostTimer?: number;
+  eliminatedAtLevel?: number;
   damageDealt: number;
   lastAttackerId: string | null;
   lastAttackerName: string | null;
@@ -156,10 +188,14 @@ export interface CarcassEntity {
   x: number;
   z: number;
   mass: number;
+  initialMass?: number;
+  evolutionPhaseAtDeath?: 1 | 2 | 3;
   sourceId?: string;
   sourceName: string;
   createdAt: number;
   bobPhase: number;
+  consumed?: boolean;
+  relocated?: boolean;
 }
 
 export type EffectType =
@@ -169,6 +205,11 @@ export type EffectType =
   | 'electroshock'
   | 'maelstrom'
   | 'dash_wake'
+  | 'evade_wake'
+  | 'impact_splash'
+  | 'crit_impact'
+  | 'stun_burst'
+  | 'mitigated_ring'
   | 'evolution_burst'
   | 'feed_splash';
 
@@ -183,6 +224,11 @@ export interface WorldEffect {
   elapsed: number;
   ownerId: string;
   color: string;
+}
+
+export interface HitStopEvent {
+  duration: number;
+  seq: number;
 }
 
 export interface FloatingCallout {
@@ -278,6 +324,22 @@ export interface BountyTarget {
   isSelf: boolean;
 }
 
+export interface FinalFeastCarcassMarker {
+  id: string;
+  x: number;
+  z: number;
+  mass: number;
+  distance: number;
+  angle: number;
+  sourceName: string;
+}
+
+export interface FinalFeastState {
+  active: boolean;
+  remainingFragments: number;
+  remainingCarcasses: FinalFeastCarcassMarker[];
+}
+
 export interface HudSnapshot {
   matchTime: number;
   mode: MatchMode;
@@ -307,6 +369,11 @@ export interface HudSnapshot {
     zoneName: string;
     inSafeZone: boolean;
     stunned: boolean;
+    staggered?: boolean;
+    stunResistTimeLeft?: number;
+    evading?: boolean;
+    bitePhase?: BitePhase;
+    biteCooldown?: number;
     venomActive: boolean;
     frenzyActive: boolean;
     veilActive: boolean;
@@ -317,6 +384,8 @@ export interface HudSnapshot {
     stormFinTimeLeft: number;
     thunderRoeTimeLeft: number;
     evoBoostTimeLeft: number;
+    bountyBoostTimeLeft?: number;
+    bountyPoints?: number;
     sonarActive: boolean;
     sonarIsHunter: boolean;
     sonarTimeLeft: number;
@@ -337,6 +406,7 @@ export interface HudSnapshot {
   pickups: Array<{ id: string; kind: PickupKind; x: number; z: number; rainFed?: boolean }>;
   sonarContacts: SonarContact[];
   lastRequiredCarcass: { x: number; z: number; mass: number } | null;
+  finalFeast?: FinalFeastState | null;
   offscreenIndicators: Array<{
     id: string;
     kind: 'prey' | 'danger' | 'carcass';
@@ -391,13 +461,16 @@ export interface HudSnapshot {
 
   matchResult: {
     status: 'playing' | 'victory' | 'defeat' | 'draw';
+    winnerId?: string | null;
     winnerName: string | null;
     killedBy: string | null;
     deathCause: string | null;
     massTransferredTo: string | null;
     finalLevel: number;
     kills: number;
+    bountyPoints?: number;
     survivalTime: number;
+    finalFeastTriggered?: boolean;
     ledger: MassLedgerEntry[];
   };
 }
@@ -433,4 +506,5 @@ export interface AccessibilitySettings {
   musicVolume?: number;
   voiceVolume?: number;
   voiceMode?: 'open' | 'ptt';
+  evadeKey?: string;
 }

@@ -104,6 +104,7 @@ export default function App() {
   const [exitPromptVisible, setExitPromptVisible] = useState(false);
   const lastTitleBackAtRef = useRef<number>(0);
   const exitToastTimerRef = useRef<number | null>(null);
+  const recordedMatchKeyRef = useRef<number | null>(null);
 
   useEffect(() => {
     return initAndroidNativeShell();
@@ -250,44 +251,50 @@ export default function App() {
     (snap: HudSnapshot, replayData: MatchReplayData) => {
       setFinalHud(snap);
       setFinalReplay(replayData);
-      if (snap.matchResult.status === 'victory') {
-        setEpilogueUnlocked(true);
-        try {
-          localStorage.setItem('awang_keli_epilogue', '1');
-        } catch {
-          // Ignore storage errors
-        }
-        const result = recordKeliKingSurvivalTime(snap, playerName);
-        setLeaderboard(result.entries);
-        setLastLeaderboardRank(result.rank);
-      } else {
-        setLastLeaderboardRank(null);
-      }
 
-      if (onlineLeaderboardAvailable && snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
-        const subId = `run-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        void submitGlobalSurvivalTime(
-          snap,
-          playerName,
-          playerRegion,
-          Boolean(activeMpSession),
-          subId
-        )
-          .then((res) => {
-            if (res) {
-              setLastGlobalRank({
-                globalRank: res.globalRank,
-                regionalRank: res.regionalRank,
-                region: res.entry.region,
-              });
-              void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
-            }
-          })
-          .catch(() => {
-            // Keep solo summary unaffected if global leaderboard submission fails
-          });
-      } else {
-        setLastGlobalRank(null);
+      const alreadyRecorded = recordedMatchKeyRef.current === matchKey;
+      if (!alreadyRecorded) {
+        recordedMatchKeyRef.current = matchKey;
+
+        if (snap.matchResult.status === 'victory' && snap.matchResult.finalLevel === 100) {
+          setEpilogueUnlocked(true);
+          try {
+            localStorage.setItem('awang_keli_epilogue', '1');
+          } catch {
+            // Ignore storage errors
+          }
+          const result = recordKeliKingSurvivalTime(snap, playerName);
+          setLeaderboard(result.entries);
+          setLastLeaderboardRank(result.rank);
+        } else {
+          setLastLeaderboardRank(null);
+        }
+
+        if (onlineLeaderboardAvailable && snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
+          const subId = `run-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          void submitGlobalSurvivalTime(
+            snap,
+            playerName,
+            playerRegion,
+            Boolean(activeMpSession),
+            subId
+          )
+            .then((res) => {
+              if (res) {
+                setLastGlobalRank({
+                  globalRank: res.globalRank,
+                  regionalRank: res.regionalRank,
+                  region: res.entry.region,
+                });
+                void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
+              }
+            })
+            .catch(() => {
+              // Keep solo summary unaffected if global leaderboard submission fails
+            });
+        } else {
+          setLastGlobalRank(null);
+        }
       }
 
       setScreen('summary');

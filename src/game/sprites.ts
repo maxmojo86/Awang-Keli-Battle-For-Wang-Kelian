@@ -784,8 +784,9 @@ function renderCarcassCanvas(): HTMLCanvasElement {
 }
 
 let cachedSpriteSet: SpriteSet | null = null;
+let cachedCarcassTex: THREE.CanvasTexture | null = null;
 
-function ensurePreload(spriteSet: SpriteSet) {
+function ensurePortraitPreload() {
   if (preloadStarted || typeof Image === 'undefined') return;
   preloadStarted = true;
 
@@ -794,21 +795,33 @@ function ensurePreload(spriteSet: SpriteSet) {
     img.decoding = 'async';
     img.onload = () => {
       loadedCodexImages[tier] = img;
-      const facingArr = spriteSet.tiers[tier];
-      for (let f = 0; f < 8; f++) {
-        for (let fr = 0; fr < 2; fr++) {
-          const tex = facingArr[f][fr];
-          const canvas = tex.image as HTMLCanvasElement;
-          bakeCodexSpriteToCanvas(img, tier, f as FacingIndex, fr, canvas);
-          tex.needsUpdate = true;
+      if (cachedSpriteSet) {
+        const facingArr = cachedSpriteSet.tiers[tier];
+        for (let f = 0; f < 8; f++) {
+          for (let fr = 0; fr < 2; fr++) {
+            const tex = facingArr[f][fr];
+            const canvas = tex.image as HTMLCanvasElement;
+            bakeCodexSpriteToCanvas(img, tier, f as FacingIndex, fr, canvas);
+            tex.needsUpdate = true;
+          }
         }
+        bakeRigPartsFromImage(img, tier, cachedSpriteSet.rigParts[tier]);
+        cachedSpriteSet.rigRevision += 1;
       }
-      bakeRigPartsFromImage(img, tier, spriteSet.rigParts[tier]);
-      spriteSet.rigRevision += 1;
       portraitListeners.forEach((cb) => cb());
     };
     img.src = CODEX_SPRITE_PATHS[tier];
   });
+}
+
+/**
+ * Returns the shared carcass texture without allocating legacy multi-plate rig textures.
+ */
+export function getCarcassTexture(): THREE.CanvasTexture {
+  if (!cachedCarcassTex) {
+    cachedCarcassTex = toTex(renderCarcassCanvas());
+  }
+  return cachedCarcassTex;
 }
 
 export function getSpriteSet(): SpriteSet {
@@ -842,13 +855,14 @@ export function getSpriteSet(): SpriteSet {
     tiers,
     rigParts,
     rigRevision: 0,
-    carcass: toTex(renderCarcassCanvas()),
+    carcass: getCarcassTexture(),
   };
-  ensurePreload(cachedSpriteSet);
+  ensurePortraitPreload();
   return cachedSpriteSet;
 }
 
 export function subscribeCodexSpritesLoaded(cb: () => void): () => void {
+  ensurePortraitPreload();
   portraitListeners.add(cb);
   return () => portraitListeners.delete(cb);
 }
@@ -857,6 +871,7 @@ export function subscribeCodexSpritesLoaded(cb: () => void): () => void {
  * Draws the current milestone Codex sprite portrait into the top-left circular HUD medallion.
  */
 export function drawPortraitToCanvas(level: number, canvas: HTMLCanvasElement) {
+  ensurePortraitPreload();
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const w = canvas.width;
@@ -884,8 +899,8 @@ export function drawPortraitToCanvas(level: number, canvas: HTMLCanvasElement) {
     const dy = isBiped ? h * 0.06 : h * 0.52 - dh * 0.55;
     ctx.drawImage(loaded, dx, dy, dw, dh);
   } else {
-    const sprites = getSpriteSet();
-    const spriteImg = sprites.tiers[tier][7][0].image as HTMLCanvasElement;
-    ctx.drawImage(spriteImg, -w * 0.12, -h * 0.04, w * 1.24, h * 1.24);
+    const [fallbackCanvas] = makeCanvas();
+    paintProceduralFallback(fallbackCanvas, getEvolutionForm(tier), 7, 0);
+    ctx.drawImage(fallbackCanvas, -w * 0.12, -h * 0.04, w * 1.24, h * 1.24);
   }
 }

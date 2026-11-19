@@ -17,6 +17,8 @@ import {
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
+  FloatingCallout,
+  HitStopEvent,
   HudSnapshot,
   KeliEntity,
   LobbySize,
@@ -46,6 +48,7 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     maxShoreReserve: r?.maxShoreReserve ?? 10,
     stamina: r?.stamina ?? 100,
     maxStamina: r?.maxStamina ?? 100,
+    staminaRegenDelay: 0,
     fatigued: r?.fatigued ?? false,
     activeHazard: r?.activeHazard ?? null,
     bitePhase: r?.bitePhase ?? 'idle',
@@ -53,7 +56,21 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     biteCooldown: 0,
     biteAimAngle: r?.biteAimAngle ?? 0,
     biteHitApplied: false,
+    biteBufferTimer: 0,
+    biteAttackSeq: 0,
+    evadeTimer: r?.evadeTimer ?? 0,
+    evadeDirX: 0,
+    evadeDirZ: 0,
+    staggerTimer: r?.staggerTimer ?? 0,
     stunTimer: r?.stunTimer ?? 0,
+    stunResistTimer: r?.stunResistTimer ?? 0,
+    stunStacks: 0,
+    stunStackDecayTimer: 0,
+    recoilTimer: r?.recoilTimer ?? 0,
+    recoilDirX: r?.recoilDirX ?? 0,
+    recoilDirZ: r?.recoilDirZ ?? 0,
+    recoilStrength: r?.recoilStrength ?? 0,
+    lastHitKind: r?.lastHitKind ?? null,
     venomTimer: r?.venomTimer ?? 0,
     venomDps: 0,
     venomSourceId: null,
@@ -76,6 +93,7 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     feedingProgress: r?.feedingProgress ?? 0,
     feedingDuration: r?.feedingDuration ?? 0,
     cooldowns: r?.cooldowns ?? {
+      evade: 0,
       dash: 0,
       sonar: 0,
       veil: 0,
@@ -86,6 +104,8 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     kills: r?.kills ?? 0,
     rivalsConsumed: r?.rivalsConsumed ?? 0,
     bountyReward: r?.bountyReward ?? 0,
+    bountyPoints: r?.bountyPoints ?? 0,
+    bountyBoostTimer: r?.bountyBoostTimer ?? 0,
     damageDealt: 0,
     lastAttackerId: null,
     lastAttackerName: null,
@@ -114,6 +134,7 @@ export class RemoteSimulationView implements RenderableSimulation {
   public carcasses: CarcassEntity[] = [];
   public pickups: PickupItem[] = [];
   public effects: WorldEffect[] = [];
+  public callouts: FloatingCallout[] = [];
   public zone: ZoneState = {
     centerX: 2900,
     centerZ: 3400,
@@ -132,6 +153,7 @@ export class RemoteSimulationView implements RenderableSimulation {
   };
   public cameraShake = 0;
   public damageImpulse: DamageImpulse | null = null;
+  public hitStop: HitStopEvent | null = null;
 
   private targetsById = new Map<string, RemoteKeliState>();
   private entityById = new Map<string, KeliEntity>();
@@ -154,9 +176,11 @@ export class RemoteSimulationView implements RenderableSimulation {
     this.zone = packet.zone;
     this.weather = packet.weather;
     this.cameraShake = Math.max(this.cameraShake, packet.cameraShake);
+    this.hitStop = packet.hitStop ?? this.hitStop;
     this.carcasses = packet.carcasses;
     this.pickups = packet.pickups;
     this.effects = packet.effects;
+    this.callouts = packet.callouts ?? [];
     this.lastPacketTime = performance.now();
 
     const hits = packet.hud.recentDamageHits;
@@ -214,7 +238,15 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.activeHazard = remote.activeHazard;
         ent.bitePhase = remote.bitePhase;
         ent.biteAimAngle = remote.biteAimAngle;
+        ent.evadeTimer = remote.evadeTimer ?? 0;
+        ent.staggerTimer = remote.staggerTimer ?? 0;
         ent.stunTimer = remote.stunTimer;
+        ent.stunResistTimer = remote.stunResistTimer ?? 0;
+        ent.recoilTimer = remote.recoilTimer ?? 0;
+        ent.recoilDirX = remote.recoilDirX ?? 0;
+        ent.recoilDirZ = remote.recoilDirZ ?? 0;
+        ent.recoilStrength = remote.recoilStrength ?? 0;
+        ent.lastHitKind = remote.lastHitKind ?? null;
         ent.venomTimer = remote.venomTimer;
         ent.frenzyTimer = remote.frenzyTimer;
         ent.veilTimer = remote.veilTimer;
@@ -232,6 +264,8 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.kills = remote.kills;
         ent.rivalsConsumed = remote.rivalsConsumed ?? 0;
         ent.bountyReward = remote.bountyReward ?? 0;
+        ent.bountyPoints = remote.bountyPoints ?? 0;
+        ent.bountyBoostTimer = remote.bountyBoostTimer ?? 0;
         ent.feedingTargetId = remote.feedingTargetId;
         ent.feedingProgress = remote.feedingProgress;
         ent.feedingDuration = remote.feedingDuration;
@@ -261,6 +295,24 @@ export class RemoteSimulationView implements RenderableSimulation {
         break;
       case 'bite_heavy':
         soundEngine.playBite(true);
+        break;
+      case 'bite_miss':
+        soundEngine.playBiteMiss();
+        break;
+      case 'hit_confirm':
+        soundEngine.playHitConfirm(false);
+        break;
+      case 'hit_crit':
+        soundEngine.playHitConfirm(true);
+        break;
+      case 'hit_stun':
+        soundEngine.playStunImpact();
+        break;
+      case 'hit_blocked':
+        soundEngine.playBlockedHit();
+        break;
+      case 'evade':
+        soundEngine.playEvade();
         break;
       case 'death':
         soundEngine.playDeath();

@@ -2339,6 +2339,159 @@ class SoundEngine {
     noise.stop(now + 0.14);
   }
 
+  public playBiteMiss() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Quick hollow water snap/whiff
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(920, now);
+    filter.frequency.exponentialRampToValueAtTime(340, now + 0.09);
+    filter.Q.value = 1.8;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.085, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    noise.start(now, Math.random() * 0.4);
+    noise.stop(now + 0.11);
+  }
+
+  public playHitConfirm(critical = false) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Tactile wet crunch + crisp punch transient
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.type = critical ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(critical ? 240 : 185, now);
+    osc.frequency.exponentialRampToValueAtTime(critical ? 58 : 68, now + (critical ? 0.14 : 0.09));
+    oscGain.gain.setValueAtTime(critical ? 0.24 : 0.17, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + (critical ? 0.16 : 0.1));
+    osc.connect(oscGain);
+    oscGain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + (critical ? 0.17 : 0.11));
+
+    // Crisp transient ping for critical sweet-spot impact
+    if (critical) {
+      const ping = ctx.createOscillator();
+      const pingGain = ctx.createGain();
+      ping.type = 'triangle';
+      ping.frequency.setValueAtTime(760, now);
+      ping.frequency.exponentialRampToValueAtTime(1180, now + 0.08);
+      pingGain.gain.setValueAtTime(0.11, now);
+      pingGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+      ping.connect(pingGain);
+      pingGain.connect(this.masterGain);
+      ping.start(now);
+      ping.stop(now + 0.14);
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(critical ? 1400 : 960, now);
+    filter.frequency.exponentialRampToValueAtTime(320, now + 0.09);
+    filter.Q.value = 1.2;
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(critical ? 0.15 : 0.1, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    noise.connect(filter);
+    filter.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now, Math.random() * 0.4);
+    noise.stop(now + 0.11);
+  }
+
+  public playStunImpact() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Resonant metallic/concussive ring
+    [290, 435].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = i === 0 ? 'sawtooth' : 'sine';
+      osc.frequency.setValueAtTime(freq, now);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.52, now + 0.24);
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1100;
+      gain.gain.setValueAtTime(i === 0 ? 0.13 : 0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now);
+      osc.stop(now + 0.27);
+    });
+  }
+
+  public playBlockedHit() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Glancing deflected/mitigated chime-thud
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(520, now);
+    osc.frequency.exponentialRampToValueAtTime(290, now + 0.11);
+    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
+
+  public playEvade() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Quick hydro-slip burst
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(480, now);
+    filter.frequency.exponentialRampToValueAtTime(1650, now + 0.08);
+    filter.frequency.exponentialRampToValueAtTime(520, now + 0.17);
+    filter.Q.value = 1.6;
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.14, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    noise.connect(filter);
+    filter.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now, Math.random() * 0.4);
+    noise.stop(now + 0.19);
+
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(260, now);
+    osc.frequency.exponentialRampToValueAtTime(540, now + 0.11);
+    oscGain.gain.setValueAtTime(0.09, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(oscGain);
+    oscGain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
+
   public playPickup(isHealing: boolean) {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;

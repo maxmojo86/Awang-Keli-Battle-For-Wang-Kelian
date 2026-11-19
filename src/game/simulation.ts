@@ -6,6 +6,7 @@ import { type EmoteId, getEmoteSpec, VALID_EMOTE_IDS } from '../data/emotes.ts';
 import {
   ARENA_SCALE,
   ECHO_SONAR_RADIUS,
+  findNearestAccessiblePosition,
   findPickupSpawn,
   findWaterSpawn,
   getCurrentVectorAt,
@@ -13,6 +14,7 @@ import {
   getHazardModifierForForm,
   getTerrainAt,
   getZoneAt,
+  isPositionAccessible,
   LANDMARKS,
   resolveArenaCollision,
   scaleArenaCoord,
@@ -33,7 +35,10 @@ import type {
   DamageHitEvent,
   DamageImpulse,
   DeathCamState,
+  FinalFeastState,
   FloatingCallout,
+  HitReactKind,
+  HitStopEvent,
   HudSnapshot,
   KeliEntity,
   LobbySize,
@@ -49,6 +54,47 @@ import type {
   WorldEffect,
   ZoneState,
 } from './types.ts';
+
+export const TOTAL_MATCH_FRAGMENTS = 100;
+export const BOUNTY_SURGE_DURATION_SEC = 8.0;
+
+// Authoritative directional combat & counterplay tuning constants
+export const BITE_CONE_HALF_ANGLE = 0.88; // ~50.4 deg each side (~100.8 deg forward cone)
+export const BITE_CLOSE_FRONT_HALF_ANGLE = 1.25; // strictly < PI/2; never hits enemies behind
+export const BITE_AIM_ASSIST_MAX_ANGLE = 0.62; // ~35.5 deg limited forward aim assist
+export const BITE_WINDUP_SEC = 0.15;
+export const BITE_STRIKE_SEC = 0.1;
+export const BITE_RECOVERY_SEC = 0.22;
+export const BITE_COOLDOWN_SEC = 0.16;
+export const BITE_BUFFER_WINDOW_SEC = 0.15;
+export const BITE_STAMINA_COST = 10;
+
+export const EVADE_STAMINA_COST = 24;
+export const EVADE_COOLDOWN_SEC = 2.2;
+export const EVADE_DURATION_SEC = 0.22;
+export const EVADE_DAMAGE_MITIGATION = 0.6; // 60% damage reduction during active evade window
+
+export const DASH_STAMINA_COST = 18;
+export const VEIL_STAMINA_COST = 12;
+export const ELECTROSHOCK_STAMINA_COST = 14;
+export const MAELSTROM_STAMINA_COST = 16;
+export const STAMINA_REGEN_DELAY_SEC = 0.55;
+
+export const STUN_RESIST_DURATION_SEC = 3.8;
+export const STUN_STACK_DECAY_SEC = 6.0;
+
+function normalizeAngleDiff(target: number, source: number): number {
+  let diff = target - source;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function rotateAngleTowards(current: number, target: number, maxStep: number): number {
+  const diff = normalizeAngleDiff(target, current);
+  if (Math.abs(diff) <= maxStep) return target;
+  return current + Math.sign(diff) * maxStep;
+}
 
 export function isRainFedPickup(kind: PickupKind): boolean {
   return kind === 'monsoon_dew' || kind === 'storm_fin' || kind === 'thunder_roe';
@@ -88,11 +134,15 @@ export interface SimulationOptions {
   isMultiplayerMatch?: boolean;
 }
 
+/**
+ * Computes non-fragment leaderboard/bounty points for eliminating a high-threat rival.
+ * Bounties NEVER generate evolution fragments.
+ */
 export function computeBountyReward(rivalsConsumed: number): number {
   if (rivalsConsumed < 2) return 0;
-  if (rivalsConsumed === 2) return 5;
-  if (rivalsConsumed === 3) return 8;
-  return 12;
+  if (rivalsConsumed === 2) return 500;
+  if (rivalsConsumed === 3) return 800;
+  return 1200;
 }
 
 interface PlayerMetaState {
@@ -107,6 +157,7 @@ interface PlayerMetaState {
   bannerTimer: number;
   cameraShake: number;
   damageImpulse: DamageImpulse | null;
+  hitStop: HitStopEvent | null;
   recentDamageHits: DamageHitEvent[];
   soundCues: SoundCue[];
   pendingSfx: ClientSfxEvent[];
@@ -150,6 +201,10 @@ export class GameSimulation {
   public status: 'playing' | 'victory' | 'defeat' | 'draw' = 'playing';
   public winnerId: string | null = null;
   public winnerName: string | null = null;
+  public finalFeastActive = false;
+  public finalFeastTriggered = false;
+  private matchConcluded = false;
+  private victoryRecordCount = 0;
   public killedBy: string | null = null;
   public deathCause: string | null = null;
   public massTransferredTo: string | null = null;
@@ -165,6 +220,7 @@ export class GameSimulation {
 
   public cameraShake = 0;
   public damageImpulse: DamageImpulse | null = null;
+  public hitStop: HitStopEvent | null = null;
   private recentDamageHits: DamageHitEvent[] = [];
   private inputsById = new Map<string, PlayerInputState>();
   private playerMetaById = new Map<string, PlayerMetaState>();
@@ -214,6 +270,7 @@ export class GameSimulation {
         bannerTimer: 0,
         cameraShake: 0,
         damageImpulse: null,
+        hitStop: null,
         recentDamageHits: [],
         soundCues: [],
         pendingSfx: [],
@@ -261,7 +318,8 @@ export class GameSimulation {
     z: number,
     level: number
   ): KeliEntity {
-    const maxHp = this.computeMaxHp(level);
+    const intLevel = Math.max(0, Math.min(TOTAL_MATCH_FRAGMENTS, Math.trunc(level)));
+    const maxHp = this.computeMaxHp(intLevel);
     return {
       id,
       name,
@@ -271,7 +329,7 @@ export class GameSimulation {
       vx: 0,
       vz: 0,
       facingAngle: Math.random() * Math.PI * 2,
-      level,
+      level: intLevel,
       hp: maxHp,
       maxHp,
       alive: true,
@@ -282,6 +340,7 @@ export class GameSimulation {
       maxShoreReserve: 10,
       stamina: 100,
       maxStamina: 100,
+      staminaRegenDelay: 0,
       fatigued: false,
       activeHazard: null,
 
@@ -290,8 +349,26 @@ export class GameSimulation {
       biteCooldown: 0,
       biteAimAngle: 0,
       biteHitApplied: false,
+      biteBufferTimer: 0,
+      biteAttackSeq: 0,
+      biteHitTargetIds: [],
+      biteDidHit: false,
+      biteFatigued: false,
 
+      evadeTimer: 0,
+      evadeDirX: 0,
+      evadeDirZ: 0,
+      staggerTimer: 0,
       stunTimer: 0,
+      stunResistTimer: 0,
+      stunStacks: 0,
+      stunStackDecayTimer: 0,
+      recoilTimer: 0,
+      recoilDirX: 0,
+      recoilDirZ: 0,
+      recoilStrength: 0,
+      lastHitKind: null,
+
       venomTimer: 0,
       venomDps: 0,
       venomSourceId: null,
@@ -317,6 +394,7 @@ export class GameSimulation {
       feedingDuration: 0,
 
       cooldowns: {
+        evade: 0,
         dash: 0,
         sonar: 0,
         veil: 0,
@@ -326,6 +404,9 @@ export class GameSimulation {
       kills: 0,
       rivalsConsumed: 0,
       bountyReward: 0,
+      bountyPoints: 0,
+      bountyBoostTimer: 0,
+      eliminatedAtLevel: undefined,
       damageDealt: 0,
       lastAttackerId: null,
       lastAttackerName: null,
@@ -363,9 +444,13 @@ export class GameSimulation {
         x: LANDMARKS.tutorialSafeCarcass.x,
         z: LANDMARKS.tutorialSafeCarcass.z,
         mass: 10,
+        initialMass: 10,
+        evolutionPhaseAtDeath: 1,
         sourceName: 'Fallen Keli',
         createdAt: 0,
         bobPhase: 0,
+        consumed: false,
+        relocated: false,
       });
 
       // Contested carcass (15 fragments) guarded by a Lv.10 rival
@@ -374,9 +459,13 @@ export class GameSimulation {
         x: LANDMARKS.tutorialContestedCarcass.x,
         z: LANDMARKS.tutorialContestedCarcass.z,
         mass: 15,
+        initialMass: 15,
+        evolutionPhaseAtDeath: 1,
         sourceName: 'Palong Straggler',
         createdAt: 0,
         bobPhase: 1.7,
+        consumed: false,
+        relocated: false,
       });
 
       const rival = this.createKeli(
@@ -412,9 +501,12 @@ export class GameSimulation {
         'Use WASD to swim and Left Click / Space to bite.'
       );
     } else {
-      const n = Math.max(this.lobbySize, this.humanEntrants.length) as LobbySize;
-      const baseFrag = Math.floor(100 / n);
-      const remainder = 100 % n;
+      const n = Math.max(
+        1,
+        Math.min(TOTAL_MATCH_FRAGMENTS, Math.max(this.lobbySize, this.humanEntrants.length))
+      );
+      const baseFrag = Math.floor(TOTAL_MATCH_FRAGMENTS / n);
+      const remainder = TOTAL_MATCH_FRAGMENTS % n;
 
       // Shuffle indices for random +1 remainder distribution
       const indices = Array.from({ length: n }, (_, i) => i);
@@ -434,9 +526,14 @@ export class GameSimulation {
         const name = isHuman ? human.name : BOT_NAMES[(i - this.humanEntrants.length) % BOT_NAMES.length];
         const entity = this.createKeli(id, name, isHuman, sp.x, sp.z, startLvl);
         this.kelis.push(entity);
+        const meta = this.playerMetaById.get(id);
+        if (meta) {
+          meta.finalLevel = startLvl;
+        }
         if (id === this.primaryPlayerId) {
           this.prevPlayerX = entity.x;
           this.prevPlayerZ = entity.z;
+          this.playerFinalLevel = startLvl;
         }
       }
 
@@ -474,6 +571,80 @@ export class GameSimulation {
         inp.biteHeld = false;
       }
     }
+  }
+
+  /**
+   * Handles a human player disconnecting mid-match without ever losing fragments.
+   * By default AI assumes control of the living Keli (keeping fragments in active play);
+   * if eliminate=true, the Keli is cleanly converted into an accessible carcass.
+   */
+  public handlePlayerDisconnect(playerId: string, eliminate = false) {
+    const k = this.kelis.find((e) => e.id === playerId);
+    if (!k) return;
+    this.setHumanConnected(playerId, false);
+    if (eliminate && k.alive && this.status === 'playing' && !this.matchConcluded) {
+      this.handleDeath(k, null, 'Disconnected', 'zone_death');
+    }
+  }
+
+  public getTotalFragments(): number {
+    const { living, carcass } = this.getMassSums();
+    return living + carcass;
+  }
+
+  public getFragmentAudit(): {
+    living: number;
+    carcasses: number;
+    total: number;
+    valid: boolean;
+    maxEntityFragments: number;
+    hasFractional: boolean;
+    deadHoldingFragments: number;
+  } {
+    let living = 0;
+    let carcasses = 0;
+    let maxEntityFragments = 0;
+    let hasFractional = false;
+    let deadHoldingFragments = 0;
+
+    for (const k of this.kelis) {
+      if (!Number.isInteger(k.level)) hasFractional = true;
+      if (k.alive) {
+        living += k.level;
+        if (k.level > maxEntityFragments) maxEntityFragments = k.level;
+      } else if (k.level !== 0) {
+        deadHoldingFragments += k.level;
+      }
+    }
+
+    for (const c of this.carcasses) {
+      if (!Number.isInteger(c.mass)) hasFractional = true;
+      if (!c.consumed && c.mass > 0) {
+        carcasses += c.mass;
+        if (c.mass > maxEntityFragments) maxEntityFragments = c.mass;
+      }
+    }
+
+    const total = living + carcasses;
+    const valid =
+      total === TOTAL_MATCH_FRAGMENTS &&
+      !hasFractional &&
+      deadHoldingFragments === 0 &&
+      maxEntityFragments <= TOTAL_MATCH_FRAGMENTS;
+
+    return {
+      living,
+      carcasses,
+      total,
+      valid,
+      maxEntityFragments,
+      hasFractional,
+      deadHoldingFragments,
+    };
+  }
+
+  public getVictoryRecordCount(): number {
+    return this.victoryRecordCount;
   }
 
   public getSpectateTarget(playerId = this.primaryPlayerId): KeliEntity | null {
@@ -576,10 +747,13 @@ export class GameSimulation {
 
   public triggerAbilityForPlayer(playerId: string, ability: AbilityId) {
     const p = this.kelis.find((k) => k.id === playerId);
-    if (!p || !p.alive || this.status !== 'playing') return;
+    if (!p || !p.alive || this.status !== 'playing' || this.matchConcluded) return;
+    if (p.stunTimer > 0) return;
 
     if (ability === 'bite') {
       this.tryBiteOrFeed(p, true);
+    } else if (ability === 'evade') {
+      this.tryEvade(p);
     } else if (ability === 'dash') {
       this.tryDash(p);
     } else if (ability === 'sonar') {
@@ -656,18 +830,18 @@ export class GameSimulation {
    * Optional tutorial shortcut to the Lv.40 land lesson (maintains exact 100-fragment invariant!)
    */
   public skipToLandLesson() {
-    if (this.mode !== 'tutorial' || !this.tutorial || this.status !== 'playing') return;
+    if (this.mode !== 'tutorial' || !this.tutorial || this.status !== 'playing' || this.matchConcluded) return;
     const p = this.getPlayer();
     if (!p.alive || p.level >= 40) return;
 
-    const needed = 40 - p.level;
+    const needed = Math.trunc(40 - p.level);
     let gathered = 0;
 
     // Harvest from far bots first, preserving exact 100 total
     for (let i = this.kelis.length - 1; i >= 1 && gathered < needed; i--) {
       const bot = this.kelis[i];
       if (!bot.alive || bot.level <= 1) continue;
-      const take = Math.min(bot.level - 1, needed - gathered);
+      const take = Math.trunc(Math.min(bot.level - 1, needed - gathered));
       if (take > 0) {
         bot.level -= take;
         bot.maxHp = this.computeMaxHp(bot.level);
@@ -711,6 +885,23 @@ export class GameSimulation {
     }
   }
 
+  private triggerHitStopFor(playerId: string, duration: number) {
+    const clamped = Math.min(0.06, Math.max(0.025, duration));
+    const meta = this.playerMetaById.get(playerId);
+    if (meta) {
+      meta.hitStop = {
+        duration: clamped,
+        seq: (meta.hitStop?.seq ?? 0) + 1,
+      };
+    }
+    if (playerId === this.primaryPlayerId) {
+      this.hitStop = {
+        duration: clamped,
+        seq: (this.hitStop?.seq ?? 0) + 1,
+      };
+    }
+  }
+
   private playLocalSfx(kind: ClientSfxEvent['kind']) {
     switch (kind) {
       case 'bite':
@@ -718,6 +909,24 @@ export class GameSimulation {
         break;
       case 'bite_heavy':
         soundEngine.playBite(true);
+        break;
+      case 'bite_miss':
+        soundEngine.playBiteMiss();
+        break;
+      case 'hit_confirm':
+        soundEngine.playHitConfirm(false);
+        break;
+      case 'hit_crit':
+        soundEngine.playHitConfirm(true);
+        break;
+      case 'hit_stun':
+        soundEngine.playStunImpact();
+        break;
+      case 'hit_blocked':
+        soundEngine.playBlockedHit();
+        break;
+      case 'evade':
+        soundEngine.playEvade();
         break;
       case 'death':
         soundEngine.playDeath();
@@ -837,11 +1046,11 @@ export class GameSimulation {
   private getMassSums(): { living: number; carcass: number } {
     let living = 0;
     for (const k of this.kelis) {
-      if (k.alive) living += k.level;
+      if (k.alive) living += Math.trunc(k.level);
     }
     let carcass = 0;
     for (const c of this.carcasses) {
-      carcass += c.mass;
+      if (!c.consumed && c.mass > 0) carcass += Math.trunc(c.mass);
     }
     return { living, carcass };
   }
@@ -859,14 +1068,14 @@ export class GameSimulation {
       type,
       actorName,
       targetName,
-      fragments,
+      fragments: Math.trunc(fragments),
       totalLivingMass: living,
       totalCarcassMass: carcass,
     });
   }
 
   public step(rawDt: number, realDt = rawDt) {
-    if (this.status !== 'playing') return;
+    if (this.status !== 'playing' || this.matchConcluded) return;
     const dt = Math.min(0.05, Math.max(0.0005, rawDt));
     const wallDt = Math.min(0.05, Math.max(0.0005, realDt));
     this.matchTime += dt;
@@ -906,9 +1115,11 @@ export class GameSimulation {
 
     // 2. Update each living Keli (timers, player input / AI brain, movement, combat)
     for (let i = 0; i < this.kelis.length; i++) {
+      if (this.status !== 'playing' || this.matchConcluded) break;
       const k = this.kelis[i];
       if (!k.alive) continue;
       this.updateKeliTimers(k, dt);
+      if (!k.alive || this.status !== 'playing' || this.matchConcluded) continue;
 
       if (k.isPlayer) {
         this.applyPlayerControls(k, dt);
@@ -918,10 +1129,14 @@ export class GameSimulation {
 
       this.moveKeli(k, dt);
       this.updateBiteAndFeeding(k, dt);
+      if (this.status !== 'playing' || this.matchConcluded) break;
       this.applyEnvironmentalEffects(k, dt);
     }
 
-    // 3. Carcass currents & zone boundary retrieval
+    if (this.status !== 'playing' || this.matchConcluded) return;
+
+    // 3. Final Feast phase check & carcass currents / accessibility recovery
+    this.updateFinalFeast(dt);
     this.updateCarcasses(dt);
 
     // 3b. Random healing & power-up items (including rain-fed drops)
@@ -1022,6 +1237,9 @@ export class GameSimulation {
   }
 
   private updateZone(dt: number) {
+    if (this.finalFeastActive) {
+      return; // Pause radioactive contraction during Final Feast so the sole survivor can collect remaining fragments
+    }
     if (this.mode === 'tutorial' && this.tutorial && this.tutorial.step < 4) {
       return; // Pause radioactive contraction during early guided steps
     }
@@ -1064,7 +1282,35 @@ export class GameSimulation {
 
   private updateKeliTimers(k: KeliEntity, dt: number) {
     if (k.biteCooldown > 0) k.biteCooldown = Math.max(0, k.biteCooldown - dt);
-    if (k.stunTimer > 0) k.stunTimer = Math.max(0, k.stunTimer - dt);
+    if (k.biteBufferTimer > 0) k.biteBufferTimer = Math.max(0, k.biteBufferTimer - dt);
+    if (k.staminaRegenDelay > 0) k.staminaRegenDelay = Math.max(0, k.staminaRegenDelay - dt);
+    if (k.evadeTimer > 0) k.evadeTimer = Math.max(0, k.evadeTimer - dt);
+    if (k.staggerTimer > 0) k.staggerTimer = Math.max(0, k.staggerTimer - dt);
+
+    const prevStun = k.stunTimer;
+    if (k.stunTimer > 0) {
+      k.stunTimer = Math.max(0, k.stunTimer - dt);
+      if (prevStun > 0 && k.stunTimer <= 0 && k.stunStacks >= 2) {
+        // Grant temporary stun immunity after repeated stun stacks so stun-locking is impossible
+        k.stunResistTimer = Math.max(k.stunResistTimer, STUN_RESIST_DURATION_SEC);
+        k.stunStacks = 0;
+        k.stunStackDecayTimer = 0;
+      }
+    }
+    if (k.stunResistTimer > 0) k.stunResistTimer = Math.max(0, k.stunResistTimer - dt);
+    if (k.stunStackDecayTimer > 0) {
+      k.stunStackDecayTimer = Math.max(0, k.stunStackDecayTimer - dt);
+      if (k.stunStackDecayTimer <= 0 && k.stunTimer <= 0) {
+        k.stunStacks = 0;
+      }
+    }
+    if (k.recoilTimer > 0) {
+      k.recoilTimer = Math.max(0, k.recoilTimer - dt);
+      if (k.recoilTimer <= 0) {
+        k.recoilStrength = 0;
+      }
+    }
+
     if (k.frenzyTimer > 0) k.frenzyTimer = Math.max(0, k.frenzyTimer - dt);
     if (k.surgeTimer > 0) k.surgeTimer = Math.max(0, k.surgeTimer - dt);
     if (k.predatorTimer > 0) k.predatorTimer = Math.max(0, k.predatorTimer - dt);
@@ -1078,6 +1324,11 @@ export class GameSimulation {
     if (k.stormFinTimer > 0) k.stormFinTimer = Math.max(0, k.stormFinTimer - dt);
     if (k.thunderRoeTimer > 0) k.thunderRoeTimer = Math.max(0, k.thunderRoeTimer - dt);
     if (k.evoBoostTimer > 0) k.evoBoostTimer = Math.max(0, k.evoBoostTimer - dt);
+    if ((k.bountyBoostTimer ?? 0) > 0) {
+      k.bountyBoostTimer = Math.max(0, (k.bountyBoostTimer ?? 0) - dt);
+      k.stamina = Math.min(k.maxStamina, k.stamina + 24 * dt);
+      if (k.stamina >= 32) k.fatigued = false;
+    }
     if (k.veilTimer > 0) k.veilTimer = Math.max(0, k.veilTimer - dt);
     if (k.dashTimer > 0) k.dashTimer = Math.max(0, k.dashTimer - dt);
     if (k.sonarTimer > 0) k.sonarTimer = Math.max(0, k.sonarTimer - dt);
@@ -1093,6 +1344,7 @@ export class GameSimulation {
     }
 
     const cdScale = k.stormFinTimer > 0 ? 1.55 : 1.0;
+    k.cooldowns.evade = Math.max(0, k.cooldowns.evade - dt * cdScale);
     k.cooldowns.dash = Math.max(0, k.cooldowns.dash - dt * cdScale);
     k.cooldowns.sonar = Math.max(0, k.cooldowns.sonar - dt * cdScale);
     k.cooldowns.veil = Math.max(0, k.cooldowns.veil - dt * cdScale);
@@ -1118,8 +1370,8 @@ export class GameSimulation {
 
   private applyPlayerControls(p: KeliEntity, dt: number) {
     if (p.stunTimer > 0) {
-      p.vx *= 0.85;
-      p.vz *= 0.85;
+      p.vx *= Math.pow(0.08, dt);
+      p.vz *= Math.pow(0.08, dt);
       return;
     }
 
@@ -1133,37 +1385,42 @@ export class GameSimulation {
     const len = Math.hypot(input.moveX, input.moveZ);
     const speed = this.getMoveSpeed(p);
 
+    if (p.evadeTimer > 0) {
+      p.vx = p.evadeDirX * speed * 2.4;
+      p.vz = p.evadeDirZ * speed * 2.4;
+      const evadeAngle = Math.atan2(p.evadeDirZ, p.evadeDirX);
+      p.facingAngle = rotateAngleTowards(p.facingAngle, evadeAngle, 16 * dt);
+      return;
+    }
+
     if (p.dashTimer > 0) {
       p.vx = p.dashDirX * speed * 2.55;
       p.vz = p.dashDirZ * speed * 2.55;
     } else if (len > 0.05) {
       const nx = input.moveX / len;
       const nz = input.moveZ / len;
-      p.vx = nx * speed;
-      p.vz = nz * speed;
+      const moveScale =
+        p.bitePhase === 'windup'
+          ? 0.58
+          : p.bitePhase === 'recovery'
+          ? 0.68
+          : 1.0;
+      p.vx = nx * speed * moveScale;
+      p.vz = nz * speed * moveScale;
       if (p.bitePhase === 'idle' && !p.feedingTargetId) {
-        p.facingAngle = Math.atan2(nz, nx);
+        const desired = Math.atan2(nz, nx);
+        p.facingAngle = rotateAngleTowards(p.facingAngle, desired, 13.5 * dt);
       }
     } else {
       p.vx *= Math.pow(0.05, dt);
       p.vz *= Math.pow(0.05, dt);
     }
 
-    // Track closest prey smoothly during bite windup & lock facing to bite cone
-    if (p.bitePhase === 'windup') {
-      const strikeReach = 64 + this.computeRadius(p.level);
-      const trackedPrey = this.findClosestPrey(p, strikeReach + 95);
-      if (trackedPrey) {
-        const preyAngle = Math.atan2(trackedPrey.z - p.z, trackedPrey.x - p.x);
-        p.biteAimAngle = preyAngle;
-        input.aimAngle = preyAngle;
-      }
-    }
-
+    // Smoothly align facing with locked bite direction during attack phases (no 360-degree snapping)
     if (p.bitePhase !== 'idle') {
-      p.facingAngle = p.biteAimAngle;
+      p.facingAngle = rotateAngleTowards(p.facingAngle, p.biteAimAngle, 18 * dt);
     } else if (len <= 0.05 && !p.feedingTargetId) {
-      p.facingAngle = input.aimAngle;
+      p.facingAngle = rotateAngleTowards(p.facingAngle, input.aimAngle, 14 * dt);
     }
 
     // Held bite/feed
@@ -1186,11 +1443,13 @@ export class GameSimulation {
           : mod.speedMult;
       base *= effectiveMult;
     }
+    if (k.staggerTimer > 0) base *= 0.46;
     if (k.fatigued) base *= 0.84;
     if (k.frenzyTimer > 0) base *= 1.18;
     if (k.surgeTimer > 0) base *= 1.28;
     if (k.stormFinTimer > 0) base *= 1.22;
     if (k.evoBoostTimer > 0) base *= 1.18;
+    if ((k.bountyBoostTimer ?? 0) > 0) base *= 1.2;
     if (k.feedingTargetId) base *= 0.28; // Slowed while committing to a feed
     return base;
   }
@@ -1261,8 +1520,8 @@ export class GameSimulation {
           ? hazardMod.staminaRate * 0.45
           : hazardMod.staminaRate;
       k.stamina = Math.max(0, k.stamina + rate * dt);
-    } else {
-      const baseRegen = k.isOnShore ? 10 : 16;
+    } else if (k.staminaRegenDelay <= 0) {
+      const baseRegen = k.isOnShore ? 12 : 20;
       const bonusRegen = hazardMod ? Math.max(0, hazardMod.staminaRate) : 0;
       k.stamina = Math.min(k.maxStamina, k.stamina + (baseRegen + bonusRegen) * dt);
     }
@@ -1298,13 +1557,15 @@ export class GameSimulation {
       k.shoreReserve = k.maxShoreReserve;
     }
 
-    // 2. Radioactive Zone Outside Damage
-    const distFromZone = Math.hypot(k.x - this.zone.centerX, k.z - this.zone.centerZ);
-    if (distFromZone > this.zone.currentRadius) {
-      const zoneDps = 6 + this.zone.phase * 3.5;
-      k.hp -= zoneDps * dt;
-      if (k.hp <= 0) {
-        this.handleDeath(k, null, 'Radioactive Zone', 'zone_death');
+    // 2. Radioactive Zone Outside Damage (suspended during Final Feast cleanup)
+    if (!this.finalFeastActive) {
+      const distFromZone = Math.hypot(k.x - this.zone.centerX, k.z - this.zone.centerZ);
+      if (distFromZone > this.zone.currentRadius) {
+        const zoneDps = 6 + this.zone.phase * 3.5;
+        k.hp -= zoneDps * dt;
+        if (k.hp <= 0) {
+          this.handleDeath(k, null, 'Radioactive Zone', 'zone_death');
+        }
       }
     }
   }
@@ -1327,20 +1588,56 @@ export class GameSimulation {
     return closest;
   }
 
+  private findClosestPreyInCone(
+    k: KeliEntity,
+    maxEdgeDist: number,
+    aimAngle: number,
+    halfAngle: number
+  ): KeliEntity | null {
+    let closest: KeliEntity | null = null;
+    let bestScore = Infinity;
+    const veilRevealDist = 42 * this.weather.visibilityRange;
+
+    for (const other of this.kelis) {
+      if (!other.alive || other.id === k.id) continue;
+      const dx = other.x - k.x;
+      const dz = other.z - k.z;
+      const centerDist = Math.hypot(dx, dz);
+      if (other.veilTimer > 0 && centerDist > veilRevealDist) continue;
+      const edgeDist = centerDist - this.computeRadius(other.level);
+      if (edgeDist > maxEdgeDist) continue;
+
+      const angToOther = centerDist > 0.001 ? Math.atan2(dz, dx) : aimAngle;
+      const absDiff = Math.abs(normalizeAngleDiff(angToOther, aimAngle));
+      if (absDiff > halfAngle) continue;
+
+      const score = edgeDist + absDiff * 36;
+      if (score < bestScore) {
+        bestScore = score;
+        closest = other;
+      }
+    }
+    return closest;
+  }
+
   private tryBiteOrFeed(k: KeliEntity, playPlayerAudio: boolean) {
-    if (!k.alive || k.stunTimer > 0) return;
+    if (!k.alive || this.status !== 'playing' || this.matchConcluded) return;
+    if (k.stunTimer > 0 || k.evadeTimer > 0) return;
 
     const biteRange = 54 + this.computeRadius(k.level);
     const strikeReach = 64 + this.computeRadius(k.level);
+    const input = k.isPlayer ? this.inputsById.get(k.id) : undefined;
+    const baseAim = input ? input.aimAngle : k.facingAngle;
 
-    // Closest live prey inside immediate strike envelope vs broader auto-aim reach
-    const closestInStrike = this.findClosestPrey(k, strikeReach);
-    const hasLiveTargetInFront = Boolean(closestInStrike);
+    // Only treat rivals in front hemisphere as immediate live combat interference for feeding
+    const closestInFront = this.findClosestPreyInCone(k, strikeReach, baseAim, BITE_CONE_HALF_ANGLE);
+    const hasLiveTargetInFront = Boolean(closestInFront);
 
-    // Check nearest carcass inside feeding range
+    // Check nearest unclaimed carcass inside feeding range
     let nearestCarc: CarcassEntity | null = null;
     let nearestCarcDist = Infinity;
     for (const c of this.carcasses) {
+      if (c.consumed || c.mass <= 0) continue;
       const d = Math.hypot(c.x - k.x, c.z - k.z);
       if (d <= biteRange + 22 && d < nearestCarcDist) {
         nearestCarcDist = d;
@@ -1348,19 +1645,21 @@ export class GameSimulation {
       }
     }
 
-    const input = k.isPlayer ? this.inputsById.get(k.id) : undefined;
-
-    // Deliberate feeding if carcass is right in front and no immediate live clash
-    if (nearestCarc && (!hasLiveTargetInFront || k.feedingTargetId === nearestCarc.id)) {
+    // Deliberate feeding if carcass is right in front and no immediate live clash in front
+    if (
+      nearestCarc &&
+      k.staggerTimer <= 0 &&
+      (!hasLiveTargetInFront || k.feedingTargetId === nearestCarc.id)
+    ) {
       const carcAngle = Math.atan2(nearestCarc.z - k.z, nearestCarc.x - k.x);
-      k.facingAngle = carcAngle;
+      k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 0.45);
       if (input) {
         input.aimAngle = carcAngle;
       }
       if (k.feedingTargetId !== nearestCarc.id) {
         k.feedingTargetId = nearestCarc.id;
         k.feedingProgress = 0;
-        // Proposed 0.5–1.6s commitment window scaling with carcass mass
+        // Proposed 0.5–1.65s commitment window scaling with carcass mass
         k.feedingDuration = Math.min(1.65, 0.5 + nearestCarc.mass * 0.025);
       }
       return;
@@ -1370,26 +1669,59 @@ export class GameSimulation {
     k.feedingTargetId = null;
     k.feedingProgress = 0;
 
-    if (k.bitePhase !== 'idle' || k.biteCooldown > 0) return;
-
-    // Auto-direct toward the closest prey so both the keli and bite cone face the target
-    const closestPrey = k.isPlayer
-      ? closestInStrike ?? this.findClosestPrey(k, strikeReach + 95)
-      : closestInStrike;
-
-    let aimAngle = input ? input.aimAngle : k.facingAngle;
-    if (closestPrey) {
-      aimAngle = Math.atan2(closestPrey.z - k.z, closestPrey.x - k.x);
-      k.facingAngle = aimAngle;
-      if (input) {
-        input.aimAngle = aimAngle;
+    // Input buffering (~150ms) near the end of recovery, cooldown, or brief stagger
+    if (k.staggerTimer > 0) {
+      if (k.staggerTimer <= BITE_BUFFER_WINDOW_SEC) {
+        k.biteBufferTimer = BITE_BUFFER_WINDOW_SEC;
       }
+      return;
+    }
+
+    if (k.bitePhase !== 'idle' || k.biteCooldown > 0) {
+      const inBufferWindow =
+        (k.bitePhase === 'recovery' && k.bitePhaseTimer <= BITE_BUFFER_WINDOW_SEC) ||
+        (k.bitePhase === 'idle' && k.biteCooldown > 0 && k.biteCooldown <= BITE_BUFFER_WINDOW_SEC);
+      if (inBufferWindow) {
+        k.biteBufferTimer = BITE_BUFFER_WINDOW_SEC;
+      }
+      return;
+    }
+
+    // Directional aim with strictly bounded forward aim assistance (never snaps behind player)
+    let aimAngle = baseAim;
+    const assistedTarget = this.findClosestPreyInCone(
+      k,
+      strikeReach + (k.isPlayer ? 42 : 16),
+      baseAim,
+      BITE_AIM_ASSIST_MAX_ANGLE
+    );
+    if (assistedTarget) {
+      const preyAngle = Math.atan2(assistedTarget.z - k.z, assistedTarget.x - k.x);
+      const diff = normalizeAngleDiff(preyAngle, baseAim);
+      const maxAssistTurn = k.isPlayer ? 0.42 : 0.25;
+      aimAngle = baseAim + Math.max(-maxAssistTurn, Math.min(maxAssistTurn, diff));
+    }
+
+    // Stamina cost: full strike uses BITE_STAMINA_COST; low stamina still permits a slower fatigued bite
+    const isFatiguedBite = k.stamina < BITE_STAMINA_COST;
+    k.stamina = Math.max(0, k.stamina - BITE_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(
+      k.staminaRegenDelay,
+      isFatiguedBite ? STAMINA_REGEN_DELAY_SEC * 0.75 : STAMINA_REGEN_DELAY_SEC
+    );
+    if (k.stamina <= 15) {
+      k.fatigued = true;
     }
 
     k.bitePhase = 'windup';
-    k.bitePhaseTimer = 0.13;
+    k.bitePhaseTimer = BITE_WINDUP_SEC;
     k.biteAimAngle = aimAngle;
     k.biteHitApplied = false;
+    k.biteDidHit = false;
+    k.biteFatigued = isFatiguedBite;
+    k.biteBufferTimer = 0;
+    k.biteAttackSeq += 1;
+    k.biteHitTargetIds = [];
 
     if (k.isPlayer && (playPlayerAudio || input?.biteHeld)) {
       this.emitSfxFor(k.id, k.level >= 40 ? 'bite_heavy' : 'bite');
@@ -1402,16 +1734,31 @@ export class GameSimulation {
   private updateBiteAndFeeding(k: KeliEntity, dt: number) {
     if (!k.alive) return;
 
+    // Interrupt feeding or bite windup if stunned, staggered, or evading
+    if (k.stunTimer > 0 || k.staggerTimer > 0 || k.evadeTimer > 0) {
+      if (k.feedingTargetId) {
+        k.feedingTargetId = null;
+        k.feedingProgress = 0;
+      }
+      if (k.bitePhase === 'windup') {
+        k.bitePhase = 'idle';
+        k.bitePhaseTimer = 0;
+      }
+    }
+
     // 1. Feeding commitment channel
     if (k.feedingTargetId) {
-      const carcIdx = this.carcasses.findIndex((c) => c.id === k.feedingTargetId);
-      if (carcIdx === -1 || k.stunTimer > 0) {
+      const carcIdx = this.carcasses.findIndex(
+        (c) => c.id === k.feedingTargetId && !c.consumed && c.mass > 0
+      );
+      if (carcIdx === -1 || k.stunTimer > 0 || k.staggerTimer > 0) {
         k.feedingTargetId = null;
         k.feedingProgress = 0;
       } else {
         const carc = this.carcasses[carcIdx];
         const dist = Math.hypot(carc.x - k.x, carc.z - k.z);
         if (dist > 78 + this.computeRadius(k.level)) {
+          // Incomplete feeding: reset feeder progress while preserving the carcass's exact remaining fragments
           k.feedingTargetId = null;
           k.feedingProgress = 0;
         } else {
@@ -1431,97 +1778,305 @@ export class GameSimulation {
             });
           }
           if (k.feedingProgress >= k.feedingDuration) {
-            this.completeFeed(k, carcIdx);
+            this.completeFeed(k, carc.id);
           }
         }
       }
     }
 
-    // 2. Bite telegraph -> strike -> recovery
-    if (k.bitePhase === 'idle') return;
+    // 2. Bite telegraph (windup) -> active hit window (strike) -> vulnerable recovery -> cooldown
+    if (k.bitePhase === 'idle') {
+      // Execute buffered bite immediately once cooldown/stagger/evade clears
+      if (
+        k.biteBufferTimer > 0 &&
+        k.biteCooldown <= 0 &&
+        k.stunTimer <= 0 &&
+        k.staggerTimer <= 0 &&
+        k.evadeTimer <= 0
+      ) {
+        k.biteBufferTimer = 0;
+        this.tryBiteOrFeed(k, k.isPlayer);
+      }
+      return;
+    }
+
     k.bitePhaseTimer -= dt;
 
     if (k.bitePhase === 'windup' && k.bitePhaseTimer <= 0) {
       k.bitePhase = 'strike';
-      k.bitePhaseTimer = 0.08;
-      this.executeBiteHit(k);
-    } else if (k.bitePhase === 'strike' && k.bitePhaseTimer <= 0) {
-      k.bitePhase = 'recovery';
-      k.bitePhaseTimer = k.frenzyTimer > 0 || k.predatorTimer > 0 ? 0.13 : 0.21;
+      k.bitePhaseTimer = BITE_STRIKE_SEC;
+      k.biteHitApplied = true;
+      const reach =
+        (64 + this.computeRadius(k.level)) * (k.thunderRoeTimer > 0 ? 1.2 : 1.0);
+      this.effects.push({
+        id: this.nextId('fx'),
+        type: 'bite_arc',
+        x: k.x,
+        z: k.z,
+        angle: k.biteAimAngle,
+        radius: reach,
+        duration: 0.22,
+        elapsed: 0,
+        ownerId: k.id,
+        color: k.thunderRoeTimer > 0 ? '#c084fc' : k.level >= 30 ? '#6ee7b7' : '#f3e8d2',
+      });
+      this.processBiteActiveWindow(k);
+    } else if (k.bitePhase === 'strike') {
+      // Active hit frames check each candidate at most once via k.biteHitTargetIds
+      this.processBiteActiveWindow(k);
+      if (k.bitePhaseTimer <= 0) {
+        if (!k.biteDidHit && k.isPlayer) {
+          this.emitSfxFor(k.id, 'bite_miss');
+        }
+        k.bitePhase = 'recovery';
+        k.bitePhaseTimer =
+          k.frenzyTimer > 0 || k.predatorTimer > 0
+            ? 0.14
+            : k.biteFatigued
+            ? 0.28
+            : BITE_RECOVERY_SEC;
+      }
     } else if (k.bitePhase === 'recovery' && k.bitePhaseTimer <= 0) {
       k.bitePhase = 'idle';
-      k.biteCooldown = k.frenzyTimer > 0 || k.predatorTimer > 0 ? 0.12 : 0.2;
+      k.biteCooldown =
+        k.frenzyTimer > 0 || k.predatorTimer > 0
+          ? 0.1
+          : k.biteFatigued
+          ? 0.22
+          : BITE_COOLDOWN_SEC;
+      k.biteHitTargetIds = [];
     }
   }
 
-  private executeBiteHit(attacker: KeliEntity) {
+  private processBiteActiveWindow(attacker: KeliEntity) {
+    if (!attacker.alive || this.status !== 'playing' || this.matchConcluded) return;
+    if (!attacker.biteHitTargetIds) attacker.biteHitTargetIds = [];
+
     const reach =
       (64 + this.computeRadius(attacker.level)) * (attacker.thunderRoeTimer > 0 ? 1.2 : 1.0);
-    const dmg =
+    const baseDmg =
       (19 + attacker.level * 1.15) *
-      (attacker.predatorTimer > 0 ? 1.38 : 1.0) *
-      (attacker.thunderRoeTimer > 0 ? 1.32 : 1.0) *
-      (attacker.evoBoostTimer > 0 ? 1.15 : 1.0);
-
-    this.effects.push({
-      id: this.nextId('fx'),
-      type: 'bite_arc',
-      x: attacker.x,
-      z: attacker.z,
-      angle: attacker.biteAimAngle,
-      radius: reach,
-      duration: 0.2,
-      elapsed: 0,
-      ownerId: attacker.id,
-      color: attacker.thunderRoeTimer > 0 ? '#c084fc' : attacker.level >= 30 ? '#6ee7b7' : '#f3e8d2',
-    });
+      (attacker.predatorTimer > 0 ? 1.32 : 1.0) *
+      (attacker.thunderRoeTimer > 0 ? 1.28 : 1.0) *
+      (attacker.evoBoostTimer > 0 ? 1.15 : 1.0) *
+      (attacker.biteFatigued ? 0.78 : 1.0);
 
     for (const target of this.kelis) {
       if (!target.alive || target.id === attacker.id) continue;
+      // Strict single-hit guard per attack window
+      if (attacker.biteHitTargetIds.includes(target.id)) continue;
+
       const dx = target.x - attacker.x;
       const dz = target.z - attacker.z;
       const dist = Math.hypot(dx, dz);
       if (dist > reach + this.computeRadius(target.level)) continue;
 
-      const angToTarget = Math.atan2(dz, dx);
-      let diff = angToTarget - attacker.biteAimAngle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      if (Math.abs(diff) > 1.05 && dist > 26) continue;
+      // Strict directional hit detection: NEVER hit enemies behind the attacker
+      const angToTarget = dist > 0.001 ? Math.atan2(dz, dx) : attacker.biteAimAngle;
+      const absDiff = Math.abs(normalizeAngleDiff(angToTarget, attacker.biteAimAngle));
+      const allowedHalfAngle =
+        dist <= 22 ? BITE_CLOSE_FRONT_HALF_ANGLE : BITE_CONE_HALF_ANGLE;
+      if (absDiff > allowedHalfAngle) continue;
 
-      this.applyDamage(target, attacker, dmg, 'Bite');
+      attacker.biteHitTargetIds.push(target.id);
+      attacker.biteDidHit = true;
+
+      const isCrit =
+        !attacker.biteFatigued &&
+        (absDiff <= 0.34 || attacker.predatorTimer > 0 || attacker.thunderRoeTimer > 0);
+      const dmg = isCrit ? baseDmg * 1.25 : baseDmg;
+      const dirX = dist > 0.001 ? dx / dist : Math.cos(attacker.biteAimAngle);
+      const dirZ = dist > 0.001 ? dz / dist : Math.sin(attacker.biteAimAngle);
+      const knockbackDist = isCrit ? 22 : attacker.level >= 40 ? 18 : 13;
+
+      const damageOutcome = this.applyDamage(target, attacker, dmg, 'Bite', {
+        isCrit,
+        impactDirX: dirX,
+        impactDirZ: dirZ,
+        knockbackDist,
+      });
+
+      if (!target.alive || damageOutcome.mitigatedByEvade) continue;
 
       // Lv 30: Venom Bite
-      if (attacker.level >= 30 && target.alive) {
+      if (attacker.level >= 30) {
         target.venomTimer = 3.6;
         target.venomDps = 5.5 + attacker.level * 0.12;
         target.venomSourceId = attacker.id;
       }
 
-      // Lv 40: Bite Stuns
-      if (attacker.level >= 40 && target.alive) {
-        target.stunTimer = Math.max(target.stunTimer, 0.6);
-        this.spawnCallout(target.x, target.z, 'STUNNED', '#f59e0b');
-      }
-
-      // Knockback
-      if (dist > 0.1) {
-        target.x += (dx / dist) * 14;
-        target.z += (dz / dist) * 14;
+      // Lv 40+: Bite Stuns via unified diminishing-returns control state machine; Lv 1-39 brief stagger
+      if (attacker.level >= 40) {
+        this.applyControlEffect(target, attacker, 'stun', 0.55);
+      } else {
+        this.applyControlEffect(target, attacker, 'stagger', isCrit ? 0.2 : 0.14);
       }
     }
+  }
+
+  /**
+   * Authoritative control-effect state machine enforcing stagger, stun, diminishing returns,
+   * and temporary stun resistance so repeated CC cannot permanently stun-lock any Keli.
+   */
+  public applyControlEffect(
+    target: KeliEntity,
+    source: KeliEntity | null,
+    kind: 'stagger' | 'stun',
+    baseDuration: number
+  ): 'applied' | 'resisted' | 'evaded' {
+    if (!target.alive || this.matchConcluded || this.status !== 'playing') return 'resisted';
+    if (target.evadeTimer > 0) return 'evaded';
+
+    if (kind === 'stagger') {
+      if (target.stunTimer > 0) return 'resisted';
+      target.staggerTimer = Math.max(target.staggerTimer, baseDuration);
+      if (target.feedingTargetId) {
+        target.feedingTargetId = null;
+        target.feedingProgress = 0;
+      }
+      if (target.bitePhase === 'windup') {
+        target.bitePhase = 'idle';
+        target.bitePhaseTimer = 0;
+      }
+      return 'applied';
+    }
+
+    // Hard stun with temporary immunity & diminishing returns
+    if (target.stunResistTimer > 0) {
+      if (target.isPlayer || source?.isPlayer) {
+        this.spawnCallout(target.x, target.z, 'STUN IMMUNE', '#38bdf8');
+        if (source?.isPlayer) this.emitSfxFor(source.id, 'hit_blocked');
+        if (target.isPlayer) this.emitSfxFor(target.id, 'hit_blocked');
+      }
+      return 'resisted';
+    }
+
+    if (target.stunStacks >= 2) {
+      target.stunResistTimer = STUN_RESIST_DURATION_SEC;
+      target.stunStacks = 0;
+      target.stunStackDecayTimer = 0;
+      if (target.isPlayer || source?.isPlayer) {
+        this.spawnCallout(target.x, target.z, 'STUN RESIST!', '#38bdf8');
+        if (source?.isPlayer) this.emitSfxFor(source.id, 'hit_blocked');
+        if (target.isPlayer) this.emitSfxFor(target.id, 'hit_blocked');
+      }
+      return 'resisted';
+    }
+
+    const drScale = target.stunStacks === 0 ? 1.0 : 0.5;
+    const effectiveDuration = Math.max(0.18, baseDuration * drScale);
+    target.stunTimer = Math.max(target.stunTimer, effectiveDuration);
+    target.staggerTimer = 0;
+    target.stunStacks += 1;
+    target.stunStackDecayTimer = STUN_STACK_DECAY_SEC;
+    target.lastHitKind = 'stun';
+
+    // Interrupt feeding & active bite windup on stun
+    if (target.feedingTargetId) {
+      target.feedingTargetId = null;
+      target.feedingProgress = 0;
+    }
+    if (target.bitePhase === 'windup') {
+      target.bitePhase = 'idle';
+      target.bitePhaseTimer = 0;
+    }
+
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: 'stun_burst',
+      x: target.x,
+      z: target.z,
+      angle: 0,
+      radius: 38 + this.computeRadius(target.level),
+      duration: 0.42,
+      elapsed: 0,
+      ownerId: source?.id ?? target.id,
+      color: '#fbbf24',
+    });
+
+    if (target.isPlayer || source?.isPlayer) {
+      this.spawnCallout(
+        target.x,
+        target.z,
+        drScale < 1 ? 'STUNNED (50%)' : 'STUNNED',
+        '#f59e0b'
+      );
+      if (source?.isPlayer) {
+        this.emitSfxFor(source.id, 'hit_stun');
+        this.triggerHitStopFor(source.id, 0.048);
+      }
+      if (target.isPlayer) {
+        this.emitSfxFor(target.id, 'hit_stun');
+        this.triggerHitStopFor(target.id, 0.042);
+      }
+    }
+    return 'applied';
   }
 
   private applyDamage(
     target: KeliEntity,
     attacker: KeliEntity | null,
     amount: number,
-    cause: string
-  ) {
-    if (!target.alive) return;
-    const finalAmount = target.aegisTimer > 0 ? amount * 0.65 : amount;
+    cause: string,
+    opts?: {
+      isCrit?: boolean;
+      impactDirX?: number;
+      impactDirZ?: number;
+      knockbackDist?: number;
+    }
+  ): { appliedDamage: number; mitigatedByEvade: boolean; hitKind: HitReactKind } {
+    if (!target.alive || this.matchConcluded || this.status !== 'playing') {
+      return { appliedDamage: 0, mitigatedByEvade: false, hitKind: 'normal' };
+    }
+
+    const mitigatedByEvade = target.evadeTimer > 0;
+    let finalAmount = target.aegisTimer > 0 ? amount * 0.65 : amount;
+    if (mitigatedByEvade) {
+      finalAmount *= 1 - EVADE_DAMAGE_MITIGATION;
+    }
+
+    const hitKind: HitReactKind = mitigatedByEvade
+      ? 'mitigated'
+      : opts?.isCrit
+      ? 'crit'
+      : 'normal';
+
     target.hp -= finalAmount;
-    target.hitFlashTimer = 0.16;
+    target.hitFlashTimer = mitigatedByEvade ? 0.1 : opts?.isCrit ? 0.22 : 0.16;
+    target.lastHitKind = hitKind;
+
+    // Directional recoil & arena-safe knockback
+    let dirX = opts?.impactDirX ?? 0;
+    let dirZ = opts?.impactDirZ ?? 0;
+    if (Math.hypot(dirX, dirZ) < 0.001 && attacker && attacker.id !== target.id) {
+      const dx = target.x - attacker.x;
+      const dz = target.z - attacker.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 0.001) {
+        dirX = dx / d;
+        dirZ = dz / d;
+      }
+    }
+    if (Math.hypot(dirX, dirZ) > 0.001) {
+      const recoilPower = mitigatedByEvade ? 0.35 : opts?.isCrit ? 1.0 : 0.72;
+      target.recoilDirX = dirX;
+      target.recoilDirZ = dirZ;
+      target.recoilStrength = recoilPower;
+      target.recoilTimer = mitigatedByEvade ? 0.14 : opts?.isCrit ? 0.28 : 0.2;
+
+      const kb = (opts?.knockbackDist ?? 0) * (mitigatedByEvade ? 0.35 : 1.0);
+      if (kb > 0.5 && target.hp > 0) {
+        const pushed = resolveArenaCollision(
+          target.x + dirX * kb,
+          target.z + dirZ * kb,
+          this.computeRadius(target.level),
+          target.level >= 40
+        );
+        target.x = pushed.x;
+        target.z = pushed.z;
+      }
+    }
+
     if (attacker) {
       attacker.damageDealt += finalAmount;
       target.lastAttackerId = attacker.id;
@@ -1529,22 +2084,44 @@ export class GameSimulation {
       target.lastDamageCause = cause;
     }
 
+    // Impact water splash / crit burst / mitigated guard ring
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: mitigatedByEvade
+        ? 'mitigated_ring'
+        : opts?.isCrit
+        ? 'crit_impact'
+        : 'impact_splash',
+      x: target.x,
+      z: target.z,
+      angle: Math.atan2(dirZ, dirX),
+      radius: (mitigatedByEvade ? 30 : opts?.isCrit ? 44 : 28) + this.computeRadius(target.level) * 0.5,
+      duration: mitigatedByEvade ? 0.3 : opts?.isCrit ? 0.38 : 0.28,
+      elapsed: 0,
+      ownerId: attacker?.id ?? target.id,
+      color: mitigatedByEvade ? '#22d3ee' : opts?.isCrit ? '#fbbf24' : '#e0f2fe',
+    });
+
     if (target.isPlayer || attacker?.isPlayer) {
+      const intensity = Math.min(
+        1,
+        Math.max(
+          mitigatedByEvade ? 0.2 : 0.32,
+          (finalAmount / Math.max(35, target.maxHp * 0.3)) * (opts?.isCrit ? 1.22 : 1.0)
+        )
+      );
+
       if (target.isPlayer && attacker && attacker.id !== target.id) {
         const dx = attacker.x - target.x;
         const dz = attacker.z - target.z;
         const dist = Math.hypot(dx, dz);
         const directionAngle = dist > 0.001 ? Math.atan2(dz, dx) : target.facingAngle + Math.PI;
-        const intensity = Math.min(
-          1,
-          Math.max(0.32, finalAmount / Math.max(35, target.maxHp * 0.3))
-        );
-        const shakeAdd = 0.44 + intensity * 0.46;
+        const shakeAdd = mitigatedByEvade ? 0.16 : 0.32 + intensity * 0.42;
         const hitEvent: DamageHitEvent = {
           id: this.nextId('hit'),
           attackerId: attacker.id,
           attackerName: attacker.name,
-          cause,
+          cause: mitigatedByEvade ? `${cause} (Evaded)` : cause,
           damage: Math.max(1, Math.round(finalAmount)),
           directionAngle,
           intensity,
@@ -1555,7 +2132,7 @@ export class GameSimulation {
 
         const tm = this.playerMetaById.get(target.id);
         if (tm) {
-          tm.cameraShake = Math.min(1.0, tm.cameraShake + shakeAdd);
+          tm.cameraShake = Math.min(0.95, tm.cameraShake + shakeAdd);
           tm.recentDamageHits = tm.recentDamageHits
             .filter((h) => this.matchTime - h.timestamp < 1.4)
             .slice(-5);
@@ -1569,7 +2146,7 @@ export class GameSimulation {
         }
 
         if (target.id === this.primaryPlayerId) {
-          this.cameraShake = Math.min(1.0, this.cameraShake + shakeAdd);
+          this.cameraShake = Math.min(0.95, this.cameraShake + shakeAdd);
           this.recentDamageHits = this.recentDamageHits
             .filter((h) => this.matchTime - h.timestamp < 1.4)
             .slice(-5);
@@ -1582,24 +2159,48 @@ export class GameSimulation {
           };
         }
 
-        this.emitSfxFor(target.id, intensity >= 0.65 ? 'damage_hit_heavy' : 'damage_hit');
+        if (mitigatedByEvade) {
+          this.emitSfxFor(target.id, 'hit_blocked');
+        } else {
+          this.emitSfxFor(target.id, intensity >= 0.65 || opts?.isCrit ? 'damage_hit_heavy' : 'damage_hit');
+          if (opts?.isCrit || intensity >= 0.68) {
+            this.triggerHitStopFor(target.id, opts?.isCrit ? 0.044 : 0.032);
+          }
+        }
       } else if (target.isPlayer) {
         const tm = this.playerMetaById.get(target.id);
-        if (tm) tm.cameraShake = Math.min(0.65, tm.cameraShake + 0.24);
+        if (tm) tm.cameraShake = Math.min(0.6, tm.cameraShake + 0.22);
         if (target.id === this.primaryPlayerId) {
-          this.cameraShake = Math.min(0.65, this.cameraShake + 0.24);
+          this.cameraShake = Math.min(0.6, this.cameraShake + 0.22);
         }
       }
 
       if (attacker?.isPlayer && target.id !== attacker.id) {
+        const atkShake = mitigatedByEvade ? 0.08 : opts?.isCrit ? 0.34 : 0.18;
         const am = this.playerMetaById.get(attacker.id);
-        if (am) am.cameraShake = Math.min(0.55, am.cameraShake + 0.16);
+        if (am) am.cameraShake = Math.min(0.65, am.cameraShake + atkShake);
         if (attacker.id === this.primaryPlayerId) {
-          this.cameraShake = Math.min(0.55, this.cameraShake + 0.16);
+          this.cameraShake = Math.min(0.65, this.cameraShake + atkShake);
+        }
+        if (mitigatedByEvade) {
+          this.emitSfxFor(attacker.id, 'hit_blocked');
+        } else if (opts?.isCrit) {
+          this.emitSfxFor(attacker.id, 'hit_crit');
+          this.triggerHitStopFor(attacker.id, 0.046);
+        } else {
+          this.emitSfxFor(attacker.id, 'hit_confirm');
+          this.triggerHitStopFor(attacker.id, 0.03);
         }
       }
 
-      this.spawnCallout(target.x, target.z, `-${Math.round(finalAmount)}`, '#f87171');
+      const dmgInt = Math.max(1, Math.round(finalAmount));
+      if (mitigatedByEvade) {
+        this.spawnCallout(target.x, target.z, `EVADED -${dmgInt}`, '#22d3ee');
+      } else if (opts?.isCrit) {
+        this.spawnCallout(target.x, target.z, `CRIT -${dmgInt}!`, '#fbbf24');
+      } else {
+        this.spawnCallout(target.x, target.z, `-${dmgInt}`, '#f87171');
+      }
     }
 
     if (target.hp <= 0) {
@@ -1610,6 +2211,8 @@ export class GameSimulation {
         'kill'
       );
     }
+
+    return { appliedDamage: finalAmount, mitigatedByEvade, hitKind };
   }
 
   private handleDeath(
@@ -1618,35 +2221,65 @@ export class GameSimulation {
     causeLabel: string,
     ledgerType: MassLedgerEntry['type']
   ) {
-    if (!victim.alive) return;
+    // Idempotent guard prevents simultaneous-kill duplication or post-victory deaths
+    if (!victim.alive || this.matchConcluded || this.status !== 'playing') return;
     victim.alive = false;
     victim.hp = 0;
     victim.feedingTargetId = null;
+    victim.feedingProgress = 0;
+
+    // Atomically transfer ALL integer fragments out of the defeated Keli's active inventory
+    const droppedMass = Math.max(0, Math.trunc(victim.level));
+    victim.level = 0;
+    victim.eliminatedAtLevel = droppedMass;
 
     if (killer && killer.id !== victim.id) {
       killer.kills += 1;
     }
 
-    // Victim's FULL level becomes an edible carcass (100-fragment rule!)
-    const carc: CarcassEntity = {
-      id: this.nextId('carc'),
-      x: victim.x,
-      z: victim.z,
-      mass: victim.level,
-      sourceId: victim.id,
-      sourceName: victim.name,
-      createdAt: this.matchTime,
-      bobPhase: Math.random() * Math.PI * 2,
-    };
-    this.carcasses.push(carc);
+    // Create carcass with exact transferred integer fragments at a guaranteed accessible coordinate
+    if (droppedMass > 0) {
+      const anyCanGoAshore = this.kelis.some((k) => k.alive && k.level >= 40);
+      const accessible = isPositionAccessible(victim.x, victim.z, 16, anyCanGoAshore);
+      const safePos = accessible
+        ? { x: victim.x, z: victim.z }
+        : findNearestAccessiblePosition(
+            victim.x,
+            victim.z,
+            16,
+            anyCanGoAshore,
+            this.zone.centerX,
+            this.zone.centerZ,
+            this.zone.currentRadius
+          );
+      const evolutionPhaseAtDeath: 1 | 2 | 3 =
+        droppedMass >= 80 ? 3 : droppedMass >= 40 ? 2 : 1;
+      const carc: CarcassEntity = {
+        id: this.nextId('carc'),
+        x: safePos.x,
+        z: safePos.z,
+        mass: droppedMass,
+        initialMass: droppedMass,
+        evolutionPhaseAtDeath,
+        sourceId: victim.id,
+        sourceName: victim.name,
+        createdAt: this.matchTime,
+        bobPhase: Math.random() * Math.PI * 2,
+        consumed: false,
+        relocated: !accessible,
+      };
+      this.carcasses.push(carc);
+    }
 
     this.recordLedger(
       ledgerType,
       killer ? killer.name : causeLabel,
       victim.name,
-      victim.level
+      droppedMass
     );
 
+    // Non-fragment Bounty Claim: grants temporary movement speed + stamina surge,
+    // non-fragment leaderboard/bounty points, and combat notification — NEVER extra fragments!
     if (
       this.isMultiplayerMatch &&
       (victim.bountyReward ?? 0) > 0 &&
@@ -1654,21 +2287,26 @@ export class GameSimulation {
       killer.id !== victim.id &&
       killer.alive
     ) {
-      const bountyBonus = victim.bountyReward!;
+      const bountyPts = Math.trunc(victim.bountyReward!);
       victim.bountyReward = 0;
-      this.grantFragments(killer, bountyBonus, `${victim.name} (Rival Bounty)`);
-      this.recordLedger('kill', killer.name, `${victim.name} Bounty`, bountyBonus);
-      this.spawnCallout(killer.x, killer.z, `+${bountyBonus} BOUNTY!`, '#fbbf24');
+      killer.bountyPoints = (killer.bountyPoints ?? 0) + bountyPts;
+      killer.bountyBoostTimer = Math.max(killer.bountyBoostTimer ?? 0, BOUNTY_SURGE_DURATION_SEC);
+      killer.stamina = Math.min(killer.maxStamina, killer.stamina + 40);
+      killer.fatigued = false;
+
+      this.spawnCallout(killer.x, killer.z, `BOUNTY +${bountyPts} PTS · SURGE!`, '#fbbf24');
       this.pushBanner(
         'Rival Bounty Claimed!',
-        `${killer.name} defeated ${victim.name} (+${bountyBonus} Evolution Pts)`
+        `${killer.name} defeated ${victim.name} (+${bountyPts} Bounty Pts · Speed & Stamina Surge)`
       );
       this.addSoundCue(
-        `${killer.name} claimed +${bountyBonus} Bounty on ${victim.name}`,
+        `${killer.name} claimed +${bountyPts} Bounty Pts on ${victim.name}`,
         { x: killer.x, z: killer.z },
         'info'
       );
       this.emitSfxGlobal('bounty_claimed');
+    } else {
+      victim.bountyReward = 0;
     }
 
     if (this.humanIds.has(victim.id)) {
@@ -1692,7 +2330,7 @@ export class GameSimulation {
       if (meta) {
         meta.killedBy = killedByName;
         meta.deathCause = causeLabel;
-        meta.finalLevel = victim.level;
+        meta.finalLevel = droppedMass;
         meta.survivalTime = this.matchTime;
         meta.spectateTargetId = killer && killer.alive ? killer.id : null;
         meta.deathCam = deathCamData ? { ...deathCamData } : null;
@@ -1700,7 +2338,7 @@ export class GameSimulation {
       if (victim.id === this.primaryPlayerId) {
         this.killedBy = killedByName;
         this.deathCause = causeLabel;
-        this.playerFinalLevel = victim.level;
+        this.playerFinalLevel = droppedMass;
         this.playerSurvivalTime = this.matchTime;
         this.spectateTargetId = killer && killer.alive ? killer.id : null;
         this.deathCam = deathCamData ? { ...deathCamData } : null;
@@ -1716,22 +2354,58 @@ export class GameSimulation {
       );
     }
 
-    this.addSoundCue(`${victim.name} slain (${victim.level} fragments)`, { x: victim.x, z: victim.z }, 'info');
+    this.addSoundCue(`${victim.name} slain (${droppedMass} fragments)`, { x: victim.x, z: victim.z }, 'info');
   }
 
-  private completeFeed(eater: KeliEntity, carcassIndex: number) {
+  /**
+   * Atomically transfers integer fragments from an unclaimed carcass to a living Keli.
+   * Supports both full consumption and partial/incomplete transfers while preventing
+   * double-claiming, duplication, or exceeding 100 evolution fragments.
+   */
+  public transferCarcassFragments(
+    eater: KeliEntity,
+    carcassId: string,
+    maxAmount?: number
+  ): number {
+    if (!eater.alive || this.matchConcluded || this.status !== 'playing') return 0;
+
+    const carcassIndex = this.carcasses.findIndex((c) => c.id === carcassId);
+    if (carcassIndex === -1) return 0;
     const carc = this.carcasses[carcassIndex];
-    if (!carc || !eater.alive) return;
+    if (!carc || carc.consumed || carc.mass <= 0) return 0;
 
-    this.carcasses.splice(carcassIndex, 1);
-    eater.feedingTargetId = null;
-    eater.feedingProgress = 0;
+    const available = Math.trunc(carc.mass);
+    const capacity = Math.max(0, TOTAL_MATCH_FRAGMENTS - Math.trunc(eater.level));
+    const requested =
+      maxAmount === undefined ? available : Math.max(0, Math.trunc(maxAmount));
+    const transfer = Math.min(available, capacity, requested);
+    if (transfer <= 0) return 0;
 
-    const gained = carc.mass;
-    this.grantFragments(eater, gained, carc.sourceName);
+    // Deduct from carcass BEFORE crediting eater so total never momentarily exceeds 100
+    carc.mass = available - transfer;
+    const fullyConsumed = carc.mass <= 0;
+
+    if (fullyConsumed) {
+      carc.mass = 0;
+      carc.consumed = true;
+      this.carcasses.splice(carcassIndex, 1);
+
+      // Immediately cancel every competing Keli's active feed channel on this carcass
+      for (const other of this.kelis) {
+        if (other.feedingTargetId === carc.id) {
+          other.feedingTargetId = null;
+          other.feedingProgress = 0;
+        }
+      }
+    } else {
+      eater.feedingTargetId = null;
+      eater.feedingProgress = 0;
+    }
+
+    this.grantFragments(eater, transfer, carc.sourceName);
 
     // Health restore on feed
-    const heal = eater.maxHp * (0.3 + gained * 0.015);
+    const heal = eater.maxHp * (0.3 + transfer * 0.015);
     eater.hp = Math.min(eater.maxHp, eater.hp + heal);
 
     // Lv.70 Feeding Frenzy
@@ -1739,7 +2413,7 @@ export class GameSimulation {
       eater.frenzyTimer = 4.5;
     }
 
-    this.recordLedger('feed', eater.name, `${carc.sourceName}'s Remains`, gained);
+    this.recordLedger('feed', eater.name, `${carc.sourceName}'s Remains`, transfer);
 
     if (carc.sourceId && this.humanIds.has(carc.sourceId)) {
       const deadMeta = this.playerMetaById.get(carc.sourceId);
@@ -1759,12 +2433,12 @@ export class GameSimulation {
 
     if (eater.isPlayer) {
       this.emitSfxFor(eater.id, 'feed');
-      this.spawnCallout(eater.x, eater.z, `+${gained} FRAGMENTS`, '#e6b86e');
+      this.spawnCallout(eater.x, eater.z, `+${transfer} FRAGMENTS`, '#e6b86e');
     }
 
-    if (carc.sourceId && carc.sourceId !== eater.id) {
+    if (fullyConsumed && carc.sourceId && carc.sourceId !== eater.id) {
       eater.rivalsConsumed = (eater.rivalsConsumed ?? 0) + 1;
-      if (this.isMultiplayerMatch) {
+      if (this.isMultiplayerMatch && !this.matchConcluded) {
         const prevReward = eater.bountyReward ?? 0;
         const nextReward = computeBountyReward(eater.rivalsConsumed);
         eater.bountyReward = nextReward;
@@ -1773,7 +2447,7 @@ export class GameSimulation {
             prevReward === 0
               ? `Rival Bounty: ${eater.name}`
               : `Bounty Escalated: ${eater.name}`;
-          const subtitle = `Consumed ${eater.rivalsConsumed} rivals · +${nextReward} Evo Pts on defeat · Marked on Minimap`;
+          const subtitle = `Consumed ${eater.rivalsConsumed} rivals · +${nextReward} Bounty Pts & Surge on defeat · Marked on Minimap`;
           this.pushBanner(title, subtitle);
           this.addSoundCue(
             `${eater.name} marked with a +${nextReward} Rival Bounty`,
@@ -1784,12 +2458,29 @@ export class GameSimulation {
         }
       }
     }
+
+    // Immediate atomic victory resolution if eater legitimately reached 100 fragments
+    if (eater.level === TOTAL_MATCH_FRAGMENTS) {
+      this.resolveVictory(eater, carc.sourceName);
+    }
+
+    return transfer;
+  }
+
+  private completeFeed(eater: KeliEntity, carcassId: string) {
+    this.transferCarcassFragments(eater, carcassId);
   }
 
   private grantFragments(eater: KeliEntity, amount: number, sourceLabel: string) {
-    const prevLevel = eater.level;
+    if (!eater.alive || this.matchConcluded || this.status !== 'playing') return;
+    const intAmount = Math.trunc(amount);
+    if (intAmount <= 0) return;
+
+    const prevLevel = Math.trunc(eater.level);
     const prevForm = getEvolutionForm(prevLevel);
-    eater.level = Math.min(100, eater.level + amount);
+    const nextLevel = Math.min(TOTAL_MATCH_FRAGMENTS, prevLevel + intAmount);
+    eater.level = nextLevel;
+
     const newMax = this.computeMaxHp(eater.level);
     const hpDelta = Math.max(0, newMax - eater.maxHp);
     eater.maxHp = newMax;
@@ -1822,16 +2513,101 @@ export class GameSimulation {
         });
       }
     }
-    if (eater.level >= 100) {
-      this.pushBanner(`${eater.name} became the Keli King!`, `Reunited all 100 fragments from ${sourceLabel}`);
+
+    if (eater.level >= TOTAL_MATCH_FRAGMENTS) {
+      this.resolveVictory(eater, sourceLabel);
     }
   }
 
+  private tryEvade(k: KeliEntity): boolean {
+    if (
+      !k.alive ||
+      this.status !== 'playing' ||
+      this.matchConcluded ||
+      k.cooldowns.evade > 0 ||
+      k.evadeTimer > 0 ||
+      k.stunTimer > 0 ||
+      k.staggerTimer > 0
+    ) {
+      return false;
+    }
+
+    if (k.stamina < EVADE_STAMINA_COST) {
+      if (k.isPlayer) {
+        this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
+        this.emitSfxFor(k.id, 'hit_blocked');
+      }
+      return false;
+    }
+
+    k.stamina = Math.max(0, k.stamina - EVADE_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(k.staminaRegenDelay, STAMINA_REGEN_DELAY_SEC);
+    if (k.stamina <= 15) k.fatigued = true;
+    k.cooldowns.evade = EVADE_COOLDOWN_SEC;
+    k.evadeTimer = EVADE_DURATION_SEC;
+
+    // Cancel feeding or bite windup so the player can reactively dodge telegraphed hits
+    k.feedingTargetId = null;
+    k.feedingProgress = 0;
+    if (k.bitePhase === 'windup') {
+      k.bitePhase = 'idle';
+      k.bitePhaseTimer = 0;
+    }
+
+    // Evade direction: active movement vector -> sidestep from nearest winding-up attacker -> facing direction
+    const input = k.isPlayer ? this.inputsById.get(k.id) : undefined;
+    let dirX = 0;
+    let dirZ = 0;
+    if (input && Math.hypot(input.moveX, input.moveZ) > 0.1) {
+      const mLen = Math.hypot(input.moveX, input.moveZ);
+      dirX = input.moveX / mLen;
+      dirZ = input.moveZ / mLen;
+    } else if (!k.isPlayer && Math.hypot(k.vx, k.vz) > 12) {
+      const vLen = Math.hypot(k.vx, k.vz);
+      dirX = k.vx / vLen;
+      dirZ = k.vz / vLen;
+    } else {
+      const ang = k.facingAngle;
+      dirX = Math.cos(ang);
+      dirZ = Math.sin(ang);
+    }
+
+    k.evadeDirX = dirX;
+    k.evadeDirZ = dirZ;
+
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: 'evade_wake',
+      x: k.x,
+      z: k.z,
+      angle: Math.atan2(dirZ, dirX),
+      radius: 36 + this.computeRadius(k.level) * 0.4,
+      duration: 0.34,
+      elapsed: 0,
+      ownerId: k.id,
+      color: '#22d3ee',
+    });
+
+    if (k.isPlayer) {
+      this.emitSfxFor(k.id, 'evade');
+    }
+    return true;
+  }
+
   private tryDash(k: KeliEntity) {
-    if (k.level < 10 || k.cooldowns.dash > 0 || k.stunTimer > 0) return;
+    if (k.level < 10 || k.cooldowns.dash > 0 || k.stunTimer > 0 || k.evadeTimer > 0) return;
+    if (k.stamina < DASH_STAMINA_COST) {
+      if (k.isPlayer) {
+        this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
+        this.emitSfxFor(k.id, 'hit_blocked');
+      }
+      return;
+    }
     k.cooldowns.dash = 3.5;
     k.dashTimer = k.fatigued ? 0.17 : 0.24;
-    k.stamina = Math.max(0, k.stamina - 10);
+    k.stamina = Math.max(0, k.stamina - DASH_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(k.staminaRegenDelay, STAMINA_REGEN_DELAY_SEC);
+    if (k.stamina <= 15) k.fatigued = true;
     const angle = k.facingAngle;
     k.dashDirX = Math.cos(angle);
     k.dashDirZ = Math.sin(angle);
@@ -1889,6 +2665,15 @@ export class GameSimulation {
 
   private tryVeil(k: KeliEntity) {
     if (k.level < 50 || k.cooldowns.veil > 0 || k.stunTimer > 0) return;
+    if (k.stamina < VEIL_STAMINA_COST) {
+      if (k.isPlayer) {
+        this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
+        this.emitSfxFor(k.id, 'hit_blocked');
+      }
+      return;
+    }
+    k.stamina = Math.max(0, k.stamina - VEIL_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.veil = 10.0;
     k.veilTimer = 4.0;
 
@@ -1910,6 +2695,15 @@ export class GameSimulation {
 
   private tryElectroshock(k: KeliEntity) {
     if (k.level < 60 || k.cooldowns.electroshock > 0 || k.stunTimer > 0) return;
+    if (k.stamina < ELECTROSHOCK_STAMINA_COST) {
+      if (k.isPlayer) {
+        this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
+        this.emitSfxFor(k.id, 'hit_blocked');
+      }
+      return;
+    }
+    k.stamina = Math.max(0, k.stamina - ELECTROSHOCK_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.electroshock = 11.0;
     const radius = 155;
     const dmg = (26 + k.level * 0.65) * (k.predatorTimer > 0 ? 1.38 : 1.0);
@@ -1929,11 +2723,19 @@ export class GameSimulation {
 
     for (const target of this.kelis) {
       if (!target.alive || target.id === k.id) continue;
-      if (Math.hypot(target.x - k.x, target.z - k.z) <= radius + this.computeRadius(target.level)) {
-        this.applyDamage(target, k, dmg, 'Electroshock');
-        if (target.alive) {
-          target.stunTimer = Math.max(target.stunTimer, 0.9);
-          this.spawnCallout(target.x, target.z, 'SHOCKED', '#67e8f9');
+      const dx = target.x - k.x;
+      const dz = target.z - k.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= radius + this.computeRadius(target.level)) {
+        const dirX = dist > 0.001 ? dx / dist : Math.cos(k.facingAngle);
+        const dirZ = dist > 0.001 ? dz / dist : Math.sin(k.facingAngle);
+        const res = this.applyDamage(target, k, dmg, 'Electroshock', {
+          impactDirX: dirX,
+          impactDirZ: dirZ,
+          knockbackDist: 16,
+        });
+        if (target.alive && !res.mitigatedByEvade) {
+          this.applyControlEffect(target, k, 'stun', 0.9);
         }
       }
     }
@@ -1951,6 +2753,15 @@ export class GameSimulation {
 
   private tryMaelstrom(k: KeliEntity) {
     if (k.level < 90 || k.cooldowns.maelstrom > 0 || k.stunTimer > 0) return;
+    if (k.stamina < MAELSTROM_STAMINA_COST) {
+      if (k.isPlayer) {
+        this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
+        this.emitSfxFor(k.id, 'hit_blocked');
+      }
+      return;
+    }
+    k.stamina = Math.max(0, k.stamina - MAELSTROM_STAMINA_COST);
+    k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.maelstrom = 14.0;
 
     this.effects.push({
@@ -1974,8 +2785,20 @@ export class GameSimulation {
 
   private updateAiBrain(bot: KeliEntity, dt: number) {
     if (bot.stunTimer > 0) {
-      bot.vx *= 0.85;
-      bot.vz *= 0.85;
+      bot.vx *= Math.pow(0.08, dt);
+      bot.vz *= Math.pow(0.08, dt);
+      return;
+    }
+
+    if (bot.evadeTimer > 0) {
+      const spd = this.getMoveSpeed(bot);
+      bot.vx = bot.evadeDirX * spd * 2.4;
+      bot.vz = bot.evadeDirZ * spd * 2.4;
+      bot.facingAngle = rotateAngleTowards(
+        bot.facingAngle,
+        Math.atan2(bot.evadeDirZ, bot.evadeDirX),
+        15 * dt
+      );
       return;
     }
 
@@ -2052,10 +2875,11 @@ export class GameSimulation {
       }
     }
 
-    // Nearest reachable carcass (search globally if no prey is close so endgame survivors reunite all 100 fragments)
+    // Nearest reachable carcass (search globally if no prey is close or during Final Feast)
     let nearestCarc: CarcassEntity | null = null;
-    let nearestCarcDist = nearestPrey ? 560 * vis : WORLD_SIZE * 1.5;
+    let nearestCarcDist = this.finalFeastActive || !nearestPrey ? WORLD_SIZE * 2 : 560 * vis;
     for (const c of this.carcasses) {
+      if (c.consumed || c.mass <= 0) continue;
       if (getTerrainAt(c.x, c.z) === 'shore' && bot.level < 40) continue;
       const d = Math.hypot(c.x - bot.x, c.z - bot.z);
       if (d < nearestCarcDist) {
@@ -2081,11 +2905,27 @@ export class GameSimulation {
 
     const spd = this.getMoveSpeed(bot);
 
+    // Reactive defensive counterplay: evade telegraphed nearby bites when stamina/cooldown allows
+    if (bot.cooldowns.evade <= 0 && bot.stamina >= EVADE_STAMINA_COST + 10) {
+      const windingThreat =
+        nearestThreat && nearestThreatDist < 105 && nearestThreat.bitePhase === 'windup'
+          ? nearestThreat
+          : nearestPrey && nearestPreyDist < 95 && nearestPrey.bitePhase === 'windup' && bot.hp < bot.maxHp * 0.55
+          ? nearestPrey
+          : null;
+      if (windingThreat && Math.random() < dt * 3.5) {
+        const awayAng = Math.atan2(bot.z - windingThreat.z, bot.x - windingThreat.x) + (Math.random() < 0.5 ? 0.7 : -0.7);
+        bot.vx = Math.cos(awayAng) * spd;
+        bot.vz = Math.sin(awayAng) * spd;
+        if (this.tryEvade(bot)) return;
+      }
+    }
+
     // Decision hierarchy
     if (nearestThreat && nearestThreatDist < 230 && bot.hp < bot.maxHp * 0.75) {
       // Flee threat
       const fleeAng = Math.atan2(bot.z - nearestThreat.z, bot.x - nearestThreat.x);
-      bot.facingAngle = fleeAng;
+      bot.facingAngle = rotateAngleTowards(bot.facingAngle, fleeAng, 11 * dt);
       bot.vx = Math.cos(fleeAng) * spd;
       bot.vz = Math.sin(fleeAng) * spd;
       if (bot.level >= 50 && bot.cooldowns.veil <= 0) this.tryVeil(bot);
@@ -2100,7 +2940,7 @@ export class GameSimulation {
         nearestPickupDist < 185)
     ) {
       const ang = Math.atan2(nearestPickup.z - bot.z, nearestPickup.x - bot.x);
-      bot.facingAngle = ang;
+      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 11 * dt);
       bot.vx = Math.cos(ang) * spd;
       bot.vz = Math.sin(ang) * spd;
       return;
@@ -2108,7 +2948,7 @@ export class GameSimulation {
 
     if (nearestCarc && (nearestCarcDist < 170 || !nearestPrey)) {
       const ang = Math.atan2(nearestCarc.z - bot.z, nearestCarc.x - bot.x);
-      bot.facingAngle = ang;
+      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 11 * dt);
       if (nearestCarcDist > 42) {
         bot.vx = Math.cos(ang) * spd;
         bot.vz = Math.sin(ang) * spd;
@@ -2122,7 +2962,7 @@ export class GameSimulation {
 
     if (nearestPrey && (bot.hp > bot.maxHp * 0.35 || nearestPreyDist < 120)) {
       const ang = Math.atan2(nearestPrey.z - bot.z, nearestPrey.x - bot.x);
-      bot.facingAngle = ang;
+      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 12 * dt);
       bot.vx = Math.cos(ang) * spd;
       bot.vz = Math.sin(ang) * spd;
 
@@ -2153,8 +2993,114 @@ export class GameSimulation {
     bot.vz = Math.sin(bot.aiWanderAngle) * spd * 0.72;
   }
 
+  /**
+   * Detects and manages the FINAL FEAST phase when a single living Keli remains below Lv.100
+   * while unclaimed carcasses still hold fragments in the arena.
+   */
+  private updateFinalFeast(dt: number) {
+    if (this.status !== 'playing' || this.matchConcluded) {
+      this.finalFeastActive = false;
+      return;
+    }
+
+    const aliveKelis = this.kelis.filter((k) => k.alive);
+    const activeCarcasses = this.carcasses.filter((c) => !c.consumed && c.mass > 0);
+    const soleSurvivor = aliveKelis.length === 1 ? aliveKelis[0] : null;
+    const shouldBeActive = Boolean(
+      soleSurvivor &&
+        soleSurvivor.level < TOTAL_MATCH_FRAGMENTS &&
+        activeCarcasses.length > 0
+    );
+
+    if (!shouldBeActive) {
+      this.finalFeastActive = false;
+      return;
+    }
+
+    const survivor = soleSurvivor!;
+    const canGoAshore = survivor.level >= 40;
+    const remainingFragments = activeCarcasses.reduce((acc, c) => acc + Math.trunc(c.mass), 0);
+
+    if (!this.finalFeastActive) {
+      this.finalFeastActive = true;
+      this.finalFeastTriggered = true;
+
+      // Immediately ensure every remaining carcass is reachable by the sole survivor
+      let relocatedCount = 0;
+      for (const c of activeCarcasses) {
+        const outOfZone =
+          Math.hypot(c.x - this.zone.centerX, c.z - this.zone.centerZ) >
+          Math.max(80, this.zone.currentRadius - 35);
+        if (!isPositionAccessible(c.x, c.z, 16, canGoAshore) || outOfZone) {
+          const safePos = findNearestAccessiblePosition(
+            c.x,
+            c.z,
+            16,
+            canGoAshore,
+            this.zone.centerX,
+            this.zone.centerZ,
+            this.zone.currentRadius
+          );
+          c.x = safePos.x;
+          c.z = safePos.z;
+          c.relocated = true;
+          relocatedCount += 1;
+        }
+      }
+
+      const relocNote =
+        relocatedCount > 0 ? ' Trapped fragments surfaced into open water.' : '';
+      this.pushBanner(
+        `FINAL FEAST · ${remainingFragments} Fragments Remain`,
+        `Last Keli standing! Follow the golden beacons to claim ${activeCarcasses.length} remaining carcass${activeCarcasses.length > 1 ? 'es' : ''} and reach Lv.100.${relocNote}`
+      );
+      this.addSoundCue(
+        `Final Feast: ${remainingFragments} unclaimed fragments marked on minimap`,
+        { x: activeCarcasses[0].x, z: activeCarcasses[0].z },
+        'warning'
+      );
+      this.emitSfxGlobal('sonar');
+    }
+
+    // Keep Final Feast short and purposeful: briskly draw distant carcasses along safe water
+    // toward the survivor's sector so there is zero tedious arena-wide backtracking.
+    for (const c of activeCarcasses) {
+      const dx = survivor.x - c.x;
+      const dz = survivor.z - c.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 220) {
+        const pullSpeed = Math.min(340, 140 + dist * 0.16);
+        const stepDist = Math.min(dist - 160, pullSpeed * dt);
+        const nx = c.x + (dx / dist) * stepDist;
+        const nz = c.z + (dz / dist) * stepDist;
+        const resolved = resolveArenaCollision(nx, nz, 14, canGoAshore);
+        if (isPositionAccessible(resolved.x, resolved.z, 14, canGoAshore)) {
+          c.x = resolved.x;
+          c.z = resolved.z;
+        } else {
+          const safePos = findNearestAccessiblePosition(
+            nx,
+            nz,
+            16,
+            canGoAshore,
+            survivor.x,
+            survivor.z,
+            Math.max(320, dist)
+          );
+          c.x = safePos.x;
+          c.z = safePos.z;
+          c.relocated = true;
+        }
+      }
+    }
+  }
+
   private updateCarcasses(dt: number) {
+    const aliveKelis = this.kelis.filter((k) => k.alive);
+    const anyCanGoAshore = aliveKelis.some((k) => k.level >= 40);
+
     for (const c of this.carcasses) {
+      if (c.consumed || c.mass <= 0) continue;
       c.bobPhase += dt * 2.4;
 
       // Water current drift
@@ -2164,20 +3110,36 @@ export class GameSimulation {
         c.z += cur.vz * 0.35 * dt;
       }
 
-      // Radioactive zone current pulls inaccessible carcasses back inside safe zone!
+      // Radioactive zone current pulls out-of-zone carcasses back inside safe zone!
       const dx = c.x - this.zone.centerX;
       const dz = c.z - this.zone.centerZ;
       const dist = Math.hypot(dx, dz);
       if (dist > this.zone.currentRadius - 55 && dist > 1) {
-        const zonePull = Math.round(65 * ARENA_SCALE) * dt;
+        const zonePull = Math.round(95 * ARENA_SCALE) * dt;
         c.x -= (dx / dist) * zonePull;
         c.z -= (dz / dist) * zonePull;
       }
 
-      // Keep clear of solid rock interiors
-      const res = resolveArenaCollision(c.x, c.z, 12, true);
+      // Keep clear of solid rock interiors and inaccessible shoreline (when no survivor is Lv.40+)
+      const res = resolveArenaCollision(c.x, c.z, 12, anyCanGoAshore);
       c.x = res.x;
       c.z = res.z;
+
+      // Recover any carcass still trapped on shore/cliff/obstacle
+      if (!isPositionAccessible(c.x, c.z, 14, anyCanGoAshore)) {
+        const recovered = findNearestAccessiblePosition(
+          c.x,
+          c.z,
+          16,
+          anyCanGoAshore,
+          this.zone.centerX,
+          this.zone.centerZ,
+          this.zone.currentRadius
+        );
+        c.x = recovered.x;
+        c.z = recovered.z;
+        c.relocated = true;
+      }
     }
   }
 
@@ -2277,6 +3239,7 @@ export class GameSimulation {
       }
     } else if (pk.kind === 'fang_charge') {
       k.predatorTimer = 7.0;
+      k.cooldowns.evade = Math.max(0, k.cooldowns.evade - 0.8);
       k.cooldowns.dash = Math.max(0, k.cooldowns.dash - 1.5);
       k.cooldowns.sonar = Math.max(0, k.cooldowns.sonar - 1.5);
       k.cooldowns.veil = Math.max(0, k.cooldowns.veil - 1.5);
@@ -2391,8 +3354,9 @@ export class GameSimulation {
       const fx = this.effects[i];
       fx.elapsed += dt;
 
-      // Active Maelstrom vortex pulls nearby rivals & carcasses inward!
+      // Active Maelstrom vortex pulls nearby rivals & carcasses inward (with collision safety)!
       if (fx.type === 'maelstrom' && fx.elapsed < fx.duration) {
+        const anyCanGoAshore = this.kelis.some((e) => e.alive && e.level >= 40);
         for (const k of this.kelis) {
           if (!k.alive || k.id === fx.ownerId) continue;
           const dx = fx.x - k.x;
@@ -2400,18 +3364,31 @@ export class GameSimulation {
           const d = Math.hypot(dx, dz);
           if (d < fx.radius && d > 22) {
             const pull = 175 * dt;
-            k.x += (dx / d) * pull;
-            k.z += (dz / d) * pull;
+            const resolved = resolveArenaCollision(
+              k.x + (dx / d) * pull,
+              k.z + (dz / d) * pull,
+              this.computeRadius(k.level),
+              k.level >= 40
+            );
+            k.x = resolved.x;
+            k.z = resolved.z;
           }
         }
         for (const c of this.carcasses) {
+          if (c.consumed || c.mass <= 0) continue;
           const dx = fx.x - c.x;
           const dz = fx.z - c.z;
           const d = Math.hypot(dx, dz);
           if (d < fx.radius && d > 18) {
             const pull = 210 * dt;
-            c.x += (dx / d) * pull;
-            c.z += (dz / d) * pull;
+            const resolved = resolveArenaCollision(
+              c.x + (dx / d) * pull,
+              c.z + (dz / d) * pull,
+              12,
+              anyCanGoAshore
+            );
+            c.x = resolved.x;
+            c.z = resolved.z;
           }
         }
       }
@@ -2430,15 +3407,27 @@ export class GameSimulation {
   }
 
   private spawnCallout(x: number, z: number, text: string, color: string) {
+    // Stagger nearby concurrent callouts slightly so rapid damage & status labels remain readable
+    let nearbyCount = 0;
+    for (const c of this.callouts) {
+      if (c.elapsed < 0.35 && Math.hypot(c.x - x, c.z - z) < 38) {
+        nearbyCount += 1;
+      }
+    }
+    const offsetAngle = (nearbyCount * 2.15) % (Math.PI * 2);
+    const offsetRadius = nearbyCount > 0 ? Math.min(28, 12 + nearbyCount * 7) : 0;
     this.callouts.push({
       id: this.nextId('txt'),
-      x,
-      z,
+      x: x + Math.cos(offsetAngle) * offsetRadius,
+      z: z + Math.sin(offsetAngle) * offsetRadius,
       text,
       color,
       elapsed: 0,
-      duration: 1.0,
+      duration: 1.05,
     });
+    if (this.callouts.length > 28) {
+      this.callouts.shift();
+    }
   }
 
   private updateTutorialProgress() {
@@ -2484,59 +3473,98 @@ export class GameSimulation {
     }
   }
 
+  /**
+   * Authoritative, single-fire victory resolution.
+   * Victory is strictly awarded when one living Keli legitimately owns all 100 fragments.
+   */
+  private resolveVictory(king: KeliEntity, sourceLabel?: string) {
+    if (this.matchConcluded || this.status !== 'playing') return;
+    if (!king.alive || Math.trunc(king.level) !== TOTAL_MATCH_FRAGMENTS) return;
+
+    this.matchConcluded = true;
+    this.victoryRecordCount += 1;
+    this.finalFeastActive = false;
+    this.winnerId = king.id;
+    this.winnerName = king.name;
+    this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
+
+    const subtitle = sourceLabel
+      ? `Reunited all 100 fragments from ${sourceLabel}`
+      : 'Reunited all 100 evolution fragments in Wang Kelian';
+    this.pushBanner(`${king.name} became the Keli King!`, subtitle);
+    this.emitSfxGlobal('whistle');
+
+    for (const [pid, meta] of this.playerMetaById.entries()) {
+      const entity = this.getPlayer(pid);
+      if (pid === king.id) {
+        meta.finalLevel = TOTAL_MATCH_FRAGMENTS;
+        meta.survivalTime = this.matchTime;
+      } else {
+        meta.spectateTargetId = king.id;
+        if (!meta.killedBy) {
+          meta.killedBy = king.name;
+          meta.deathCause = `${king.name} reunited all 100 fragments first`;
+          meta.finalLevel = entity.alive
+            ? Math.trunc(entity.level)
+            : (entity.eliminatedAtLevel ?? meta.finalLevel);
+          meta.survivalTime = this.matchTime;
+        }
+      }
+    }
+
+    if (king.id === this.primaryPlayerId) {
+      this.playerFinalLevel = TOTAL_MATCH_FRAGMENTS;
+      this.playerSurvivalTime = this.matchTime;
+    } else {
+      this.spectateTargetId = king.id;
+      if (!this.killedBy) {
+        this.killedBy = king.name;
+        this.deathCause = `${king.name} reunited all 100 fragments first`;
+        const primary = this.getPlayer();
+        this.playerFinalLevel = primary.alive
+          ? Math.trunc(primary.level)
+          : (primary.eliminatedAtLevel ?? this.playerFinalLevel);
+        this.playerSurvivalTime = this.matchTime;
+      }
+    }
+  }
+
   private evaluateMatchOutcome() {
+    if (this.matchConcluded || this.status !== 'playing') return;
+
     const aliveKelis = this.kelis.filter((k) => k.alive);
 
-    // Check if anyone reached Level 100
-    const king = aliveKelis.find((k) => k.level >= 100);
+    // Victory ONLY occurs when a living Keli legitimately owns all 100 fragments
+    const king = aliveKelis.find((k) => Math.trunc(k.level) === TOTAL_MATCH_FRAGMENTS);
     if (king) {
-      this.winnerId = king.id;
-      this.winnerName = king.name;
-      this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
-      this.emitSfxGlobal('whistle');
+      this.resolveVictory(king);
+      return;
+    }
 
-      for (const [pid, meta] of this.playerMetaById.entries()) {
-        const entity = this.getPlayer(pid);
-        if (pid === king.id) {
-          meta.finalLevel = 100;
-          meta.survivalTime = this.matchTime;
-        } else {
-          meta.spectateTargetId = king.id;
-          if (!meta.killedBy) {
-            meta.killedBy = king.name;
-            meta.deathCause = `${king.name} reunited all 100 fragments first`;
-            meta.finalLevel = entity.level;
-            meta.survivalTime = this.matchTime;
-          }
-        }
-      }
-
-      if (king.id === this.primaryPlayerId) {
-        this.playerFinalLevel = 100;
-        this.playerSurvivalTime = this.matchTime;
-      } else {
-        this.spectateTargetId = king.id;
-        if (!this.killedBy) {
-          this.killedBy = king.name;
-          this.deathCause = `${king.name} reunited all 100 fragments first`;
-          this.playerFinalLevel = this.getPlayer().level;
-          this.playerSurvivalTime = this.matchTime;
-        }
-      }
+    // Special Case: If only 1 Keli remains with < 100 fragments and unclaimed carcasses exist,
+    // NEVER award immediate victory — keep Final Feast active until all 100 fragments are reunited!
+    if (aliveKelis.length === 1 && aliveKelis[0].level < TOTAL_MATCH_FRAGMENTS) {
       return;
     }
 
     if (aliveKelis.length === 0) {
+      this.matchConcluded = true;
+      this.finalFeastActive = false;
       this.status = 'draw';
       for (const [pid, meta] of this.playerMetaById.entries()) {
         const entity = this.getPlayer(pid);
         if (entity.alive || meta.survivalTime === 0) {
-          meta.finalLevel = entity.level;
+          meta.finalLevel = entity.alive
+            ? Math.trunc(entity.level)
+            : (entity.eliminatedAtLevel ?? meta.finalLevel);
           meta.survivalTime = this.matchTime;
         }
       }
       if (this.getPlayer().alive || this.playerSurvivalTime === 0) {
-        this.playerFinalLevel = this.getPlayer().level;
+        const primary = this.getPlayer();
+        this.playerFinalLevel = primary.alive
+          ? Math.trunc(primary.level)
+          : (primary.eliminatedAtLevel ?? this.playerFinalLevel);
         this.playerSurvivalTime = this.matchTime;
       }
     }
@@ -2608,20 +3636,71 @@ export class GameSimulation {
       }
     }
 
-    // Keep the last required carcass identifiable when player is the sole survivor < 100
+    // Final Feast phase: reveal ALL remaining carcasses on minimap & directional HUD arrows
+    const activeCarcasses = this.carcasses.filter((c) => !c.consumed && c.mass > 0);
     let lastRequiredCarcass: { x: number; z: number; mass: number } | null = null;
-    if (aliveKelis.length === 1 && aliveKelis[0].id === p.id && p.level < 100 && this.carcasses.length > 0) {
-      const c = this.carcasses[0];
-      lastRequiredCarcass = { x: c.x, z: c.z, mass: c.mass };
+    let finalFeast: FinalFeastState | null = null;
+
+    if (
+      this.finalFeastActive &&
+      aliveKelis.length === 1 &&
+      aliveKelis[0].level < TOTAL_MATCH_FRAGMENTS &&
+      activeCarcasses.length > 0
+    ) {
+      const markers = activeCarcasses
+        .map((c) => {
+          const dx = c.x - focus.x;
+          const dz = c.z - focus.z;
+          return {
+            id: c.id,
+            x: c.x,
+            z: c.z,
+            mass: Math.trunc(c.mass),
+            distance: Math.round(Math.hypot(dx, dz)),
+            angle: Math.atan2(dz, dx),
+            sourceName: c.sourceName,
+          };
+        })
+        .sort((a, b) => a.distance - b.distance);
+
+      finalFeast = {
+        active: true,
+        remainingFragments: markers.reduce((sum, m) => sum + m.mass, 0),
+        remainingCarcasses: markers,
+      };
+      if (markers.length > 0) {
+        lastRequiredCarcass = {
+          x: markers[0].x,
+          z: markers[0].z,
+          mass: markers[0].mass,
+        };
+      }
     }
 
-    // Off-screen indicators for confirmed sonar targets
+    // Off-screen indicators for confirmed sonar targets and Final Feast carcasses
     const offscreenIndicators: HudSnapshot['offscreenIndicators'] = [];
+    const seenIndicatorIds = new Set<string>();
+    if (finalFeast) {
+      for (const m of finalFeast.remainingCarcasses) {
+        if (m.distance > 180) {
+          seenIndicatorIds.add(m.id);
+          offscreenIndicators.push({
+            id: m.id,
+            kind: 'carcass',
+            screenAngle: m.angle,
+            distance: m.distance,
+            level: m.mass,
+          });
+        }
+      }
+    }
     for (const contact of sonarContacts) {
+      if (seenIndicatorIds.has(contact.id)) continue;
       const dx = contact.x - focus.x;
       const dz = contact.z - focus.z;
       const dist = Math.hypot(dx, dz);
       if (dist > 260) {
+        seenIndicatorIds.add(contact.id);
         offscreenIndicators.push({
           id: contact.id,
           kind: contact.kind,
@@ -2712,6 +3791,11 @@ export class GameSimulation {
         zoneName: zoneMeta.name,
         inSafeZone,
         stunned: p.stunTimer > 0,
+        staggered: p.staggerTimer > 0,
+        stunResistTimeLeft: Math.round(p.stunResistTimer * 100) / 100,
+        evading: p.evadeTimer > 0,
+        bitePhase: p.bitePhase,
+        biteCooldown: Math.round(p.biteCooldown * 100) / 100,
         venomActive: p.venomTimer > 0,
         frenzyActive: p.frenzyTimer > 0,
         surgeTimeLeft: p.surgeTimer,
@@ -2721,6 +3805,8 @@ export class GameSimulation {
         stormFinTimeLeft: p.stormFinTimer,
         thunderRoeTimeLeft: p.thunderRoeTimer,
         evoBoostTimeLeft: Math.round(p.evoBoostTimer * 100) / 100,
+        bountyBoostTimeLeft: Math.round((p.bountyBoostTimer ?? 0) * 100) / 100,
+        bountyPoints: p.bountyPoints ?? 0,
         veilActive: p.veilTimer > 0,
         sonarActive: focus.sonarTimer > 0,
         sonarIsHunter: focus.sonarIsHunter,
@@ -2747,6 +3833,7 @@ export class GameSimulation {
         rainFed: pk.rainFed,
       })),
       lastRequiredCarcass,
+      finalFeast,
       offscreenIndicators: offscreenIndicators.slice(0, 8),
       recentBanner: banner ? { ...banner } : null,
       soundCues: cues.filter((c) => this.matchTime - c.timestamp < 4.5),
@@ -2804,17 +3891,22 @@ export class GameSimulation {
       recentEmotes: this.recentEmotes.filter((em) => this.matchTime - em.time < 3.8),
       matchResult: {
         status: perPlayerStatus,
+        winnerId: this.winnerId,
         winnerName: this.winnerName,
         killedBy: meta ? meta.killedBy : this.killedBy,
         deathCause: meta ? meta.deathCause : this.deathCause,
         massTransferredTo: meta ? meta.massTransferredTo : this.massTransferredTo,
-        finalLevel: p.alive ? p.level : meta ? meta.finalLevel : this.playerFinalLevel,
+        finalLevel: p.alive
+          ? Math.trunc(p.level)
+          : (p.eliminatedAtLevel ?? (meta ? meta.finalLevel : this.playerFinalLevel)),
         kills: p.kills,
+        bountyPoints: p.bountyPoints ?? 0,
         survivalTime: p.alive
           ? this.matchTime
           : meta
           ? meta.survivalTime
           : this.playerSurvivalTime,
+        finalFeastTriggered: this.finalFeastTriggered,
         ledger: [...this.ledger],
       },
     };
@@ -2825,6 +3917,7 @@ export class GameSimulation {
     const meta = this.playerMetaById.get(playerId);
     const sfx = meta ? meta.pendingSfx.splice(0, meta.pendingSfx.length) : [];
     const shake = meta ? meta.cameraShake : this.cameraShake;
+    const hitStop = meta ? meta.hitStop : this.hitStop;
 
     const kelis: RemoteKeliState[] = this.kelis
       .filter((k) => k.alive)
@@ -2851,7 +3944,15 @@ export class GameSimulation {
         activeHazard: k.activeHazard,
         bitePhase: k.bitePhase,
         biteAimAngle: Math.round(k.biteAimAngle * 1000) / 1000,
+        evadeTimer: Math.round(k.evadeTimer * 100) / 100,
+        staggerTimer: Math.round(k.staggerTimer * 100) / 100,
         stunTimer: Math.round(k.stunTimer * 100) / 100,
+        stunResistTimer: Math.round(k.stunResistTimer * 100) / 100,
+        recoilTimer: Math.round(k.recoilTimer * 100) / 100,
+        recoilDirX: Math.round(k.recoilDirX * 100) / 100,
+        recoilDirZ: Math.round(k.recoilDirZ * 100) / 100,
+        recoilStrength: Math.round(k.recoilStrength * 100) / 100,
+        lastHitKind: k.lastHitKind ?? null,
         venomTimer: Math.round(k.venomTimer * 100) / 100,
         frenzyTimer: Math.round(k.frenzyTimer * 100) / 100,
         veilTimer: Math.round(k.veilTimer * 100) / 100,
@@ -2869,6 +3970,8 @@ export class GameSimulation {
         kills: k.kills,
         rivalsConsumed: k.rivalsConsumed ?? 0,
         bountyReward: k.bountyReward ?? 0,
+        bountyPoints: k.bountyPoints ?? 0,
+        bountyBoostTimer: Math.round((k.bountyBoostTimer ?? 0) * 100) / 100,
         feedingTargetId: k.feedingTargetId,
         feedingProgress: Math.round(k.feedingProgress * 100) / 100,
         feedingDuration: Math.round(k.feedingDuration * 100) / 100,
@@ -2882,6 +3985,7 @@ export class GameSimulation {
       matchTime: this.matchTime,
       status: hud.matchResult.status,
       cameraShake: shake,
+      hitStop: hitStop ? { ...hitStop } : null,
       zone: { ...this.zone },
       weather: { ...this.weather },
       kelis,
@@ -2889,6 +3993,9 @@ export class GameSimulation {
         ...c,
         x: Math.round(c.x * 10) / 10,
         z: Math.round(c.z * 10) / 10,
+        evolutionPhaseAtDeath:
+          c.evolutionPhaseAtDeath ?? (c.mass >= 80 ? 3 : c.mass >= 40 ? 2 : 1),
+        initialMass: c.initialMass ?? c.mass,
       })),
       pickups: this.pickups.map((pk) => ({
         ...pk,
@@ -2899,6 +4006,11 @@ export class GameSimulation {
         ...fx,
         x: Math.round(fx.x * 10) / 10,
         z: Math.round(fx.z * 10) / 10,
+      })),
+      callouts: this.callouts.map((c) => ({
+        ...c,
+        x: Math.round(c.x * 10) / 10,
+        z: Math.round(c.z * 10) / 10,
       })),
       hud,
       sfx,

@@ -87,6 +87,7 @@ export interface ActiveAbilitySpec {
   key: string;
   unlockLevel: number;
   cooldown: number;
+  staminaCost?: number;
   description: string;
 }
 
@@ -97,7 +98,17 @@ export const ACTIVE_ABILITIES: ActiveAbilitySpec[] = [
     key: 'LMB / Space',
     unlockLevel: 1,
     cooldown: 0.45,
+    staminaCost: 10,
     description: 'Directional bite arc (stuns at Lv.40+). Also feeds on nearby carcasses.',
+  },
+  {
+    id: 'evade',
+    name: 'Slip Evade',
+    key: 'RMB / C',
+    unlockLevel: 1,
+    cooldown: 2.2,
+    staminaCost: 24,
+    description: 'Quick evasive burst with brief 60% damage mitigation and stun guard.',
   },
   {
     id: 'dash',
@@ -105,6 +116,7 @@ export const ACTIVE_ABILITIES: ActiveAbilitySpec[] = [
     key: 'Shift',
     unlockLevel: 10,
     cooldown: 3.5,
+    staminaCost: 18,
     description: 'Surge forward rapidly along your movement or aim vector.',
   },
   {
@@ -121,6 +133,7 @@ export const ACTIVE_ABILITIES: ActiveAbilitySpec[] = [
     key: 'Q',
     unlockLevel: 50,
     cooldown: 10,
+    staminaCost: 12,
     description: 'Eject a dense silt cloud for 4s that breaks enemy tracking.',
   },
   {
@@ -129,6 +142,7 @@ export const ACTIVE_ABILITIES: ActiveAbilitySpec[] = [
     key: 'R',
     unlockLevel: 60,
     cooldown: 11,
+    staminaCost: 14,
     description: 'Discharge bio-electric shockwave damaging and stunning nearby rivals.',
   },
   {
@@ -137,6 +151,7 @@ export const ACTIVE_ABILITIES: ActiveAbilitySpec[] = [
     key: 'F',
     unlockLevel: 90,
     cooldown: 14,
+    staminaCost: 16,
     description: 'Conjure a swirling vortex pulling rivals and carcasses inward.',
   },
 ];

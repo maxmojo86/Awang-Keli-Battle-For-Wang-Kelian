@@ -4,7 +4,10 @@ import type {
   AbilityId,
   BitePhase,
   CarcassEntity,
+  FloatingCallout,
   HazardTileKind,
+  HitReactKind,
+  HitStopEvent,
   HudSnapshot,
   LobbySize,
   PickupItem,
@@ -95,7 +98,15 @@ export interface RemoteKeliState {
   activeHazard: HazardTileKind | null;
   bitePhase: BitePhase;
   biteAimAngle: number;
+  evadeTimer?: number;
+  staggerTimer?: number;
   stunTimer: number;
+  stunResistTimer?: number;
+  recoilTimer?: number;
+  recoilDirX?: number;
+  recoilDirZ?: number;
+  recoilStrength?: number;
+  lastHitKind?: HitReactKind | null;
   venomTimer: number;
   frenzyTimer: number;
   veilTimer: number;
@@ -113,6 +124,8 @@ export interface RemoteKeliState {
   kills: number;
   rivalsConsumed?: number;
   bountyReward?: number;
+  bountyPoints?: number;
+  bountyBoostTimer?: number;
   feedingTargetId: string | null;
   feedingProgress: number;
   feedingDuration: number;
@@ -124,6 +137,12 @@ export interface ClientSfxEvent {
   kind:
     | 'bite'
     | 'bite_heavy'
+    | 'bite_miss'
+    | 'hit_confirm'
+    | 'hit_crit'
+    | 'hit_stun'
+    | 'hit_blocked'
+    | 'evade'
     | 'death'
     | 'feed'
     | 'evolution'
@@ -153,12 +172,14 @@ export interface WorldStatePacket {
   matchTime: number;
   status: 'playing' | 'victory' | 'defeat' | 'draw';
   cameraShake: number;
+  hitStop?: HitStopEvent | null;
   zone: ZoneState;
   weather: WeatherState;
   kelis: RemoteKeliState[];
   carcasses: CarcassEntity[];
   pickups: PickupItem[];
   effects: WorldEffect[];
+  callouts?: FloatingCallout[];
   hud: HudSnapshot;
   sfx: ClientSfxEvent[];
 }

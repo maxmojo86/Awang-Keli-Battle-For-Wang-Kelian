@@ -91,6 +91,14 @@ function formatClock(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function formatKeyCodeLabel(code: string | undefined): string {
+  if (!code) return 'C';
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code === 'AltLeft' || code === 'AltRight') return 'Alt';
+  if (code === 'ControlLeft' || code === 'ControlRight') return 'Ctrl';
+  return code.slice(0, 4);
+}
+
 function AbilityIcon({ id, unlocked }: { id: AbilityId; unlocked: boolean }) {
   const opacity = unlocked ? 'opacity-100' : 'opacity-35 grayscale';
   switch (id) {
@@ -106,6 +114,21 @@ function AbilityIcon({ id, unlocked }: { id: AbilityId; unlocked: boolean }) {
           <circle cx="16" cy="16" r="14" fill="url(#ab-bite)" />
           <path d="M6 12 L12 15 L15 9 L19 14 L26 10 L22 17 L26 21 L18 19 L14 25 L11 19 L6 21 L9 16 Z" fill="#fef3c7" stroke="#f59e0b" strokeWidth="1.2" strokeLinejoin="round" />
           <path d="M10 14 L14 19 L18 14 L21 18" fill="none" stroke="#991b1b" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      );
+    case 'evade':
+      return (
+        <svg viewBox="0 0 32 32" className={`w-7 h-7 sm:w-8 sm:h-8 ${opacity}`} aria-hidden="true">
+          <defs>
+            <radialGradient id="ab-evade" cx="50%" cy="50%" r="55%">
+              <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.58" />
+              <stop offset="100%" stopColor="#082032" stopOpacity="0" />
+            </radialGradient>
+          </defs>
+          <circle cx="16" cy="16" r="14" fill="url(#ab-evade)" />
+          <path d="M7 11 L15 16 L7 21" fill="none" stroke="#a5f3fc" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M14 9 L23 16 L14 23" fill="none" stroke="#22d3ee" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M23 11 C26 14, 26 18, 23 21" fill="none" stroke="#e0f2fe" strokeWidth="1.6" strokeLinecap="round" />
         </svg>
       );
     case 'dash':
@@ -444,6 +467,24 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
     const getActiveRenderable = () => (isMultiplayer ? remoteView! : sim!);
 
+    const handleAuthoritativeFinish = (snap: HudSnapshot) => {
+      if (snap.matchResult.status === 'playing') return;
+      if (snap.player.alive && !finishedSent) {
+        finishedSent = true;
+        soundEngine.stopAmbient();
+        if (snap.matchResult.status === 'victory') {
+          const delayMs = settingsRef.current.reducedMotion ? 1850 : 2350;
+          victoryTimeoutId = window.setTimeout(() => {
+            finishWithReplay(snap);
+          }, delayMs);
+        } else {
+          finishWithReplay(snap);
+        }
+      } else if (!snap.player.alive) {
+        soundEngine.stopAmbient();
+      }
+    };
+
     const unsubWorld = isMultiplayer
       ? multiplayerClient.onWorldState((packet) => {
           if (!remoteView) return;
@@ -471,20 +512,17 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             setEvolutionToast(null);
           }
 
-          if (packet.status !== 'playing' && snap.player.alive && !finishedSent) {
-            finishedSent = true;
-            soundEngine.stopAmbient();
-            if (packet.status === 'victory') {
-              const delayMs = settingsRef.current.reducedMotion ? 1850 : 2350;
-              victoryTimeoutId = window.setTimeout(() => {
-                finishWithReplay(snap);
-              }, delayMs);
-            } else {
-              finishWithReplay(snap);
-            }
-          } else if (packet.status !== 'playing' && !snap.player.alive) {
-            soundEngine.stopAmbient();
+          if (packet.status !== 'playing') {
+            handleAuthoritativeFinish(snap);
           }
+        })
+      : () => {};
+
+    const unsubMatchEnded = isMultiplayer
+      ? multiplayerClient.onMatchEnded((endHud) => {
+          remoteStatus = endHud.matchResult.status;
+          setHud(endHud);
+          handleAuthoritativeFinish(endHud);
         })
       : () => {};
 
@@ -611,11 +649,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       keysDown.add(e.code);
       syncMoveFromKeys();
 
+      const evadeCode = settingsRef.current.evadeKey || 'KeyC';
       if (e.code === 'Space') {
         e.preventDefault();
         biteHeld = true;
         pushPlayerInput({ biteHeld: true }, true);
         dispatchAbility('bite');
+      } else if (e.code === evadeCode && !e.repeat) {
+        e.preventDefault();
+        dispatchAbility('evade');
       } else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
         dispatchAbility('dash');
       } else if (e.code === 'KeyE') {
@@ -690,6 +732,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         biteHeld = true;
         pushPlayerInput({ biteHeld: true }, true);
         dispatchAbility('bite');
+      } else if (e.button === 2) {
+        e.preventDefault();
+        dispatchAbility('evade');
       }
     };
 
@@ -832,6 +877,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       if (victoryTimeoutId !== null) {
         window.clearTimeout(victoryTimeoutId);
       }
+      unsubMatchEnded();
       unsubWorld();
       soundEngine.stopAmbient();
       window.removeEventListener('keydown', onKeyDown);
@@ -972,8 +1018,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const hudVis = settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY;
   const showMobileControls = !isSpectating && (isTouchDevice || isMobileViewport);
   const hotbarAbilities = ACTIVE_ABILITIES.filter(
-    (a) => a.id !== 'sonar' && !(showMobileControls && a.id === 'bite')
+    (a) => a.id !== 'sonar' && !(showMobileControls && (a.id === 'bite' || a.id === 'evade'))
   );
+  const evadeKeyLabel = formatKeyCodeLabel(settings.evadeKey);
 
   const activeFloatingStatuses = hudVis.statusEffects
     ? sceneRef.current?.getActiveFloatingStatusIds() ?? []
@@ -983,6 +1030,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     <div
       className="relative w-full h-full overflow-hidden bg-[#162b35] select-none"
       data-floating-status-icons={activeFloatingStatuses.join(',')}
+      onContextMenu={(e) => e.preventDefault()}
     >
       {/* Isolated WebGL Mount */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
@@ -1187,6 +1235,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   {!isSpectating &&
                     ((hudVis.statusEffects &&
                       (Boolean(selfBounty) ||
+                        (p.bountyBoostTimeLeft ?? 0) > 0 ||
                         p.dewTimeLeft > 0 ||
                         p.stormFinTimeLeft > 0 ||
                         p.thunderRoeTimeLeft > 0 ||
@@ -1206,10 +1255,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                           <>
                             {selfBounty && (
                               <span
-                                title={`You are marked on the minimap (+${selfBounty.rewardPoints} Evo Pts bounty)`}
+                                title={`You are marked on the minimap (+${selfBounty.rewardPoints} Bounty Pts & Surge)`}
                                 className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a]"
                               >
                                 ◎ +{selfBounty.rewardPoints}
+                              </span>
+                            )}
+                            {(p.bountyBoostTimeLeft ?? 0) > 0 && (
+                              <span
+                                title="Bounty Surge (+20% Speed & +Stamina Regen)"
+                                className="inline-flex items-center gap-0.5 px-1 py-px rounded-[2px] bg-[#2a1d08] border border-[#fbbf24]/80 text-[#fde68a]"
+                              >
+                                ★ {Math.ceil(p.bountyBoostTimeLeft ?? 0)}s
                               </span>
                             )}
                             {p.dewTimeLeft > 0 && (
@@ -1460,6 +1517,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       p.dewTimeLeft > 0 ||
                       p.stormFinTimeLeft > 0 ||
                       p.thunderRoeTimeLeft > 0 ||
+                      (p.bountyBoostTimeLeft ?? 0) > 0 ||
                       p.veilActive ||
                       p.stunned ||
                       displayFatigued) && (
@@ -1469,7 +1527,12 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       >
                         {selfBounty && (
                           <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a0f12] border border-[#fbbf24]/75 text-[#fde68a] whitespace-nowrap">
-                            ◎ Bounty +{selfBounty.rewardPoints} Evo
+                            ◎ Bounty +{selfBounty.rewardPoints} Pts
+                          </span>
+                        )}
+                        {(p.bountyBoostTimeLeft ?? 0) > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-[2px] bg-[#2a1d08] border border-[#fbbf24]/80 text-[#fde68a] whitespace-nowrap">
+                            ★ Bounty Surge {(p.bountyBoostTimeLeft ?? 0).toFixed(1)}s
                           </span>
                         )}
                         {p.dewTimeLeft > 0 && (
@@ -1576,6 +1639,34 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </div>
             )}
 
+            {hud.finalFeast?.active && p.alive && !isSpectating && (
+              <div
+                className={`compendium-plaque rounded-sm border-[#fbbf24]/70 text-center ${
+                  isCompactMode ? 'px-2.5 py-1' : 'px-4 py-1.5'
+                }`}
+              >
+                <div className="flex items-center justify-center gap-2 font-mono-num">
+                  <span className={`font-display font-semibold text-[#fde68a] ${isCompactMode ? 'text-[10.5px]' : 'text-xs'}`}>
+                    ◆ FINAL FEAST
+                  </span>
+                  <span className={`text-[#fbbf24] font-semibold ${isCompactMode ? 'text-[10px]' : 'text-[11px]'}`}>
+                    {hud.finalFeast.remainingFragments} Frag Left ({hud.finalFeast.remainingCarcasses.length} Carcass{hud.finalFeast.remainingCarcasses.length > 1 ? 'es' : ''})
+                  </span>
+                  {hud.finalFeast.remainingCarcasses[0] && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-[#f3e6c8]">
+                      <ArrowUpRight
+                        className="w-3.5 h-3.5 text-[#fde68a]"
+                        style={{
+                          transform: `rotate(${(hud.finalFeast.remainingCarcasses[0].angle * 180) / Math.PI + 45}deg)`,
+                        }}
+                      />
+                      {hud.finalFeast.remainingCarcasses[0].distance}u
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {hudVis.banners && !evolutionEvent && hud.recentBanner && (
               <div
                 data-hud-element="banners"
@@ -1612,6 +1703,38 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     }}
                   />
                 </div>
+              </div>
+            )}
+
+            {/* Player Combat Control State Indicator (Stunned / Staggered / Stun Immune) */}
+            {!isSpectating && p.alive && (p.stunned || p.staggered || (p.stunResistTimeLeft ?? 0) > 0.05) && (
+              <div
+                className={`compendium-plaque-subtle flex items-center gap-1.5 rounded-[2px] font-mono-num font-semibold ${
+                  isCompactMode ? 'px-2 py-0.5 text-[9.5px]' : 'px-3 py-1 text-[11px]'
+                } ${
+                  p.stunned
+                    ? 'border-[#fbbf24] text-[#fde68a] bg-[#2a1a06]/90'
+                    : p.staggered
+                      ? 'border-[#fb923c] text-[#fed7aa] bg-[#2d1208]/90'
+                      : 'border-[#38bdf8] text-[#bae6fd] bg-[#082032]/90'
+                }`}
+              >
+                {p.stunned ? (
+                  <>
+                    <Zap className="w-3 h-3 text-[#fbbf24] shrink-0" />
+                    <span>STUNNED</span>
+                  </>
+                ) : p.staggered ? (
+                  <>
+                    <AlertTriangle className="w-3 h-3 text-[#fb923c] shrink-0" />
+                    <span>STAGGERED</span>
+                  </>
+                ) : (
+                  <>
+                    <Shield className="w-3 h-3 text-[#38bdf8] shrink-0" />
+                    <span>STUN IMMUNE {(p.stunResistTimeLeft ?? 0).toFixed(1)}s</span>
+                  </>
+                )}
               </div>
             )}
 
@@ -1983,7 +2106,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 className="compendium-plaque-subtle absolute -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded-[2px] text-[10px] font-mono-num font-semibold"
                 style={{ left: x, top: y, borderColor: col, color: col }}
               >
-                {shape} Lv.{ind.level}
+                {ind.kind === 'carcass'
+                  ? `${shape} +${ind.level} Frag`
+                  : `${shape} Lv.${ind.level}`}
               </div>
             );
           })}
@@ -2006,9 +2131,20 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   const unlocked = p.level >= ab.unlockLevel;
                   const cd =
                     ab.id === 'bite'
-                      ? 0
+                      ? p.biteCooldown ?? 0
                       : p.cooldowns[ab.id as keyof typeof p.cooldowns] ?? 0;
-                  const onCd = cd > 0.05;
+                  const onCd = ab.id === 'bite' ? false : cd > 0.05;
+                  const staminaCost = ab.staminaCost ?? 0;
+                  const lowStamina =
+                    unlocked &&
+                    !onCd &&
+                    ab.id !== 'bite' &&
+                    staminaCost > 0 &&
+                    p.stamina < staminaCost;
+                  const stunLocked = unlocked && p.stunned;
+                  const keyBadge =
+                    ab.id === 'evade' ? `RMB/${evadeKeyLabel}` : ab.key.split(' / ')[0];
+                  const isBiteActive = ab.id === 'bite' && (p.bitePhase === 'windup' || p.bitePhase === 'strike');
 
                   return (
                     <button
@@ -2024,21 +2160,25 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       onClick={(e) => {
                         if (e.detail === 0 && unlocked && !onCd) handleAbilityClick(ab.id);
                       }}
-                      title={`${ab.name} (${ab.key}) — ${ab.description}`}
+                      title={`${ab.name} (${ab.id === 'evade' ? `RMB / ${evadeKeyLabel}` : ab.key})${staminaCost > 0 ? ` · ${staminaCost} Stamina` : ''} — ${ab.description}`}
                       aria-label={ab.name}
                       className={`relative flex flex-col items-center justify-center rounded-[3px] transition-transform touch-none overflow-hidden ${
                         isCompactMode ? 'w-11 h-11' : 'w-12 h-12 sm:w-16 sm:h-16'
                       } ${
                         !unlocked
                           ? 'compendium-slot-locked text-[#4e5f6b] cursor-not-allowed'
-                          : onCd
-                          ? 'compendium-slot opacity-70 text-[#8fa1ad]'
+                          : onCd || stunLocked
+                          ? 'compendium-slot opacity-65 text-[#8fa1ad]'
+                          : lowStamina
+                          ? 'compendium-slot opacity-75 text-[#94a3b8] ring-1 ring-inset ring-[#38bdf8]/45'
+                          : isBiteActive
+                          ? 'compendium-slot ring-1 ring-inset ring-[#fbbf24] text-[#fef3c7]'
                           : 'compendium-slot text-[#f7f2e7] hover:brightness-110 active:scale-95'
                       }`}
                     >
                       {!isCompactMode && (
-                        <span className="hidden sm:block absolute top-0.5 left-1 text-[8.5px] font-mono-num font-bold text-[#f3d285] drop-shadow">
-                          {ab.key.split(' / ')[0]}
+                        <span className="hidden sm:block absolute top-0.5 left-1 text-[8px] font-mono-num font-bold text-[#f3d285] drop-shadow">
+                          {keyBadge}
                         </span>
                       )}
                       <AbilityIcon id={ab.id} unlocked={unlocked} />
@@ -2054,6 +2194,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                       {onCd && unlocked && (
                         <div className="absolute inset-0 bg-[#05090d]/78 flex items-center justify-center text-xs font-mono-num font-bold text-[#fbbf24]">
                           {cd.toFixed(1)}
+                        </div>
+                      )}
+                      {lowStamina && !stunLocked && (
+                        <div className="pointer-events-none absolute bottom-0 inset-x-0 bg-[#082032]/85 text-center text-[7.5px] font-mono-num font-bold text-[#7dd3fc] leading-tight py-px">
+                          {staminaCost} ST
                         </div>
                       )}
                     </button>
@@ -2343,6 +2488,58 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 />
               </div>
 
+              {/* Mobile Slip Evade Defensive Counterplay Button */}
+              {(() => {
+                const evadeCd = p.cooldowns.evade ?? 0;
+                const evadeOnCd = evadeCd > 0.05;
+                const evadeLowStam = p.stamina < 24;
+                return (
+                  <button
+                    type="button"
+                    data-mobile-control="true"
+                    disabled={evadeOnCd || p.stunned}
+                    onPointerDown={(e) => {
+                      if (e.pointerType === 'mouse' && e.button !== 0) return;
+                      e.stopPropagation();
+                      e.preventDefault();
+                      if (!evadeOnCd && !p.stunned) {
+                        soundEngine.startAmbient();
+                        dispatchAbility('evade');
+                      }
+                    }}
+                    onClick={(e) => {
+                      if (e.detail === 0 && !evadeOnCd && !p.stunned) {
+                        soundEngine.startAmbient();
+                        dispatchAbility('evade');
+                      }
+                    }}
+                    aria-label="Slip Evade"
+                    className={`pointer-events-auto absolute rounded-full border-2 flex flex-col items-center justify-center gap-0.5 touch-none select-none shadow-xl transition-transform overflow-hidden ${
+                      canPlaceControlsBesideBar
+                        ? isCompactMode
+                          ? 'bottom-3 right-[88px]'
+                          : 'bottom-3.5 right-[100px]'
+                        : isCompactMode
+                          ? 'bottom-[68px] right-[88px]'
+                          : 'bottom-[70px] right-[100px]'
+                    } ${isCompactMode ? 'w-12 h-12' : 'w-14 h-14'} ${
+                      evadeOnCd || p.stunned
+                        ? 'border-[#334155] bg-[#0a151d]/85 text-[#94a3b8] opacity-75'
+                        : evadeLowStam
+                          ? 'border-[#38bdf8]/40 bg-[#082032]/85 text-[#7dd3fc] opacity-75'
+                          : p.evading
+                            ? 'scale-95 border-[#67e8f9] bg-gradient-to-b from-[#0e7490] to-[#083344] text-[#ecfeff]'
+                            : 'border-[#22d3ee] bg-gradient-to-b from-[#0e3a4c] to-[#071c26] text-[#cffafe] active:scale-95'
+                    }`}
+                  >
+                    <Shield className={`${isCompactMode ? 'w-4 h-4' : 'w-5 h-5'} pointer-events-none`} />
+                    <span className="text-[8px] font-display font-semibold tracking-wide pointer-events-none leading-none">
+                      {evadeOnCd ? evadeCd.toFixed(1) : 'EVADE'}
+                    </span>
+                  </button>
+                );
+              })()}
+
               <button
                 type="button"
                 data-mobile-control="true"
@@ -2433,6 +2630,26 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     className="accent-[#c99c4a] w-4 h-4"
                   />
                 </label>
+
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#e2e8f0]">Evade Key (also Right-Click)</span>
+                  <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                    {(['KeyC', 'KeyX', 'KeyZ', 'AltLeft'] as const).map((code) => (
+                      <button
+                        key={code}
+                        type="button"
+                        onClick={() => onUpdateSettings({ evadeKey: code })}
+                        className={`px-2 py-0.5 text-xs font-mono-num rounded-[2px] ${
+                          (settings.evadeKey ?? 'KeyC') === code
+                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                            : 'text-[#9cb0ba] hover:text-white'
+                        }`}
+                      >
+                        {formatKeyCodeLabel(code)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
                 <label className="flex items-center justify-between gap-3 cursor-pointer">
                   <span className="text-[#e2e8f0]">Visual Sound Cues</span>

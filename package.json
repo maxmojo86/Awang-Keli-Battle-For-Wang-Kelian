@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
     "cap:copy": "cap copy android",
     "cap:sync": "cap sync android",
     "cap:open": "cap open android",

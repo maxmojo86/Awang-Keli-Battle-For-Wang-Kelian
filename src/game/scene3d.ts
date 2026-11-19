@@ -13,17 +13,34 @@ import {
   threeDToSim,
   WORLD_SIZE,
 } from './arena';
-import { getEvolutionForm, getMilestoneTier } from '../data/abilities';
+import { getMilestoneTier } from '../data/abilities';
 import { getEmoteSpec } from '../data/emotes';
 import { AmbientHazardParticles } from './ambientParticles';
 import { ArenaTextureSet, createArenaTextureSet } from './arenaTextures';
 import {
-  angleToFacingIndex,
-  getSpriteSet,
-  RIG_PART_ORDER,
-  RigPartName,
-  SpriteSet,
-} from './sprites';
+  applyEnvFrameUVs,
+  buildArenaEnvironmentalLayout,
+  CarcassEvolutionPhase,
+  computeCarcassVisualScale,
+  createEnvSpriteGeometry,
+  ENV_SPRITE_MANIFEST,
+  EnvironmentalSprite,
+  EnvSpriteAtlasManager,
+  getCarcassSpriteId,
+  getCarcassValueGlow,
+  resolveCarcassEvolutionPhase,
+  resolveTwoFrameIndex,
+} from './environmentalSprites';
+import {
+  ActorAnimState,
+  advanceActorAnim,
+  applyFrameUVsToGeometry,
+  computeKeliWaterSubmersion,
+  createActorAnimState,
+  createActorSpriteGeometry,
+  getSpriteSheetMeta,
+  SpriteSheetAtlasManager,
+} from './spriteAnimation';
 import {
   collectActiveStatusIndicators,
   MAX_FLOATING_STATUS_ICONS,
@@ -31,10 +48,13 @@ import {
   StatusIndicatorId,
   StatusIndicatorSpec,
 } from './statusIcons';
+import { BITE_CONE_HALF_ANGLE } from './simulation';
 import {
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
+  FloatingCallout,
+  HitStopEvent,
   KeliEntity,
   PickupItem,
   PickupKind,
@@ -48,6 +68,8 @@ export interface RenderableSimulation {
   carcasses: CarcassEntity[];
   pickups: PickupItem[];
   effects: WorldEffect[];
+  callouts?: FloatingCallout[];
+  hitStop?: HitStopEvent | null;
   zone: ZoneState;
   weather: WeatherState;
   cameraShake: number;
@@ -75,23 +97,17 @@ const _workSky = new THREE.Color();
 const RAIN_COUNT = 360;
 const SPLASH_COUNT = 26;
 
-interface RigPartNodes {
-  pivot: THREE.Group;
-  mesh: THREE.Mesh;
-  mat: THREE.MeshBasicMaterial;
-  baseX: number;
-  baseY: number;
-  baseZ: number;
-}
-
 interface ActorVisual {
   group: THREE.Group;
-  rigGroup: THREE.Group;
-  parts: Record<RigPartName, RigPartNodes>;
-  lastTierKey: string;
-  animPhase: number;
-  idleTime: number;
-  moveBlend: number;
+  spriteMesh: THREE.Mesh;
+  spriteGeo: THREE.PlaneGeometry;
+  spriteMat: THREE.MeshBasicMaterial;
+  waterUniforms: {
+    uSubmergeMode: { value: number };
+    uSubmergeBlend: { value: number };
+  };
+  animState: ActorAnimState;
+  facingLeft: boolean;
   shadowMesh: THREE.Mesh;
   ringMesh: THREE.Mesh;
   runeMesh: THREE.Mesh;
@@ -105,13 +121,25 @@ interface ActorVisual {
 interface CarcassVisual {
   group: THREE.Group;
   spriteMesh: THREE.Mesh;
+  spriteGeo: THREE.PlaneGeometry;
+  spriteMat: THREE.MeshBasicMaterial;
+  phase: CarcassEvolutionPhase;
+  currentFrame: 0 | 1;
+  glowMesh: THREE.Mesh;
   ringMesh: THREE.Mesh;
+  feedRippleMesh: THREE.Mesh;
+  shimmerMotes: THREE.Mesh[];
 }
 
 interface PickupVisual {
   group: THREE.Group;
   spriteMesh: THREE.Mesh;
   ringMesh: THREE.Mesh;
+}
+
+interface CalloutVisual {
+  mesh: THREE.Mesh;
+  tex: THREE.CanvasTexture;
 }
 
 export class ArenaScene3D {
@@ -121,7 +149,11 @@ export class ArenaScene3D {
   private camera: THREE.PerspectiveCamera;
   private keyLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
-  private spriteSet: SpriteSet;
+  private spriteAtlases: SpriteSheetAtlasManager;
+  private envAtlases: EnvSpriteAtlasManager;
+  private envSprites: EnvironmentalSprite[] = [];
+  private envSpriteGroup!: THREE.Group;
+  private activeFeedingCarcassIds = new Set<string>();
   private arenaTextures!: ArenaTextureSet;
   private isSoftwareGl: boolean;
 
@@ -129,6 +161,7 @@ export class ArenaScene3D {
   private carcassPool = new Map<string, CarcassVisual>();
   private pickupPool = new Map<string, PickupVisual>();
   private fxPool = new Map<string, THREE.Mesh>();
+  private calloutPool = new Map<string, CalloutVisual>();
   private zoneRingMesh!: THREE.Mesh;
   private paperBoatGroup!: THREE.Group;
   private toxicPools: THREE.Mesh[] = [];
@@ -188,6 +221,8 @@ export class ArenaScene3D {
   private impulseOffsetX = 0;
   private impulseOffsetZ = 0;
   private shakeClock = 0;
+  private lastHitStopSeq = 0;
+  private visualHitStopTimer = 0;
 
   constructor(
     container: HTMLElement,
@@ -243,12 +278,14 @@ export class ArenaScene3D {
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     pmrem.dispose();
 
-    this.spriteSet = getSpriteSet();
+    this.spriteAtlases = new SpriteSheetAtlasManager();
+    this.envAtlases = new EnvSpriteAtlasManager();
     this.arenaTextures = createArenaTextureSet(this.renderer.capabilities.getMaxAnisotropy());
     this.setupLighting();
     this.buildTerrainAndWater();
     this.buildInstancedRocksAndReeds();
     this.buildCompositeLandmarks();
+    this.buildEnvironmentalSprites();
     this.buildZoneBoundary();
     this.initWeatherVisuals();
     this.initFloatingStatusIcons();
@@ -300,7 +337,13 @@ export class ArenaScene3D {
   }
 
   private createBiteConeGeometry(): THREE.BufferGeometry {
-    const geo = new THREE.CircleGeometry(1, 18, -0.85, 1.7);
+    // Matches authoritative directional bite cone (BITE_CONE_HALF_ANGLE)
+    const geo = new THREE.CircleGeometry(
+      1,
+      20,
+      -BITE_CONE_HALF_ANGLE,
+      BITE_CONE_HALF_ANGLE * 2
+    );
     geo.rotateX(-Math.PI / 2);
     return geo;
   }
@@ -455,7 +498,7 @@ export class ArenaScene3D {
       clearcoat: 0.82,
       clearcoatRoughness: 0.14,
       transparent: true,
-      opacity: 0.66,
+      opacity: 0.54,
       depthWrite: false,
     });
 
@@ -937,31 +980,70 @@ export class ArenaScene3D {
 
   private createActorVisual(): ActorVisual {
     const group = new THREE.Group();
-    const rigGroup = new THREE.Group();
-    const parts = {} as Record<RigPartName, RigPartNodes>;
 
-    RIG_PART_ORDER.forEach((partName, idx) => {
-      const pivot = new THREE.Group();
-      const mat = new THREE.MeshBasicMaterial({
-        transparent: true,
-        alphaTest: 0.12,
-        side: THREE.DoubleSide,
-      });
-      const mesh = new THREE.Mesh(this.sharedQuadGeo, mat);
-      mesh.renderOrder = 5 + idx;
-      pivot.add(mesh);
-      rigGroup.add(pivot);
-
-      parts[partName] = {
-        pivot,
-        mesh,
-        mat,
-        baseX: 0,
-        baseY: 0.5,
-        baseZ: 0,
-      };
+    const spriteGeo = createActorSpriteGeometry();
+    applyFrameUVsToGeometry(spriteGeo, 1, 0, 0);
+    const waterUniforms = {
+      uSubmergeMode: { value: 2 },
+      uSubmergeBlend: { value: 1 },
+    };
+    const spriteMat = new THREE.MeshBasicMaterial({
+      map: this.spriteAtlases.getTexture(1),
+      transparent: true,
+      alphaTest: 0.1,
+      side: THREE.DoubleSide,
     });
-    group.add(rigGroup);
+    spriteMat.customProgramCacheKey = () => 'keli-water-submersion-v1';
+    spriteMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.waterUniforms.uTime;
+      shader.uniforms.uSubmergeMode = waterUniforms.uSubmergeMode;
+      shader.uniforms.uSubmergeBlend = waterUniforms.uSubmergeBlend;
+      shader.vertexShader =
+        `varying vec3 vActorWorldPos;\n` +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `
+          #include <begin_vertex>
+          vActorWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+          `
+        );
+      shader.fragmentShader =
+        `uniform float uTime;\nuniform float uSubmergeMode;\nuniform float uSubmergeBlend;\nvarying vec3 vActorWorldPos;\n` +
+        shader.fragmentShader.replace(
+          '#include <map_fragment>',
+          `
+          #include <map_fragment>
+          if (uSubmergeBlend > 0.001) {
+            float waveY = sin(vActorWorldPos.x * 0.32 + uTime * 1.8) * 0.06
+                        + cos(vActorWorldPos.z * 0.28 + uTime * 1.4) * 0.05;
+            float depthBelow = waveY - vActorWorldPos.y;
+            float c1 = sin(vActorWorldPos.x * 0.42 + uTime * 1.25) * cos(vActorWorldPos.z * 0.38 - uTime * 0.95);
+            float c2 = sin((vActorWorldPos.x + vActorWorldPos.z) * 0.55 - uTime * 1.55);
+            float caustic = smoothstep(0.45, 0.95, c1 * 0.6 + c2 * 0.4);
+            vec3 waterDeepTint = vec3(0.10, 0.38, 0.40);
+            vec3 causticTint = vec3(0.24, 0.72, 0.68);
+            if (uSubmergeMode > 1.5) {
+              // Phase 1 fully aquatic: fully submerged beneath 3D water (seamlessly veiled even in ultra-shallow margins)
+              float aboveSurface = smoothstep(-0.04, 0.08, -depthBelow);
+              float veilStrength = mix(0.18, 0.54, aboveSurface) * uSubmergeBlend;
+              diffuseColor.rgb = mix(diffuseColor.rgb * 1.12, waterDeepTint, veilStrength);
+              diffuseColor.rgb += causticTint * caustic * (0.20 + 0.14 * aboveSurface) * uSubmergeBlend;
+            } else {
+              // Phase 2 & 3 amphibious in water: lower half underwater with animated waterline foam, upper half dry
+              float belowMask = smoothstep(-0.05, 0.08, depthBelow) * uSubmergeBlend;
+              float foamBand = exp(-pow(depthBelow / 0.11, 2.0)) * uSubmergeBlend;
+              float foamRipple = 0.72 + 0.28 * sin(vActorWorldPos.x * 3.8 + vActorWorldPos.z * 2.9 + uTime * 4.5);
+              diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * 1.06, waterDeepTint, 0.24), belowMask);
+              diffuseColor.rgb += causticTint * caustic * 0.18 * belowMask;
+              diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.76, 0.96, 0.94), foamBand * foamRipple * 0.42);
+            }
+          }
+          `
+        );
+    };
+    const spriteMesh = new THREE.Mesh(spriteGeo, spriteMat);
+    spriteMesh.renderOrder = 1;
+    group.add(spriteMesh);
 
     const shadowMesh = new THREE.Mesh(
       this.sharedDiscGeo,
@@ -1042,12 +1124,12 @@ export class ArenaScene3D {
     this.scene.add(group);
     return {
       group,
-      rigGroup,
-      parts,
-      lastTierKey: '',
-      animPhase: Math.random() * Math.PI * 2,
-      idleTime: Math.random() * Math.PI * 2,
-      moveBlend: 0,
+      spriteMesh,
+      spriteGeo,
+      spriteMat,
+      waterUniforms,
+      animState: createActorAnimState(1),
+      facingLeft: false,
       shadowMesh,
       ringMesh,
       runeMesh,
@@ -1059,43 +1141,28 @@ export class ArenaScene3D {
     };
   }
 
-  private syncActorRigTier(
-    vis: ActorVisual,
-    tier: ReturnType<typeof getMilestoneTier>,
-    rigRev: number
-  ) {
-    vis.lastTierKey = `${tier}-${rigRev}`;
-    const tierParts = this.spriteSet.rigParts[tier];
-
-    for (const partName of RIG_PART_ORDER) {
-      const spec = tierParts[partName];
-      const node = vis.parts[partName];
-      node.pivot.visible = spec.active;
-      node.baseX = spec.uPivot - 0.5;
-      node.baseY = 1.0 - spec.vPivot;
-      node.baseZ = spec.layerZ;
-      node.pivot.position.set(node.baseX, node.baseY, node.baseZ);
-      node.mesh.position.set(0.5 - spec.uPivot, spec.vPivot - 0.5, 0);
-
-      if (node.mat.map !== spec.texture) {
-        node.mat.map = spec.texture;
-        node.mat.needsUpdate = true;
-      }
-    }
-  }
-
   private updateActorBadge(vis: ActorVisual, k: KeliEntity, playerLevel: number) {
     const hpBucket = Math.round((k.hp / Math.max(1, k.maxHp)) * 20);
     const emoteId = k.activeEmote ?? '';
     const bountyPts = k.bountyReward ?? 0;
-    const key = `${k.level}-${hpBucket}-${k.isPlayer ? 1 : 0}-${k.level > playerLevel ? 'd' : 'p'}-${k.stunTimer > 0 ? 's' : ''}-${k.venomTimer > 0 ? 'v' : ''}-${k.isSpeaking ? 'm' : ''}-${emoteId}-${bountyPts}`;
+    const combatStateTag =
+      k.stunTimer > 0
+        ? 'STUN'
+        : k.staggerTimer > 0
+          ? 'STAGGER'
+          : k.evadeTimer > 0
+            ? 'EVADE'
+            : k.stunResistTimer > 0
+              ? 'IMMUNE'
+              : '';
+    const key = `${k.level}-${hpBucket}-${k.isPlayer ? 1 : 0}-${k.level > playerLevel ? 'd' : 'p'}-${k.stunTimer > 0 ? 's' : ''}-${k.staggerTimer > 0 ? 'g' : ''}-${k.stunResistTimer > 0 ? 'r' : ''}-${k.evadeTimer > 0 ? 'e' : ''}-${k.venomTimer > 0 ? 'v' : ''}-${k.isSpeaking ? 'm' : ''}-${emoteId}-${bountyPts}`;
     if (key === vis.lastBadgeKey) return;
     vis.lastBadgeKey = key;
 
     const ctx = vis.badgeCtx;
     ctx.clearRect(0, 0, 160, 68);
 
-    // Optional overhead Emote Signal / Rival Taunt / Bounty callout ribbon
+    // Optional overhead Emote Signal / Combat State / Bounty callout ribbon
     const emoteSpec = getEmoteSpec(k.activeEmote);
     if (emoteSpec) {
       ctx.fillStyle = emoteSpec.category === 'taunt' ? 'rgba(34, 10, 14, 0.94)' : 'rgba(9, 23, 34, 0.94)';
@@ -1117,6 +1184,39 @@ export class ArenaScene3D {
       ctx.textBaseline = 'middle';
       ctx.fillStyle = emoteSpec.color;
       ctx.fillText(emoteSpec.overheadText, 80, 12);
+    } else if (combatStateTag) {
+      const tagColor =
+        combatStateTag === 'STUN'
+          ? '#fbbf24'
+          : combatStateTag === 'STAGGER'
+            ? '#fb923c'
+            : combatStateTag === 'EVADE'
+              ? '#22d3ee'
+              : '#7dd3fc';
+      const tagBg =
+        combatStateTag === 'STUN'
+          ? 'rgba(42, 26, 6, 0.94)'
+          : combatStateTag === 'STAGGER'
+            ? 'rgba(45, 18, 8, 0.94)'
+            : 'rgba(8, 28, 38, 0.94)';
+      const tagText =
+        combatStateTag === 'STUN'
+          ? 'STUNNED'
+          : combatStateTag === 'STAGGER'
+            ? 'STAGGERED'
+            : combatStateTag === 'EVADE'
+              ? 'SLIP EVADE'
+              : 'STUN IMMUNE';
+      ctx.fillStyle = tagBg;
+      ctx.fillRect(30, 3, 100, 18);
+      ctx.strokeStyle = tagColor;
+      ctx.lineWidth = 1.4;
+      ctx.strokeRect(30, 3, 100, 18);
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = tagColor;
+      ctx.fillText(tagText, 80, 12);
     } else if (bountyPts > 0) {
       ctx.fillStyle = 'rgba(38, 12, 14, 0.94)';
       ctx.fillRect(22, 3, 116, 18);
@@ -1127,7 +1227,7 @@ export class ArenaScene3D {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#fde68a';
-      ctx.fillText(`BOUNTY +${bountyPts} EVO`, 80, 12);
+      ctx.fillText(`BOUNTY +${bountyPts} PTS`, 80, 12);
     }
 
     const yOff = 28;
@@ -1137,16 +1237,20 @@ export class ArenaScene3D {
     ctx.fillRect(6, yOff + 2, 148, 20);
     ctx.strokeStyle = emoteSpec
       ? emoteSpec.color
-      : bountyPts > 0
+      : k.stunTimer > 0
         ? '#fbbf24'
-        : k.isSpeaking
-          ? '#4ade80'
-          : k.isPlayer
-            ? '#c99c4a'
-            : k.level > playerLevel
-              ? '#b91c1c'
-              : '#3a545e';
-    ctx.lineWidth = emoteSpec || k.isSpeaking || bountyPts > 0 ? 1.8 : 1.2;
+        : k.stunResistTimer > 0
+          ? '#38bdf8'
+          : bountyPts > 0
+            ? '#fbbf24'
+            : k.isSpeaking
+              ? '#4ade80'
+              : k.isPlayer
+                ? '#c99c4a'
+                : k.level > playerLevel
+                  ? '#b91c1c'
+                  : '#3a545e';
+    ctx.lineWidth = emoteSpec || k.isSpeaking || bountyPts > 0 || k.stunTimer > 0 ? 1.8 : 1.2;
     ctx.strokeRect(6, yOff + 2, 148, 20);
 
     ctx.font = 'bold 11px sans-serif';
@@ -1166,47 +1270,135 @@ export class ArenaScene3D {
 
     if (k.venomTimer > 0) {
       ctx.fillStyle = '#4ade80';
-      ctx.fillRect(14, yOff + 33, 56, 3);
+      ctx.fillRect(14, yOff + 33, 42, 3);
     }
     if (k.stunTimer > 0) {
       ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(90, yOff + 33, 56, 3);
+      ctx.fillRect(104, yOff + 33, 42, 3);
+    } else if (k.staggerTimer > 0) {
+      ctx.fillStyle = '#fb923c';
+      ctx.fillRect(104, yOff + 33, 42, 3);
+    } else if (k.stunResistTimer > 0) {
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(60, yOff + 33, 40, 3);
     }
 
     vis.badgeTex.needsUpdate = true;
   }
 
-  private createCarcassVisual(): CarcassVisual {
+  private buildEnvironmentalSprites() {
+    this.envSpriteGroup = new THREE.Group();
+    const layout = buildArenaEnvironmentalLayout();
+    for (let i = 0; i < layout.length; i++) {
+      const sprite = new EnvironmentalSprite(layout[i], this.envAtlases);
+      this.envSprites.push(sprite);
+      this.envSpriteGroup.add(sprite.mesh);
+    }
+    this.scene.add(this.envSpriteGroup);
+  }
+
+  private createCarcassVisual(phase: CarcassEvolutionPhase): CarcassVisual {
     const group = new THREE.Group();
-    const spriteMesh = new THREE.Mesh(
+    const spriteId = getCarcassSpriteId(phase);
+    const def = ENV_SPRITE_MANIFEST[spriteId];
+
+    const spriteGeo = createEnvSpriteGeometry(def.anchor.y);
+    applyEnvFrameUVs(spriteGeo, def.atlas, def.frames[0]);
+    const spriteMat = new THREE.MeshBasicMaterial({
+      map: this.envAtlases.getTexture(def.atlas),
+      transparent: true,
+      alphaTest: 0.12,
+      side: THREE.DoubleSide,
+    });
+    const spriteMesh = new THREE.Mesh(spriteGeo, spriteMat);
+    spriteMesh.renderOrder = 5;
+    group.add(spriteMesh);
+
+    // Fragment-value soft additive halo beneath the carcass (pale blue / gold / strong gold)
+    const glowMesh = new THREE.Mesh(
       this.sharedQuadGeo,
       new THREE.MeshBasicMaterial({
-        map: this.spriteSet.carcass,
+        map: this.envAtlases.getCarcassGlowTexture(),
+        color: 0x7dd3fc,
         transparent: true,
-        alphaTest: 0.12,
+        opacity: 0.35,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
         side: THREE.DoubleSide,
       })
     );
-    spriteMesh.renderOrder = 4;
-    group.add(spriteMesh);
+    glowMesh.rotation.x = -Math.PI / 2;
+    glowMesh.position.y = 0.05;
+    glowMesh.renderOrder = 3;
+    group.add(glowMesh);
 
+    // Distinct value-tinted water ring so carcasses read clearly against vegetation
     const ringMesh = new THREE.Mesh(
       this.sharedRingGeo,
       new THREE.MeshBasicMaterial({
-        color: 0x4ade80,
+        color: 0x7dd3fc,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.5,
         side: THREE.DoubleSide,
         depthWrite: false,
       })
     );
     ringMesh.rotation.x = -Math.PI / 2;
-    ringMesh.position.y = 0.08;
-    ringMesh.renderOrder = 3;
+    ringMesh.position.y = 0.09;
+    ringMesh.renderOrder = 4;
     group.add(ringMesh);
 
+    // Restrained feeding disturbance water ripple (visible only while actively fed on)
+    const feedRippleMesh = new THREE.Mesh(
+      this.sharedRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xe0f2fe,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    feedRippleMesh.rotation.x = -Math.PI / 2;
+    feedRippleMesh.position.y = 0.12;
+    feedRippleMesh.visible = false;
+    feedRippleMesh.renderOrder = 6;
+    group.add(feedRippleMesh);
+
+    // Pooled rising gold shimmer particles for high-value carcasses (30+ remaining fragments)
+    const shimmerMotes: THREE.Mesh[] = [];
+    for (let i = 0; i < 4; i++) {
+      const mote = new THREE.Mesh(
+        this.sharedQuadGeo,
+        new THREE.MeshBasicMaterial({
+          map: this.envAtlases.getCarcassGlowTexture(),
+          color: 0xfef08a,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        })
+      );
+      mote.visible = false;
+      mote.renderOrder = 7;
+      group.add(mote);
+      shimmerMotes.push(mote);
+    }
+
     this.scene.add(group);
-    return { group, spriteMesh, ringMesh };
+    return {
+      group,
+      spriteMesh,
+      spriteGeo,
+      spriteMat,
+      phase,
+      currentFrame: 0,
+      glowMesh,
+      ringMesh,
+      feedRippleMesh,
+      shimmerMotes,
+    };
   }
 
   private createPickupVisual(kind: PickupKind): PickupVisual {
@@ -1625,8 +1817,30 @@ export class ArenaScene3D {
     const deathCam = !player.alive ? sim.getDeathCam?.() ?? null : null;
     const deathCamActive = Boolean(deathCam && deathCam.active && deathCam.remaining > 0);
 
-    // Slow visual pacing during the 3-second Death Cam transition
-    const visualScale = deathCamActive ? (this.reducedMotion ? 0.5 : 0.28) : 1.0;
+    // Local-only visual hit-stop (never pauses simulation or multiplayer ticks)
+    const hitStop = sim.hitStop;
+    if (hitStop && hitStop.seq !== this.lastHitStopSeq) {
+      this.lastHitStopSeq = hitStop.seq;
+      if (!this.reducedMotion) {
+        this.visualHitStopTimer = Math.max(
+          this.visualHitStopTimer,
+          Math.min(0.055, hitStop.duration)
+        );
+      }
+    }
+    if (this.visualHitStopTimer > 0) {
+      this.visualHitStopTimer = Math.max(0, this.visualHitStopTimer - dt);
+    }
+    const hitStopFrozen = !this.reducedMotion && this.visualHitStopTimer > 0;
+
+    // Slow visual pacing during the 3-second Death Cam transition or local hit-stop
+    const visualScale = hitStopFrozen
+      ? 0
+      : deathCamActive
+        ? this.reducedMotion
+          ? 0.5
+          : 0.28
+        : 1.0;
     const visualDt = dt * visualScale;
     this.visualElapsed += visualDt;
     const elapsed = this.visualElapsed;
@@ -1819,10 +2033,27 @@ export class ArenaScene3D {
     const zr = sim.zone.currentRadius * SIM_TO_3D;
     this.zoneRingMesh.scale.set(zr, zr, 1);
 
+    // View-culled environmental atlas sprites (2 shared GPU textures, 2-frame loops)
+    const focusX3D = this.currentCamFocus.x;
+    const focusZ3D = this.currentCamFocus.z;
+    for (let i = 0; i < this.envSprites.length; i++) {
+      this.envSprites[i].update(
+        elapsed,
+        this.camera.quaternion,
+        focusX3D,
+        focusZ3D,
+        this.reducedMotion
+      );
+    }
+
+    this.activeFeedingCarcassIds.clear();
     const activeIds = new Set<string>();
     for (const k of sim.kelis) {
       if (!k.alive) continue;
       activeIds.add(k.id);
+      if (k.feedingTargetId) {
+        this.activeFeedingCarcassIds.add(k.feedingTargetId);
+      }
 
       let vis = this.actorPool.get(k.id);
       if (!vis) {
@@ -1831,211 +2062,115 @@ export class ArenaScene3D {
       }
 
       const tier = getMilestoneTier(k.level);
-      const form = getEvolutionForm(k.level);
-      const facing = angleToFacingIndex(k.facingAngle);
-      const flipX = facing === 1 || facing === 2 || facing === 3;
-      const isNorth = facing === 3 || facing === 4 || facing === 5;
-      const isPureVertical = facing === 0 || facing === 4;
+      const facingCos = Math.cos(k.facingAngle);
+      const facingSin = Math.sin(k.facingAngle);
+      if (facingCos < -0.15) vis.facingLeft = true;
+      else if (facingCos > 0.15) vis.facingLeft = false;
+      const isNorth = facingSin < -0.45;
 
-      const tierKey = `${tier}-${this.spriteSet.rigRevision}`;
-      if (vis.lastTierKey !== tierKey) {
-        this.syncActorRigTier(vis, tier, this.spriteSet.rigRevision);
+      // Advance authoritative frame-by-frame sprite animation (6x4 grid per evolution phase)
+      const anim = advanceActorAnim(vis.animState, k, visualDt, this.reducedMotion);
+      const sheetMeta = getSpriteSheetMeta(anim.phase);
+
+      if (anim.phaseChanged) {
+        const nextTex = this.spriteAtlases.getTexture(anim.phase);
+        if (vis.spriteMat.map !== nextTex) {
+          vis.spriteMat.map = nextTex;
+          vis.spriteMat.needsUpdate = true;
+        }
+      }
+      if (anim.frameChanged) {
+        applyFrameUVsToGeometry(vis.spriteGeo, anim.phase, anim.row, anim.col);
       }
 
+      const hitTintHex =
+        k.lastHitKind === 'crit'
+          ? 0xffcc66
+          : k.lastHitKind === 'mitigated'
+            ? 0x67e8f9
+            : k.lastHitKind === 'stun'
+              ? 0xfde68a
+              : 0xff9988;
       const tintHex =
         k.hitFlashTimer > 0
-          ? 0xff9988
-          : k.veilTimer > 0
-            ? 0x526b66
-            : !k.isOnShore && k.isSubmerged
-              ? 0xc4ebe6
-              : isNorth
-                ? 0xd6e1e6
-                : 0xffffff;
-      const partOpacity = k.veilTimer > 0 && !k.isPlayer ? 0.35 : 1.0;
+          ? hitTintHex
+          : k.evadeTimer > 0
+            ? 0xa5f3fc
+            : k.stunTimer > 0
+              ? 0xfef08a
+              : k.veilTimer > 0
+                ? 0x526b66
+                : isNorth
+                  ? 0xe2ebf0
+                  : 0xffffff;
+      const spriteOpacity =
+        k.veilTimer > 0 && !k.isPlayer
+          ? 0.35
+          : k.evadeTimer > 0
+            ? 0.84
+            : 1.0;
 
-      for (const partName of RIG_PART_ORDER) {
-        const node = vis.parts[partName];
-        if (!node.pivot.visible) continue;
-        node.mat.color.setHex(tintHex);
-        node.mat.opacity = partOpacity;
-      }
+      vis.spriteMat.color.setHex(tintHex);
+      vis.spriteMat.opacity = spriteOpacity;
+      vis.spriteMat.depthWrite = spriteOpacity >= 0.95;
 
-      // Scale progression aligned with the Codex Sprite Scale Chart (Lv.1 fry -> Lv.100 Keli King)
+      // Scale progression aligned with Lv.1-100 growth while preserving exact sprite aspect ratio
       const tierStep =
         tier >= 100 ? 1.55 : tier >= 80 ? 0.95 : tier >= 40 ? 0.45 : 0;
       const size3D = 2.85 + (k.level / 100) * 4.2 + tierStep;
+      const renderedHeight = size3D * sheetMeta.worldHeightScale;
+      const renderedWidth = renderedHeight * sheetMeta.aspect;
+
+      // Subtle whole-character combat feedback only (knockback recoil nudge + stun/stagger shudder)
       const motionScale = this.reducedMotion ? 0.25 : 1.0;
-
-      const speed = Math.hypot(k.vx, k.vz);
-      const isMoving = speed > 10 && k.stunTimer <= 0;
-      const moveTarget = isMoving ? Math.min(1, speed / 95) : 0;
-      vis.moveBlend += (moveTarget - vis.moveBlend) * (1 - Math.exp(-10 * visualDt));
-      vis.idleTime += visualDt * motionScale;
-
-      const speedRatio = Math.min(1.3, speed / 120);
-      const cycleFreq =
-        form === 1 ? 6.5 + speedRatio * 5.2 : 5.6 + speedRatio * 5.0;
-      vis.animPhase += visualDt * cycleFreq * (0.25 + vis.moveBlend * 0.75) * motionScale;
-
-      const moveW = vis.moveBlend;
-      const idleW = 1 - moveW;
-      const p = vis.animPhase;
-      const it = vis.idleTime;
-      const breath = Math.sin(it * 2.3);
-
-      // Compute idle + locomotion + combat pose per articulated plate
-      let torsoRot = 0;
-      let torsoDx = 0;
-      let torsoDy = breath * 0.011 * idleW;
-      let torsoSx = 1 - breath * 0.012 * idleW;
-      let torsoSy = 1 + breath * 0.026 * idleW;
-
-      let headRot =
-        (Math.sin(it * 1.45) * 0.042 + Math.sin(it * 2.9) * 0.018) * idleW;
-      let headDx = 0;
-      let headDy = breath * 0.013 * idleW;
-
-      let tailRot = Math.sin(it * 2.1 + 0.8) * 0.085 * idleW;
-      let tailDy = 0;
-      let tailSx = 1 + Math.sin(it * 2.1) * 0.032 * idleW;
-
-      let nearArmRot = (-0.035 + Math.sin(it * 2.1 - 0.4) * 0.055) * idleW;
-      let nearArmDx = 0;
-      let nearArmDy = breath * 0.011 * idleW;
-
-      let farArmRot = (0.035 - Math.sin(it * 2.1 - 0.4) * 0.05) * idleW;
-      let farArmDx = 0;
-      let farArmDy = breath * 0.011 * idleW;
-
-      let nearLegRot = 0;
-      let nearLegDy = 0;
-      let farLegRot = 0;
-      let farLegDy = 0;
-
-      if (moveW > 0.01) {
-        if (form === 1) {
-          // Aquatic S-wave propulsion
-          const swimWave = Math.sin(p);
-          const swimBob = Math.sin(p * 2) * 0.018;
-          tailRot += swimWave * 0.34 * moveW;
-          tailSx += -Math.abs(swimWave) * 0.1 * moveW;
-          torsoRot += Math.sin(p - 1.1) * 0.075 * moveW;
-          torsoDy += swimBob * moveW;
-          torsoSx += Math.sin(p * 2) * 0.024 * moveW;
-          headRot += -Math.sin(p - 0.5) * 0.105 * moveW;
-          headDx += 0.014 * moveW;
-          headDy += swimBob * 0.9 * moveW;
-        } else if (form === 2) {
-          // Muscular forelimb crawl + tail sweep
-          const s1 = Math.sin(p);
-          const s2 = Math.sin(p + Math.PI);
-          const crawlBob = Math.abs(s1) * 0.026;
-          nearArmRot += (s1 * 0.42 + 0.06) * moveW;
-          nearArmDx += s1 * 0.02 * moveW;
-          nearArmDy += Math.max(0, s1) * 0.032 * moveW;
-          farArmRot += (s2 * 0.42 + 0.06) * moveW;
-          farArmDx += s2 * 0.02 * moveW;
-          farArmDy += Math.max(0, s2) * 0.032 * moveW;
-          tailRot += Math.sin(p + 0.9) * 0.27 * moveW;
-          tailDy += crawlBob * 0.7 * moveW;
-          torsoRot += (-0.045 + Math.sin(p * 2) * 0.042) * moveW;
-          torsoDy += crawlBob * moveW;
-          headRot += (0.04 + Math.cos(p * 2) * 0.038) * moveW;
-          headDy += crawlBob * 0.88 * moveW;
-        } else {
-          // Bipedal stride (Lv.80-100): alternating legs, contralateral arms, double-freq bob
-          const s1 = Math.sin(p);
-          const walkBob = (Math.abs(s1) * 0.034 - 0.012) * moveW;
-          nearLegRot += s1 * 0.38 * moveW;
-          nearLegDy += Math.max(0, Math.cos(p - 0.4)) * 0.034 * moveW;
-          farLegRot += -s1 * 0.38 * moveW;
-          farLegDy += Math.max(0, -Math.cos(p - 0.4)) * 0.034 * moveW;
-
-          nearArmRot += -s1 * 0.34 * moveW;
-          nearArmDx += -s1 * 0.012 * moveW;
-          nearArmDy += walkBob;
-          farArmRot += s1 * 0.34 * moveW;
-          farArmDx += s1 * 0.012 * moveW;
-          farArmDy += walkBob;
-
-          torsoRot += (-0.06 + Math.cos(p * 2) * 0.026) * moveW;
-          torsoDy += walkBob;
-          headRot += (0.045 - Math.cos(p * 2) * 0.028) * moveW;
-          headDy += walkBob * 0.95;
-          tailRot += (Math.sin(p + 0.6) * 0.16 - 0.05) * moveW;
-          tailDy += walkBob * 0.85;
-        }
+      let feedbackX = 0;
+      let feedbackZ = 0;
+      if (k.recoilTimer > 0) {
+        const rNorm = Math.min(1, k.recoilTimer / 0.22);
+        const rMag = rNorm * rNorm * Math.min(1.2, k.recoilStrength || 0.7) * 0.24 * motionScale;
+        feedbackX += k.recoilDirX * rMag;
+        feedbackZ += k.recoilDirZ * rMag;
+      }
+      if (k.stunTimer > 0 || k.staggerTimer > 0) {
+        const shudderAmp = (k.staggerTimer > 0 ? 0.065 : 0.045) * motionScale;
+        feedbackX += Math.sin(elapsed * 28 + k.x) * shudderAmp;
       }
 
-      // Bite windup / strike anticipation & lunge
-      if (k.bitePhase === 'windup') {
-        torsoRot += 0.11 * motionScale;
-        headRot += 0.13 * motionScale;
-        nearArmRot -= 0.25 * motionScale;
-        farArmRot -= 0.16 * motionScale;
-      } else if (k.bitePhase === 'strike') {
-        torsoRot -= 0.16 * motionScale;
-        torsoDx += 0.035 * motionScale;
-        headRot -= 0.18 * motionScale;
-        headDx += 0.055 * motionScale;
-        nearArmRot += 0.38 * motionScale;
-        farArmRot += 0.28 * motionScale;
-      }
-      if (k.stunTimer > 0) {
-        headRot += Math.sin(elapsed * 18) * 0.13 * motionScale;
-      }
-
-      // Apply plate transforms around each part's anatomical pivot
-      const pTorso = vis.parts.torso;
-      pTorso.pivot.position.set(pTorso.baseX + torsoDx, pTorso.baseY + torsoDy, pTorso.baseZ);
-      pTorso.pivot.rotation.z = torsoRot;
-      pTorso.pivot.scale.set(torsoSx, torsoSy, 1);
-
-      const pHead = vis.parts.head;
-      pHead.pivot.position.set(pHead.baseX + headDx, pHead.baseY + headDy, pHead.baseZ);
-      pHead.pivot.rotation.z = headRot;
-
-      const pTail = vis.parts.tail;
-      pTail.pivot.position.set(pTail.baseX, pTail.baseY + tailDy, pTail.baseZ);
-      pTail.pivot.rotation.z = tailRot;
-      pTail.pivot.scale.set(tailSx, 1, 1);
-
-      if (vis.parts.nearArm.pivot.visible) {
-        const pArm = vis.parts.nearArm;
-        pArm.pivot.position.set(pArm.baseX + nearArmDx, pArm.baseY + nearArmDy, pArm.baseZ);
-        pArm.pivot.rotation.z = nearArmRot;
-      }
-      if (vis.parts.farArm.pivot.visible) {
-        const pFArm = vis.parts.farArm;
-        pFArm.pivot.position.set(pFArm.baseX + farArmDx, pFArm.baseY + farArmDy, pFArm.baseZ);
-        pFArm.pivot.rotation.z = farArmRot;
-      }
-      if (vis.parts.nearLeg.pivot.visible) {
-        const pLeg = vis.parts.nearLeg;
-        pLeg.pivot.position.set(pLeg.baseX, pLeg.baseY + nearLegDy, pLeg.baseZ);
-        pLeg.pivot.rotation.z = nearLegRot;
-      }
-      if (vis.parts.farLeg.pivot.visible) {
-        const pFLeg = vis.parts.farLeg;
-        pFLeg.pivot.position.set(pFLeg.baseX, pFLeg.baseY + farLegDy, pFLeg.baseZ);
-        pFLeg.pivot.rotation.z = farLegRot;
-      }
-
-      const horizSquash = isPureVertical ? 0.91 : 1.0;
-      const vertScale = isNorth ? 0.95 : 1.0;
-      vis.rigGroup.scale.set((flipX ? -1 : 1) * horizSquash * size3D, vertScale * size3D, 1);
-      vis.rigGroup.position.y = -0.02 * size3D;
-      vis.rigGroup.quaternion.copy(this.camera.quaternion);
-      vis.badgeMesh.quaternion.copy(this.camera.quaternion);
-      const badgeFactor = tier >= 80 ? 1.05 : tier >= 40 ? 0.88 : 0.72;
-      vis.badgeMesh.position.y = size3D * badgeFactor + 0.45;
-
+      // 3D water submersion: Phase 1 fully aquatic Kelis submerge fully in water;
+      // Phase 2 & 3 amphibious Kelis submerge partially in water and stay 100% dry on land.
       const elev = getElevationAt(k.x, k.z);
-      const groundY = k.isOnShore ? Math.max(0.08, elev * 2.2) : -0.15;
-      vis.group.position.set(simTo3D(k.x), groundY, simTo3D(k.z));
+      const submersion = computeKeliWaterSubmersion(
+        anim.phase,
+        k.isOnShore,
+        elev,
+        renderedHeight,
+        sheetMeta.groundPadRatio
+      );
+      vis.waterUniforms.uSubmergeMode.value = submersion.shaderMode;
+      vis.waterUniforms.uSubmergeBlend.value =
+        submersion.mode === 'dry'
+          ? 0
+          : THREE.MathUtils.damp(vis.waterUniforms.uSubmergeBlend.value, submersion.targetBlend, 12, dt);
 
-      vis.shadowMesh.scale.setScalar(size3D * 0.34);
+      vis.spriteMesh.renderOrder = submersion.spriteRenderOrder;
+      vis.spriteMesh.scale.set(
+        (vis.facingLeft ? -1 : 1) * renderedWidth,
+        renderedHeight,
+        1
+      );
+      vis.spriteMesh.position.set(0, submersion.spriteLocalY, 0);
+      vis.spriteMesh.quaternion.copy(this.camera.quaternion);
+
+      vis.badgeMesh.quaternion.copy(this.camera.quaternion);
+      vis.badgeMesh.position.y = submersion.visibleTopLocalY + 0.65;
+
+      vis.group.position.set(simTo3D(k.x) + feedbackX, submersion.groupY, simTo3D(k.z) + feedbackZ);
+
+      vis.shadowMesh.position.y = submersion.shadowLocalY;
+      vis.shadowMesh.renderOrder = submersion.shadowRenderOrder;
+      (vis.shadowMesh.material as THREE.MeshBasicMaterial).opacity =
+        submersion.mode === 'dry' ? 0.48 : 0.32;
+      vis.shadowMesh.scale.setScalar(size3D * 0.36);
       vis.ringMesh.scale.setScalar(size3D * 0.46);
       const ringMat = vis.ringMesh.material as THREE.MeshBasicMaterial;
       const runeMat = vis.runeMesh.material as THREE.MeshBasicMaterial;
@@ -2047,7 +2182,24 @@ export class ArenaScene3D {
         vis.runeMesh.rotation.z = this.reducedMotion ? 0 : elapsed * 0.35;
         runeMat.color.setHex(0x7dd3fc);
         runeMat.opacity = 0.86 + Math.sin(elapsed * 3.5) * 0.1;
-        if (k.isSpeaking) {
+        if (k.stunTimer > 0) {
+          const pulse = this.reducedMotion ? 1.06 : 1.02 + Math.sin(elapsed * 14) * 0.1;
+          vis.ringMesh.scale.setScalar(size3D * 0.62 * pulse);
+          ringMat.color.setHex(0xfbbf24);
+          ringMat.opacity = 0.85;
+        } else if (k.evadeTimer > 0) {
+          vis.ringMesh.scale.setScalar(size3D * 0.6);
+          ringMat.color.setHex(0x22d3ee);
+          ringMat.opacity = 0.86;
+        } else if (k.staggerTimer > 0) {
+          vis.ringMesh.scale.setScalar(size3D * 0.56);
+          ringMat.color.setHex(0xf97316);
+          ringMat.opacity = 0.78;
+        } else if (k.stunResistTimer > 0) {
+          vis.ringMesh.scale.setScalar(size3D * 0.58);
+          ringMat.color.setHex(0x38bdf8);
+          ringMat.opacity = 0.62;
+        } else if (k.isSpeaking) {
           const voicePulse = this.reducedMotion ? 1.1 : 1.05 + Math.sin(elapsed * 12) * 0.14;
           vis.ringMesh.scale.setScalar(size3D * 0.64 * voicePulse);
           ringMat.color.setHex(0x4ade80);
@@ -2055,6 +2207,27 @@ export class ArenaScene3D {
         } else {
           ringMat.opacity = 0;
         }
+      } else if (k.stunTimer > 0) {
+        vis.runeMesh.visible = !player.alive && k.id === focus.id;
+        const pulse = this.reducedMotion ? 1.06 : 1.02 + Math.sin(elapsed * 14 + k.x) * 0.1;
+        vis.ringMesh.scale.setScalar(size3D * 0.6 * pulse);
+        ringMat.color.setHex(0xfbbf24);
+        ringMat.opacity = 0.86;
+      } else if (k.evadeTimer > 0) {
+        vis.runeMesh.visible = !player.alive && k.id === focus.id;
+        vis.ringMesh.scale.setScalar(size3D * 0.58);
+        ringMat.color.setHex(0x22d3ee);
+        ringMat.opacity = 0.85;
+      } else if (k.staggerTimer > 0) {
+        vis.runeMesh.visible = !player.alive && k.id === focus.id;
+        vis.ringMesh.scale.setScalar(size3D * 0.55);
+        ringMat.color.setHex(0xf97316);
+        ringMat.opacity = 0.76;
+      } else if (k.stunResistTimer > 0) {
+        vis.runeMesh.visible = !player.alive && k.id === focus.id;
+        vis.ringMesh.scale.setScalar(size3D * 0.56);
+        ringMat.color.setHex(0x38bdf8);
+        ringMat.opacity = 0.58;
       } else if (k.isSpeaking) {
         // Pulsing acoustic voice ring for nearby speaking multiplayer Kelis
         vis.runeMesh.visible = !player.alive && k.id === focus.id;
@@ -2092,15 +2265,26 @@ export class ArenaScene3D {
         ringMat.opacity = 0;
       }
 
-      if (k.bitePhase === 'windup' || k.bitePhase === 'strike') {
+      if (k.bitePhase === 'windup' || k.bitePhase === 'strike' || k.bitePhase === 'recovery') {
         vis.biteCone.visible = true;
-        const reach3D = 6.4 + k.level * 0.024;
+        // Visually matches authoritative bite range (55 + level * 0.22) * SIM_TO_3D
+        const reach3D = (55 + k.level * 0.22) * SIM_TO_3D;
         vis.biteCone.scale.set(reach3D, 1, reach3D);
         vis.biteCone.position.y = k.isOnShore ? 0.14 : 0.25;
         vis.biteCone.rotation.y = -k.biteAimAngle;
         const coneMat = vis.biteCone.material as THREE.MeshBasicMaterial;
-        coneMat.color.setHex(k.bitePhase === 'strike' ? 0xef4444 : 0xfbbf24);
-        coneMat.opacity = k.bitePhase === 'strike' ? 0.62 : 0.48;
+        if (k.bitePhase === 'strike') {
+          coneMat.color.setHex(0xef4444);
+          coneMat.opacity = 0.66;
+        } else if (k.bitePhase === 'windup') {
+          const pulse = this.reducedMotion ? 0.5 : 0.44 + Math.sin(elapsed * 26) * 0.1;
+          coneMat.color.setHex(0xfbbf24);
+          coneMat.opacity = pulse;
+        } else {
+          // Subtle translucent recovery cue indicating brief counterattack window
+          coneMat.color.setHex(0x64748b);
+          coneMat.opacity = 0.16;
+        }
       } else {
         vis.biteCone.visible = false;
       }
@@ -2111,9 +2295,8 @@ export class ArenaScene3D {
     for (const [id, vis] of this.actorPool.entries()) {
       if (!activeIds.has(id)) {
         this.scene.remove(vis.group);
-        for (const partName of RIG_PART_ORDER) {
-          vis.parts[partName].mat.dispose();
-        }
+        vis.spriteGeo.dispose();
+        vis.spriteMat.dispose();
         (vis.shadowMesh.material as THREE.Material).dispose();
         (vis.ringMesh.material as THREE.Material).dispose();
         (vis.runeMesh.material as THREE.Material).dispose();
@@ -2135,26 +2318,103 @@ export class ArenaScene3D {
     const activeCarcs = new Set<string>();
     for (const c of sim.carcasses) {
       activeCarcs.add(c.id);
+      const phase = resolveCarcassEvolutionPhase(c);
+      const spriteId = getCarcassSpriteId(phase);
+      const def = ENV_SPRITE_MANIFEST[spriteId];
+
       let vis = this.carcassPool.get(c.id);
       if (!vis) {
-        vis = this.createCarcassVisual();
+        vis = this.createCarcassVisual(phase);
         this.carcassPool.set(c.id, vis);
+      } else if (vis.phase !== phase) {
+        vis.phase = phase;
+        vis.spriteMat.map = this.envAtlases.getTexture(def.atlas);
+        vis.spriteMat.needsUpdate = true;
+        applyEnvFrameUVs(vis.spriteGeo, def.atlas, def.frames[vis.currentFrame]);
       }
-      const scale = 2.4 + Math.min(2.4, c.mass * 0.06);
-      vis.spriteMesh.scale.set(scale, scale, 1);
+
+      // 1 FPS subtle dead drift animation (never swims, breathes, or attacks)
+      const nextFrame = resolveTwoFrameIndex(elapsed, def.fps, c.bobPhase, !this.reducedMotion);
+      if (nextFrame !== vis.currentFrame) {
+        vis.currentFrame = nextFrame;
+        applyEnvFrameUVs(vis.spriteGeo, def.atlas, def.frames[nextFrame]);
+      }
+
+      // Evolution-phase visual scale (1.0x / 1.4x / 1.8x) with gentle progressive shrink as depleted
+      const dims = computeCarcassVisualScale(phase, c.mass, c.initialMass);
+      const isBeingFed = this.activeFeedingCarcassIds.has(c.id);
+      const feedTremorX =
+        isBeingFed && !this.reducedMotion ? Math.sin(elapsed * 22 + c.bobPhase) * 0.035 : 0;
+
+      vis.spriteMesh.scale.set(dims.width, dims.height, 1);
+      vis.spriteMesh.position.set(feedTremorX, -0.08, 0);
       vis.spriteMesh.quaternion.copy(this.camera.quaternion);
-      vis.ringMesh.scale.setScalar(scale * 0.48 + Math.sin(c.bobPhase) * 0.15);
+
+      // Value-linked carcass glow (1-9 pale blue, 10-29 gentle gold, 30+ strong gold shimmer + particles)
+      const glowSpec = getCarcassValueGlow(c.mass);
+      const pulseWave = this.reducedMotion
+        ? 0.5
+        : 0.5 + 0.5 * Math.sin(elapsed * glowSpec.pulseSpeed + c.bobPhase);
+      const glowSpan = Math.max(dims.width, dims.height) * (1.28 + pulseWave * 0.14);
+      const glowMat = vis.glowMesh.material as THREE.MeshBasicMaterial;
+      glowMat.color.setHex(glowSpec.colorHex);
+      glowMat.opacity = glowSpec.glowOpacity * (0.78 + pulseWave * 0.22);
+      vis.glowMesh.scale.set(glowSpan, glowSpan, 1);
+
+      const ringMat = vis.ringMesh.material as THREE.MeshBasicMaterial;
+      ringMat.color.setHex(glowSpec.colorHex);
+      ringMat.opacity = glowSpec.ringOpacity * (0.82 + pulseWave * 0.18);
+      vis.ringMesh.scale.setScalar(dims.width * 0.48 + (pulseWave - 0.5) * 0.18);
+
+      // Restrained feeding disturbance ripple above carcass while actively consumed
+      if (isBeingFed) {
+        vis.feedRippleMesh.visible = true;
+        const cycle = this.reducedMotion ? 0.5 : (elapsed * 1.9 + c.bobPhase) % 1;
+        const ripR = dims.width * (0.32 + cycle * 0.36);
+        vis.feedRippleMesh.scale.setScalar(ripR);
+        (vis.feedRippleMesh.material as THREE.MeshBasicMaterial).opacity = (1 - cycle) * 0.62;
+      } else if (vis.feedRippleMesh.visible) {
+        vis.feedRippleMesh.visible = false;
+      }
+
+      // Occasional rising gold shimmer particles for high-value carcasses (30+ fragments)
+      const showMotes = glowSpec.shimmerParticles && !this.reducedMotion;
+      for (let i = 0; i < vis.shimmerMotes.length; i++) {
+        const mote = vis.shimmerMotes[i];
+        mote.visible = showMotes;
+        if (!showMotes) continue;
+        const life = (elapsed * 0.65 + i * 0.25 + c.bobPhase * 0.31) % 1;
+        const angle = c.bobPhase + i * 1.57 + life * 0.9;
+        const orbitR = dims.width * (0.22 + (i % 2) * 0.12);
+        mote.position.set(
+          Math.cos(angle) * orbitR,
+          0.35 + life * (dims.height * 0.85 + 0.9),
+          Math.sin(angle) * orbitR * 0.5
+        );
+        mote.quaternion.copy(this.camera.quaternion);
+        const moteScale = (0.42 + (i % 2) * 0.18) * (1 - life * 0.35);
+        mote.scale.set(moteScale, moteScale, 1);
+        const fade = life < 0.2 ? life / 0.2 : life > 0.72 ? (1 - life) / 0.28 : 1;
+        (mote.material as THREE.MeshBasicMaterial).opacity = fade * 0.85;
+      }
 
       const elev = getElevationAt(c.x, c.z);
-      const y = elev > 0.05 ? elev * 2.2 + 0.3 : 0.05 + Math.sin(c.bobPhase) * 0.06;
+      const floatBob = this.reducedMotion ? 0 : Math.sin(c.bobPhase) * 0.045;
+      const y = elev > 0.05 ? elev * 2.2 + 0.04 : 0.02 + floatBob;
       vis.group.position.set(simTo3D(c.x), y, simTo3D(c.z));
     }
 
     for (const [id, vis] of this.carcassPool.entries()) {
       if (!activeCarcs.has(id)) {
         this.scene.remove(vis.group);
-        (vis.spriteMesh.material as THREE.Material).dispose();
+        vis.spriteGeo.dispose();
+        vis.spriteMat.dispose();
+        (vis.glowMesh.material as THREE.Material).dispose();
         (vis.ringMesh.material as THREE.Material).dispose();
+        (vis.feedRippleMesh.material as THREE.Material).dispose();
+        for (let i = 0; i < vis.shimmerMotes.length; i++) {
+          (vis.shimmerMotes[i].material as THREE.Material).dispose();
+        }
         this.carcassPool.delete(id);
       }
     }
@@ -2193,7 +2453,69 @@ export class ArenaScene3D {
     }
 
     this.syncEffects(sim.effects);
+    this.syncCallouts(sim.callouts ?? []);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private createCalloutVisual(text: string, color: string): CalloutVisual {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+    const isMajor = text.includes('CRIT') || text.includes('STUN') || text.includes('EVADED');
+    ctx.font = isMajor ? '900 28px sans-serif' : '800 26px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(6, 12, 18, 0.92)';
+    ctx.strokeText(text, 128, 34);
+    ctx.fillStyle = color;
+    ctx.fillText(text, 128, 34);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const mesh = new THREE.Mesh(this.sharedQuadGeo, mat);
+    mesh.renderOrder = 22;
+    this.scene.add(mesh);
+    return { mesh, tex };
+  }
+
+  private syncCallouts(callouts: FloatingCallout[]) {
+    const active = new Set<string>();
+    for (const c of callouts) {
+      active.add(c.id);
+      let vis = this.calloutPool.get(c.id);
+      if (!vis) {
+        vis = this.createCalloutVisual(c.text, c.color);
+        this.calloutPool.set(c.id, vis);
+      }
+      const t = Math.max(0, Math.min(1, c.elapsed / Math.max(0.05, c.duration)));
+      const rise = 1 - Math.pow(1 - t, 2.2);
+      const pop = t < 0.14 ? 0.78 + (t / 0.14) * 0.34 : 1.12 - Math.min(1, (t - 0.14) / 0.25) * 0.12;
+      const elev = getElevationAt(c.x, c.z);
+      const baseY = elev > 0.05 ? elev * 2.2 + 2.8 : 2.6;
+      vis.mesh.position.set(simTo3D(c.x), baseY + rise * 2.9, simTo3D(c.z));
+      vis.mesh.quaternion.copy(this.camera.quaternion);
+      vis.mesh.scale.set(5.4 * pop, 1.35 * pop, 1);
+      const mat = vis.mesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = t > 0.7 ? Math.max(0, 1 - (t - 0.7) / 0.3) : 1.0;
+    }
+
+    for (const [id, vis] of this.calloutPool.entries()) {
+      if (!active.has(id)) {
+        this.scene.remove(vis.mesh);
+        vis.tex.dispose();
+        (vis.mesh.material as THREE.Material).dispose();
+        this.calloutPool.delete(id);
+      }
+    }
   }
 
   private syncEffects(effects: WorldEffect[]) {
@@ -2220,7 +2542,7 @@ export class ArenaScene3D {
         });
         mesh = new THREE.Mesh(geo, mat);
         mesh.rotation.x = fx.type === 'bite_arc' ? 0 : -Math.PI / 2;
-        mesh.position.y = 0.22;
+        mesh.position.y = fx.type === 'crit_impact' || fx.type === 'stun_burst' ? 0.34 : 0.22;
         mesh.renderOrder = 6;
         this.scene.add(mesh);
         this.fxPool.set(fx.id, mesh);
@@ -2238,8 +2560,29 @@ export class ArenaScene3D {
         mat.opacity = (1 - t) * 0.92;
       } else if (fx.type === 'bite_arc') {
         mesh.rotation.y = -fx.angle;
-        mesh.scale.setScalar(r3d * (0.85 + t * 0.25));
+        mesh.scale.setScalar(r3d * (0.88 + t * 0.2));
         mat.opacity = (1 - t) * 0.65;
+      } else if (fx.type === 'impact_splash') {
+        const eased = 1 - Math.pow(1 - t, 2.4);
+        mesh.scale.setScalar(r3d * (0.25 + eased * 0.95));
+        mat.opacity = (1 - t) * 0.84;
+      } else if (fx.type === 'crit_impact') {
+        const eased = 1 - Math.pow(1 - t, 2.6);
+        mesh.scale.setScalar(r3d * (0.22 + eased * 1.25));
+        mat.opacity = (1 - t) * 0.95;
+      } else if (fx.type === 'stun_burst') {
+        const eased = 1 - Math.pow(1 - t, 2.0);
+        mesh.scale.setScalar(r3d * (0.22 + eased * 1.1));
+        mesh.rotation.z = t * 5.0;
+        mat.opacity = (1 - t) * 0.9;
+      } else if (fx.type === 'evade_wake') {
+        const eased = 1 - Math.pow(1 - t, 2.0);
+        mesh.scale.setScalar(r3d * (0.35 + eased * 0.85));
+        mat.opacity = (1 - t) * 0.72;
+      } else if (fx.type === 'mitigated_ring') {
+        const eased = 1 - Math.pow(1 - t, 2.2);
+        mesh.scale.setScalar(r3d * (0.4 + eased * 0.65));
+        mat.opacity = (1 - t) * 0.88;
       } else if (fx.type === 'sonar_ring' || fx.type === 'electroshock') {
         const curR = r3d * (0.15 + t * 0.85);
         mesh.scale.setScalar(curR);
@@ -2306,6 +2649,17 @@ export class ArenaScene3D {
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
 
+    for (const [, vis] of this.calloutPool.entries()) {
+      vis.tex.dispose();
+    }
+    this.calloutPool.clear();
+
+    for (let i = 0; i < this.envSprites.length; i++) {
+      this.envSprites[i].dispose();
+    }
+    this.envSprites.length = 0;
+    this.envAtlases?.dispose();
+    this.spriteAtlases?.dispose();
     this.arenaTextures?.dispose();
     this.statusIconCache?.dispose();
     this.sharedQuadGeo.dispose();

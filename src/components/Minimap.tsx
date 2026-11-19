@@ -465,7 +465,56 @@ export const Minimap: React.FC<MinimapProps> = ({
       ctx.restore();
     }
 
-    if (hud.lastRequiredCarcass) {
+    if (hud.finalFeast?.active && hud.finalFeast.remainingCarcasses.length > 0) {
+      const pxGuide = toPxX(hud.player.x);
+      const pyGuide = toPxY(hud.player.z);
+      for (const carc of hud.finalFeast.remainingCarcasses) {
+        const lx = toPxX(carc.x);
+        const ly = toPxY(carc.z);
+        ctx.save();
+        // Subtle dashed guide line from sole survivor to each remaining fragment container
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.32)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(pxGuide, pyGuide);
+        ctx.lineTo(lx, ly);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Pulsing golden diamond beacon
+        const pulse = 5.5 + Math.sin(hud.matchTime * 6) * 1.4;
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.28)';
+        ctx.beginPath();
+        ctx.arc(lx, ly, pulse + 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#fde68a';
+        ctx.fillStyle = '#f59e0b';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly - 5);
+        ctx.lineTo(lx + 5, ly);
+        ctx.lineTo(lx, ly + 5);
+        ctx.lineTo(lx - 5, ly);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        if (!compact || zoomMode === 'local') {
+          const tag = `+${carc.mass}`;
+          ctx.font = 'bold 8.5px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          const tw = ctx.measureText(tag).width + 4;
+          ctx.fillStyle = 'rgba(20, 14, 4, 0.9)';
+          ctx.fillRect(lx - tw * 0.5, ly - 15, tw, 9.5);
+          ctx.fillStyle = '#fde68a';
+          ctx.fillText(tag, lx, ly - 6);
+        }
+        ctx.restore();
+      }
+    } else if (hud.lastRequiredCarcass) {
       const lx = toPxX(hud.lastRequiredCarcass.x);
       const ly = toPxY(hud.lastRequiredCarcass.z);
       ctx.strokeStyle = '#fbbf24';
@@ -772,8 +821,24 @@ export const Minimap: React.FC<MinimapProps> = ({
               <span className="w-2 h-2 rounded-full border border-[#fbbf24] bg-[#ef4444]/60 inline-block" />
               ◎ Rival Bounty
             </span>
-            <span className="text-[#fca5a5]">+5–12 Evo</span>
+            <span className="text-[#fca5a5]">Surge + Pts</span>
           </div>
+        </div>
+      )}
+
+      {/* Active Final Feast Summary */}
+      {hud.finalFeast?.active && (
+        <div
+          className={`flex items-center justify-between gap-1 bg-[#251908]/95 border-b border-[#c99c4a]/70 font-mono-num ${
+            compact ? 'px-1.5 py-0.5 text-[8.5px]' : 'px-2 py-1 text-[9.5px]'
+          }`}
+        >
+          <span className="text-[#fde68a] font-semibold truncate">
+            ◆ Final Feast · {hud.finalFeast.remainingCarcasses.length} Left
+          </span>
+          <span className="text-[#fbbf24] shrink-0">
+            +{hud.finalFeast.remainingFragments} Frag
+          </span>
         </div>
       )}
 
@@ -792,7 +857,7 @@ export const Minimap: React.FC<MinimapProps> = ({
           <span className="text-[#fca5a5] shrink-0">
             {compact
               ? `+${hud.bountyTargets[0].rewardPoints}`
-              : `${hud.bountyTargets.length} Bounty · +${hud.bountyTargets[0].rewardPoints} Evo`}
+              : `${hud.bountyTargets.length} Bounty · +${hud.bountyTargets[0].rewardPoints} Pts`}
           </span>
         </div>
       )}

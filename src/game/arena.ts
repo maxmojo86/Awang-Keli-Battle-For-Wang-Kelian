@@ -436,10 +436,14 @@ export function resolveArenaCollision(
     const oz = nz - obs.z;
     const dist = Math.hypot(ox, oz);
     const minDist = obs.radius + radius;
-    if (dist < minDist && dist > 0.001) {
-      const push = minDist - dist;
-      nx += (ox / dist) * push;
-      nz += (oz / dist) * push;
+    if (dist < minDist) {
+      if (dist > 0.001) {
+        const push = minDist - dist;
+        nx += (ox / dist) * push;
+        nz += (oz / dist) * push;
+      } else {
+        nx += minDist;
+      }
     }
   }
 
@@ -457,10 +461,14 @@ export function resolveArenaCollision(
       const oz = nz - pz;
       const dist = Math.hypot(ox, oz);
       const minDist = 16 + radius;
-      if (dist < minDist && dist > 0.001) {
-        const push = minDist - dist;
-        nx += (ox / dist) * push;
-        nz += (oz / dist) * push;
+      if (dist < minDist) {
+        if (dist > 0.001) {
+          const push = minDist - dist;
+          nx += (ox / dist) * push;
+          nz += (oz / dist) * push;
+        } else {
+          nx += minDist;
+        }
       }
     }
   }
@@ -480,6 +488,143 @@ export function resolveArenaCollision(
   }
 
   return { x: nx, z: nz, blockedByShore };
+}
+
+/**
+ * Checks whether a coordinate is inside the playable limestone basin, clear of solid
+ * rocks/pilings, and on traversable terrain for the current accessibility requirement.
+ */
+export function isPositionAccessible(
+  x: number,
+  z: number,
+  radius: number,
+  canGoAshore: boolean
+): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+  const maxR = MAX_PLAYABLE_RADIUS - radius - 4;
+  if (Math.hypot(x - WORLD_CENTER, z - WORLD_CENTER) > maxR) return false;
+
+  const terrain = getTerrainAt(x, z);
+  if (terrain === 'cliff') return false;
+  if (!canGoAshore && terrain === 'shore') return false;
+
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const obs = OBSTACLES[i];
+    if (Math.hypot(x - obs.x, z - obs.z) < obs.radius + radius + 2) {
+      return false;
+    }
+  }
+
+  for (let i = 0; i < PALONG_GATES.length; i++) {
+    const gate = PALONG_GATES[i];
+    const cos = Math.cos(gate.angle);
+    const sin = Math.sin(gate.angle);
+    const halfW = gate.width * 0.55;
+    for (const side of [-1, 1]) {
+      const px = gate.x + cos * halfW * side;
+      const pz = gate.z + sin * halfW * side;
+      if (Math.hypot(x - px, z - pz) < 16 + radius + 2) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Deterministically locates the nearest reachable position (and optionally inside the
+ * active safe zone) so carcasses or fragments trapped on cliffs, inside obstacles, or on
+ * inaccessible shore can always be recovered.
+ */
+export function findNearestAccessiblePosition(
+  x: number,
+  z: number,
+  radius: number,
+  canGoAshore: boolean,
+  safeCenterX?: number,
+  safeCenterZ?: number,
+  safeRadius?: number
+): { x: number; z: number } {
+  const hasSafeZone =
+    safeCenterX !== undefined &&
+    safeCenterZ !== undefined &&
+    safeRadius !== undefined &&
+    safeRadius > 0;
+  const effectiveSafeRadius = hasSafeZone ? Math.max(40, safeRadius! - 28) : Infinity;
+
+  const isInsideSafe = (cx: number, cz: number): boolean => {
+    if (!hasSafeZone) return true;
+    return Math.hypot(cx - safeCenterX!, cz - safeCenterZ!) <= effectiveSafeRadius;
+  };
+
+  const isCandidateValid = (cx: number, cz: number): boolean =>
+    isPositionAccessible(cx, cz, radius, canGoAshore) && isInsideSafe(cx, cz);
+
+  // Clamp starting anchor toward safe zone if currently outside it
+  let startX = Number.isFinite(x) ? x : WORLD_CENTER;
+  let startZ = Number.isFinite(z) ? z : WORLD_CENTER;
+  if (hasSafeZone && !isInsideSafe(startX, startZ)) {
+    const dx = startX - safeCenterX!;
+    const dz = startZ - safeCenterZ!;
+    const d = Math.hypot(dx, dz) || 1;
+    startX = safeCenterX! + (dx / d) * Math.max(20, effectiveSafeRadius - 20);
+    startZ = safeCenterZ! + (dz / d) * Math.max(20, effectiveSafeRadius - 20);
+  }
+
+  const direct = resolveArenaCollision(startX, startZ, radius, canGoAshore);
+  if (isCandidateValid(direct.x, direct.z)) {
+    return { x: direct.x, z: direct.z };
+  }
+
+  const searchOrigins: Array<{ ox: number; oz: number }> = [
+    { ox: direct.x, oz: direct.z },
+  ];
+  if (hasSafeZone) {
+    searchOrigins.push({ ox: safeCenterX!, oz: safeCenterZ! });
+  }
+  searchOrigins.push(
+    { ox: LANDMARKS.radioactiveDrum.x, oz: LANDMARKS.radioactiveDrum.z },
+    { ox: SPAWN_FALLBACK.x, oz: SPAWN_FALLBACK.z }
+  );
+
+  const ringRadii = [32, 72, 120, 180, 260, 360, 480, 640, 860];
+  const angleSteps = 16;
+
+  for (const origin of searchOrigins) {
+    if (isCandidateValid(origin.ox, origin.oz)) {
+      return { x: origin.ox, z: origin.oz };
+    }
+    for (const r of ringRadii) {
+      for (let k = 0; k < angleSteps; k++) {
+        const ang = (k / angleSteps) * Math.PI * 2;
+        const cx = origin.ox + Math.cos(ang) * r;
+        const cz = origin.oz + Math.sin(ang) * r;
+        if (isCandidateValid(cx, cz)) {
+          return { x: cx, z: cz };
+        }
+      }
+    }
+  }
+
+  // Final guaranteed reachable fallback ignoring zone constraint if safe zone was somehow tiny
+  for (const origin of searchOrigins) {
+    if (isPositionAccessible(origin.ox, origin.oz, radius, canGoAshore)) {
+      return { x: origin.ox, z: origin.oz };
+    }
+    for (const r of ringRadii) {
+      for (let k = 0; k < angleSteps; k++) {
+        const ang = (k / angleSteps) * Math.PI * 2;
+        const cx = origin.ox + Math.cos(ang) * r;
+        const cz = origin.oz + Math.sin(ang) * r;
+        if (isPositionAccessible(cx, cz, radius, canGoAshore)) {
+          return { x: cx, z: cz };
+        }
+      }
+    }
+  }
+
+  return { x: SPAWN_FALLBACK.x, z: SPAWN_FALLBACK.z };
 }
 
 const SPAWN_RING_MIN = scaleArenaDist(310);
