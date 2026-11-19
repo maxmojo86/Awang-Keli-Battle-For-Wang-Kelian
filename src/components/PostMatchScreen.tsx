@@ -47,7 +47,10 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   const recentLedger = [...matchResult.ledger].reverse().slice(0, 28);
 
   return (
-    <div className="fixed inset-0 z-40 overflow-y-auto bg-[#091116] px-4 py-8 sm:py-12">
+    <div
+      className="fixed inset-0 z-40 overflow-y-auto bg-[#091116] safe-area-page-x"
+      style={{ paddingTop: 'max(2rem, var(--sat))' }}
+    >
       {isVictory && <VictoryCelebrationCanvas reducedMotion={reducedMotion} />}
       <div className="relative z-10 max-w-4xl mx-auto space-y-6">
         <section className="compendium-plaque rounded-sm overflow-hidden">

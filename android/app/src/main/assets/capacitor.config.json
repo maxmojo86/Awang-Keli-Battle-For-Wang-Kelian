@@ -1,0 +1,27 @@
+{
+	"appId": "com.drmujahid.awangkeli",
+	"appName": "Awang Keli",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	},
+	"android": {
+		"backgroundColor": "#091116",
+		"allowMixedContent": false
+	},
+	"plugins": {
+		"SplashScreen": {
+			"launchShowDuration": 750,
+			"launchAutoHide": true,
+			"backgroundColor": "#091116",
+			"androidSplashResourceName": "splash",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": false
+		},
+		"StatusBar": {
+			"overlaysWebView": true,
+			"style": "DARK",
+			"backgroundColor": "#091116"
+		}
+	}
+}

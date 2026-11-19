@@ -7,3 +7,15 @@ coverage/
 .env*
 !.env.example
 .data/
+
+# Android release signing credentials & local build outputs (never commit secrets)
+*.jks
+*.keystore
+android/keystore.properties
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/app/src/main/assets/public/
+

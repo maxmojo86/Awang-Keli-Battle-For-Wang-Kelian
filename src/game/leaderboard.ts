@@ -265,6 +265,9 @@ export async function fetchGlobalLeaderboard(
   if (!endpoint) {
     throw new LeaderboardUnavailableError();
   }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new Error('Device is offline. Connect to load Global Rankings — Local Top 10 remains available.');
+  }
 
   const params = new URLSearchParams({
     region,
@@ -298,6 +301,9 @@ export async function fetchGlobalLeaderboard(
     if (err instanceof LeaderboardUnavailableError) throw err;
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw new Error('Global rankings request timed out. Local records remain available.');
+    }
+    if (err instanceof TypeError) {
+      throw new Error('Unable to reach the Global Rankings server. Check your internet connection — Local Top 10 remains available.');
     }
     if (err instanceof Error && err.message) {
       throw err;

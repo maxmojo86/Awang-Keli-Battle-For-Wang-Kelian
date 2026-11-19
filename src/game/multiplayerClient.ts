@@ -519,6 +519,31 @@ export class MultiplayerClient {
     };
   }
 
+  private networkListenersAttached = false;
+
+  private ensureNetworkListeners() {
+    if (this.networkListenersAttached || typeof window === 'undefined') return;
+    this.networkListenersAttached = true;
+    window.addEventListener('offline', () => {
+      if (!this.shouldStayConnected) return;
+      if (this.reconnectTimer !== null) {
+        window.clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.state.status = 'disconnected';
+      this.state.latencyMs = null;
+      this.state.error =
+        'Device is offline. Solo Royale and Guide Mode remain playable offline.';
+      this.emitState();
+    });
+    window.addEventListener('online', () => {
+      if (!this.shouldStayConnected) return;
+      this.reconnectAttempts = 0;
+      this.state.error = null;
+      this.connect();
+    });
+  }
+
   public connect() {
     const url = getMultiplayerWsUrl();
     if (!url) {
@@ -532,7 +557,18 @@ export class MultiplayerClient {
       return;
     }
 
+    this.ensureNetworkListeners();
     this.shouldStayConnected = true;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.state.status = 'disconnected';
+      this.state.latencyMs = null;
+      this.state.error =
+        'Device is offline. Solo Royale and Guide Mode remain playable offline.';
+      this.emitState();
+      return;
+    }
+
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -551,6 +587,15 @@ export class MultiplayerClient {
       return;
     }
     this.ws = ws;
+
+    ws.onerror = () => {
+      if (!this.shouldStayConnected) return;
+      this.state.error =
+        typeof navigator !== 'undefined' && navigator.onLine === false
+          ? 'Device is offline. Solo Royale and Guide Mode remain playable offline.'
+          : 'Unable to reach the multiplayer server. Retrying connection — Solo Royale remains available.';
+      this.emitState();
+    };
 
     ws.onopen = () => {
       this.reconnectAttempts = 0;
@@ -671,9 +716,22 @@ export class MultiplayerClient {
         return;
       }
 
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        this.state.status = 'disconnected';
+        this.state.latencyMs = null;
+        this.state.error =
+          'Device is offline. Solo Royale and Guide Mode remain playable offline.';
+        this.emitState();
+        return;
+      }
+
       this.state.status = 'reconnecting';
+      if (this.reconnectAttempts >= 2 && !this.state.error) {
+        this.state.error =
+          'Connection to multiplayer server lost. Retrying automatically — Solo Royale remains available.';
+      }
       this.emitState();
-      const delay = Math.min(4000, 750 * Math.pow(1.5, this.reconnectAttempts));
+      const delay = Math.min(8000, 900 * Math.pow(1.6, this.reconnectAttempts));
       this.reconnectAttempts += 1;
       if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = window.setTimeout(() => {

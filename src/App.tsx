@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ComicReaderModal } from './components/ComicReaderModal';
 import { DesignCodexModal } from './components/DesignCodexModal';
 import { GameViewport } from './components/GameViewport';
@@ -6,6 +6,12 @@ import { LobbyPlayMode, LobbyScreen } from './components/LobbyScreen';
 import { PostMatchScreen } from './components/PostMatchScreen';
 import { TitleScreen } from './components/TitleScreen';
 import { RegionCode, RegionFilter } from './data/regions';
+import {
+  exitAndroidApp,
+  initAndroidNativeShell,
+  registerAndroidBackHandler,
+  setAndroidGameplayImmersive,
+} from './game/androidNative';
 import { soundEngine } from './game/audio';
 import { getBackendConfig } from './game/backendConfig';
 import { loadSavedSettings, saveSettings } from './game/settings';
@@ -95,6 +101,25 @@ export default function App() {
   const [settings, setSettings] = useState<AccessibilitySettings>(() =>
     loadSavedSettings()
   );
+  const [exitPromptVisible, setExitPromptVisible] = useState(false);
+  const lastTitleBackAtRef = useRef<number>(0);
+  const exitToastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return initAndroidNativeShell();
+  }, []);
+
+  useEffect(() => {
+    void setAndroidGameplayImmersive(screen === 'playing');
+  }, [screen]);
+
+  useEffect(() => {
+    return () => {
+      if (exitToastTimerRef.current !== null) {
+        window.clearTimeout(exitToastTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     soundEngine.setMuted(settings.muted);
@@ -311,6 +336,53 @@ export default function App() {
     setCodexOpen(true);
   }, []);
 
+  useEffect(() => {
+    if (!comicOpen && !codexOpen) return;
+    return registerAndroidBackHandler(() => {
+      if (codexOpen) {
+        setCodexOpen(false);
+        return true;
+      }
+      if (comicOpen) {
+        setComicOpen(false);
+        return true;
+      }
+      return false;
+    }, 30);
+  }, [comicOpen, codexOpen]);
+
+  useEffect(() => {
+    return registerAndroidBackHandler(() => {
+      if (screen === 'summary') {
+        handleReturnFromSummary();
+        return true;
+      }
+      if (screen === 'lobby') {
+        setScreen('title');
+        return true;
+      }
+      if (screen === 'title') {
+        const now = Date.now();
+        if (now - lastTitleBackAtRef.current < 2000) {
+          lastTitleBackAtRef.current = 0;
+          setExitPromptVisible(false);
+          void exitAndroidApp();
+          return true;
+        }
+        lastTitleBackAtRef.current = now;
+        setExitPromptVisible(true);
+        if (exitToastTimerRef.current !== null) {
+          window.clearTimeout(exitToastTimerRef.current);
+        }
+        exitToastTimerRef.current = window.setTimeout(() => {
+          setExitPromptVisible(false);
+        }, 2000);
+        return true;
+      }
+      return false;
+    }, 10);
+  }, [screen, handleReturnFromSummary]);
+
   const isMpHost = Boolean(
     mpSnapshot.currentRoom && mpSnapshot.currentRoom.hostId === mpSnapshot.clientId
   );
@@ -405,6 +477,17 @@ export default function App() {
         initialPlateId={codexPlateId}
         onClose={() => setCodexOpen(false)}
       />
+
+      {exitPromptVisible && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 compendium-plaque rounded-[2px] px-4 py-2 text-xs font-medium text-[#f3e6c8] pointer-events-none"
+          style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          Press Back again to exit
+        </div>
+      )}
     </div>
   );
 }

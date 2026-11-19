@@ -43,6 +43,11 @@ import {
 } from '../data/abilities';
 import { EMOTE_SPECS, EmoteId, getEmoteSpec } from '../data/emotes';
 import { getTerrainAt, getZoneAt } from '../game/arena';
+import {
+  isNativeAndroid,
+  registerAndroidBackHandler,
+  subscribeAppLifecycle,
+} from '../game/androidNative';
 import { soundEngine } from '../game/audio';
 import { multiplayerClient, RemoteSimulationView } from '../game/multiplayerClient';
 import { MatchReplayData, MatchReplayRecorder } from '../game/replay';
@@ -311,13 +316,47 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const checkViewport = () => {
       const w = window.innerWidth;
       const h = window.innerHeight;
-      setIsTouchDevice('ontouchstart' in window || navigator.maxTouchPoints > 0);
+      setIsTouchDevice(
+        'ontouchstart' in window || navigator.maxTouchPoints > 0 || isNativeAndroid()
+      );
       setIsMobileViewport(w < 768);
       setViewportSize({ width: w, height: h });
     };
     checkViewport();
     window.addEventListener('resize', checkViewport);
-    return () => window.removeEventListener('resize', checkViewport);
+    window.addEventListener('orientationchange', checkViewport);
+    return () => {
+      window.removeEventListener('resize', checkViewport);
+      window.removeEventListener('orientationchange', checkViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    return subscribeAppLifecycle(({ active }) => {
+      if (!active) {
+        joyPointerIdRef.current = null;
+        bitePointerIdRef.current = null;
+        joyOriginRef.current = null;
+        setJoyOffset({ x: 0, y: 0 });
+        setBitePressed(false);
+        pushPlayerInput({ moveX: 0, moveZ: 0, biteHeld: false }, true);
+        if (!isMultiplayer && !pausedRef.current) {
+          setPaused(true);
+        }
+      }
+    });
+  }, [isMultiplayer]);
+
+  useEffect(() => {
+    return registerAndroidBackHandler(() => {
+      if (emoteWheelOpenRef.current) {
+        setEmoteWheelOpen(false);
+        setEmoteHoverIdx(null);
+        return true;
+      }
+      setPaused((prev) => !prev);
+      return true;
+    }, 20);
   }, []);
 
   const spectatingActive = Boolean(hud?.spectating?.active);
@@ -1019,7 +1058,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         <div
           ref={hudJoltRef}
           data-hud-mode={isCompactMode ? 'compact' : 'full'}
-          className="pointer-events-none absolute inset-0 z-10 will-change-transform"
+          className="pointer-events-none absolute safe-area-hud z-10 will-change-transform"
         >
           {/* Top-Left: Compendium Circular Brass Medallion + Vitals Plaque (Full or Compact Mode) */}
           {isCompactMode ? (
@@ -2378,7 +2417,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               <h2 className="font-display text-xl font-semibold text-[#f3d285]">
                 {isMultiplayer ? '◆ Live Basin Options' : '◆ Match Paused'}
               </h2>
-              <span className="text-xs font-mono-num text-[#d9b25f]">Esc</span>
+              <span className="text-xs font-mono-num text-[#d9b25f]">
+                {isTouchDevice ? 'Back' : 'Esc'}
+              </span>
             </div>
 
             <div className="p-5 sm:p-6 space-y-5 overflow-y-auto overscroll-contain">

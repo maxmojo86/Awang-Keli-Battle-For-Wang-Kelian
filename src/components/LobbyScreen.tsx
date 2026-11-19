@@ -190,7 +190,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   return (
     <div className="min-h-screen bg-[#0c141a] text-[#e6e4dd] flex flex-col">
       {/* Top Bar Contract: 3 zones separated by gap-8 */}
-      <header className="sticky top-0 z-20 border-b border-[#5b4724] bg-[#0b1218]/95 px-6 py-4">
+      <header className="sticky top-0 z-20 border-b border-[#5b4724] bg-[#0b1218]/95 pb-4 safe-area-header">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-8">
           <div className="flex items-center gap-3 shrink-0">
             {onReturnToTitle && (
@@ -260,7 +260,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
         </div>
       </header>
 
-      <main id="top" className="flex-1 max-w-6xl w-full mx-auto px-6 py-8 sm:py-12 space-y-14">
+      <main id="top" className="flex-1 max-w-6xl w-full mx-auto pt-8 sm:pt-12 safe-area-page-x space-y-14">
         {/* Hero Split */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
           <div className="lg:col-span-5 flex flex-col justify-between space-y-6">

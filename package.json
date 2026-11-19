@@ -9,9 +9,21 @@
     "start": "node server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "cap:copy": "cap copy android",
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:open": "npx cap open android",
+    "android:icons": "node scripts/generate-android-icons.mjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/cli": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/three": "^0.187.0",

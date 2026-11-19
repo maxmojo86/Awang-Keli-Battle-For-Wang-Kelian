@@ -10,6 +10,10 @@
     --compendium-brass-dark: #5f4722;
     --compendium-iron-top: rgba(18, 31, 41, 0.96);
     --compendium-iron-bot: rgba(9, 16, 23, 0.97);
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
   }
 
   html,
@@ -21,7 +25,30 @@
     font-family: var(--font-sans);
     background-color: #091116;
     color: #e6e4dd;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
   }
+}
+
+/* Safe-area helpers for Android display cutouts & system gesture bars */
+.safe-area-hud {
+  top: var(--sat);
+  right: var(--sar);
+  bottom: var(--sab);
+  left: var(--sal);
+}
+
+.safe-area-header {
+  padding-top: max(1rem, var(--sat));
+  padding-left: max(1.5rem, var(--sal));
+  padding-right: max(1.5rem, var(--sar));
+}
+
+.safe-area-page-x {
+  padding-left: max(1.5rem, var(--sal));
+  padding-right: max(1.5rem, var(--sar));
+  padding-bottom: max(2rem, var(--sab));
 }
 
 .font-display {

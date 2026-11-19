@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, VolumeX } from 'lucide-react';
+import { registerAndroidBackHandler } from '../game/androidNative';
 import { MenuMusicSnapshot, soundEngine } from '../game/audio';
 import { AccessibilitySettings } from '../game/types';
 import { HowToPlayModal } from './HowToPlayModal';
@@ -126,6 +127,21 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!howToPlayOpen && !settingsOpen) return;
+    return registerAndroidBackHandler(() => {
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        return true;
+      }
+      if (howToPlayOpen) {
+        setHowToPlayOpen(false);
+        return true;
+      }
+      return false;
+    }, 25);
+  }, [howToPlayOpen, settingsOpen]);
 
   const composition = useMemo(
     () => selectTitleComposition(viewport.width, viewport.height),
