@@ -2240,22 +2240,118 @@ class SoundEngine {
     osc.stop(now + 0.98);
   }
 
+  public playFeedStart() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Subtle low aquatic latch / gulp cue when feeding channel starts
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(165, now);
+    osc.frequency.exponentialRampToValueAtTime(240, now + 0.09);
+    osc.frequency.exponentialRampToValueAtTime(140, now + 0.16);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(620, now);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.18);
+  }
+
+  public playFeedTick(sessionCount = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Gentle ascending aquatic chime per transferred fragment (capped so large meals never get shrill)
+    const step = Math.min(10, Math.max(0, sessionCount - 1));
+    const baseFreq = 295 * Math.pow(1.032, step);
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(baseFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.16, now + 0.075);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.095, now + 0.014);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.13);
+  }
+
+  public playFeedInterrupt() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Crisp muted descending splash-abort cue when feeding is interrupted by combat
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(240, now);
+    osc.frequency.exponentialRampToValueAtTime(92, now + 0.18);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(520, now);
+    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  }
+
+  public playNearbyFeedAlert() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Subtle short-range underwater chomp/ripple cue signaling a nearby competitor feeding
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(190, now);
+    osc.frequency.exponentialRampToValueAtTime(135, now + 0.14);
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(340, now);
+    filter.Q.setValueAtTime(2.2, now);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.085, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.17);
+  }
+
   public playFeedComplete() {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
     const now = ctx.currentTime;
 
-    [330, 440].forEach((f, idx) => {
+    [330, 440, 554.37].forEach((f, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(f, now + idx * 0.07);
-      gain.gain.setValueAtTime(0.15, now + idx * 0.07);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.07 + 0.22);
+      osc.type = idx === 2 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(f, now + idx * 0.06);
+      gain.gain.setValueAtTime(idx === 2 ? 0.11 : 0.15, now + idx * 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.06 + 0.25);
       osc.connect(gain);
       gain.connect(this.masterGain!);
-      osc.start(now + idx * 0.07);
-      osc.stop(now + idx * 0.07 + 0.24);
+      osc.start(now + idx * 0.06);
+      osc.stop(now + idx * 0.06 + 0.27);
     });
   }
 
@@ -2275,6 +2371,144 @@ class SoundEngine {
       gain.connect(this.masterGain!);
       osc.start(now + idx * 0.08);
       osc.stop(now + idx * 0.08 + 0.48);
+    });
+  }
+
+  /**
+   * Low-frequency impact + restrained triumphant royal harmonic accent when
+   * a living Keli reaches all 100 evolution fragments and transforms into Keli King.
+   */
+  public playKeliKingAscension() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // 1. Deep sub-bass weight impact
+    const impact = ctx.createOscillator();
+    const impactGain = ctx.createGain();
+    impact.type = 'sine';
+    impact.frequency.setValueAtTime(118, now);
+    impact.frequency.exponentialRampToValueAtTime(36, now + 0.34);
+    impactGain.gain.setValueAtTime(0.32, now);
+    impactGain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+    impact.connect(impactGain);
+    impactGain.connect(this.masterGain);
+    impact.start(now);
+    impact.stop(now + 0.4);
+
+    // 2. Restrained triumphant royal fifth chord (D3 - A3 - D4 - F#4)
+    const chord = [146.83, 220.0, 293.66, 369.99];
+    chord.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+      osc.type = i < 2 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq, now + 0.04 + i * 0.045);
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1600, now + 0.04);
+      gain.gain.setValueAtTime(0.001, now + 0.04 + i * 0.045);
+      gain.gain.linearRampToValueAtTime(i === 0 ? 0.14 : 0.1, now + 0.14 + i * 0.045);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.15);
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + 0.04 + i * 0.045);
+      osc.stop(now + 1.2);
+    });
+  }
+
+  /**
+   * Deep monstrous amphibious catfish roar synchronized to Frame 4 (wide-open mouth)
+   * of the Keli King victory animation, paired with a resonant golden chime swell.
+   */
+  public playKeliKingRoar() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // 1. Guttural low sawtooth vocal core with growling FM modulation
+    const core = ctx.createOscillator();
+    const sub = ctx.createOscillator();
+    const lfo = ctx.createOscillator();
+    const lfoGain = ctx.createGain();
+    const formant = ctx.createBiquadFilter();
+    const roarGain = ctx.createGain();
+
+    core.type = 'sawtooth';
+    core.frequency.setValueAtTime(98, now);
+    core.frequency.linearRampToValueAtTime(126, now + 0.14);
+    core.frequency.exponentialRampToValueAtTime(52, now + 0.88);
+
+    sub.type = 'triangle';
+    sub.frequency.setValueAtTime(54, now);
+    sub.frequency.exponentialRampToValueAtTime(34, now + 0.88);
+
+    lfo.type = 'sine';
+    lfo.frequency.setValueAtTime(24, now);
+    lfo.frequency.linearRampToValueAtTime(14, now + 0.85);
+    lfoGain.gain.setValueAtTime(18, now);
+
+    formant.type = 'bandpass';
+    formant.frequency.setValueAtTime(360, now);
+    formant.frequency.linearRampToValueAtTime(540, now + 0.18);
+    formant.frequency.exponentialRampToValueAtTime(190, now + 0.88);
+    formant.Q.value = 2.4;
+
+    roarGain.gain.setValueAtTime(0.001, now);
+    roarGain.gain.linearRampToValueAtTime(0.32, now + 0.08);
+    roarGain.gain.setValueAtTime(0.28, now + 0.35);
+    roarGain.gain.exponentialRampToValueAtTime(0.001, now + 0.94);
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(core.frequency);
+    core.connect(formant);
+    sub.connect(formant);
+    formant.connect(roarGain);
+    roarGain.connect(this.masterGain);
+
+    core.start(now);
+    sub.start(now);
+    lfo.start(now);
+    core.stop(now + 0.96);
+    sub.stop(now + 0.96);
+    lfo.stop(now + 0.96);
+
+    // 2. Breath/water-spray roar texture burst (filtered noise)
+    const len = Math.floor(ctx.sampleRate * 0.72);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.34));
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(480, now);
+    bp.frequency.exponentialRampToValueAtTime(180, now + 0.68);
+    bp.Q.value = 1.6;
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.2, now + 0.06);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.72);
+    noise.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+
+    // 3. Restrained royal horn/gong resolution accent
+    [293.66, 440.0, 587.33].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + 0.12 + idx * 0.05);
+      gain.gain.setValueAtTime(0.001, now + 0.12 + idx * 0.05);
+      gain.gain.linearRampToValueAtTime(0.085, now + 0.24 + idx * 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + 0.12 + idx * 0.05);
+      osc.stop(now + 1.4);
     });
   }
 

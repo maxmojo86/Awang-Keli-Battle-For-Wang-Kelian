@@ -5,6 +5,7 @@ import { formatSurvivalDuration } from '../game/leaderboard';
 import { MatchReplayData } from '../game/replay';
 import { HudSnapshot } from '../game/types';
 import { MatchReplayPanel } from './MatchReplayPanel';
+import { KeliKingShowcase } from './KeliKingShowcase';
 import { VictoryCelebrationCanvas } from './VictoryCelebrationCanvas';
 
 interface PostMatchScreenProps {
@@ -71,28 +72,39 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
           </div>
 
           <div className="p-6 sm:p-8">
-            <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#f7f2e7] mb-3">
-              {isVictory
-                ? 'All 100 Fragments Reunited'
-                : matchResult.status === 'draw'
-                ? 'No Survivors Remaining'
-                : 'Your Fragments Scattered'}
-            </h1>
-            <p className="text-sm sm:text-base text-[#b8c4bf] leading-relaxed max-w-2xl">
-              {isVictory
-                ? 'Rising from Lubuk Hitam with shoulders broader than the timber doorway, Awang Keli lifts Aisyah’s faded red paper boat from the roots at Jantung Tasik and remembers his promise to come home.'
-                : matchResult.killedBy
-                ? `Eliminated by ${matchResult.deathCause || matchResult.killedBy}. ${
-                    matchResult.massTransferredTo
-                      ? `Your ${matchResult.finalLevel} fragments were claimed by ${matchResult.massTransferredTo}. `
-                      : `Your ${matchResult.finalLevel} fragments remained in the basin. `
-                  }${
-                    matchResult.winnerName
-                      ? `${matchResult.winnerName} went on to reunite all 100 fragments as Keli King.`
-                      : ''
-                  }`
-                : 'The basin claimed every remaining swimmer before 100 fragments could reunite.'}
-            </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+              <div className="min-w-0 flex-1">
+                <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#f7f2e7] mb-3">
+                  {isVictory
+                    ? 'All 100 Fragments Reunited'
+                    : matchResult.status === 'draw'
+                    ? 'No Survivors Remaining'
+                    : 'Your Fragments Scattered'}
+                </h1>
+                <p className="text-sm sm:text-base text-[#b8c4bf] leading-relaxed max-w-2xl">
+                  {isVictory
+                    ? 'Rising from Lubuk Hitam with shoulders broader than the timber doorway, Awang Keli lifts Aisyah’s faded red paper boat from the roots at Jantung Tasik and remembers his promise to come home.'
+                    : matchResult.killedBy
+                    ? `Eliminated by ${matchResult.deathCause || matchResult.killedBy}. ${
+                        matchResult.massTransferredTo
+                          ? `Your ${matchResult.finalLevel} fragments were claimed by ${matchResult.massTransferredTo}. `
+                          : `Your ${matchResult.finalLevel} fragments remained in the basin. `
+                      }${
+                        matchResult.winnerName
+                          ? `${matchResult.winnerName} went on to reunite all 100 fragments as Keli King.`
+                          : ''
+                      }`
+                    : 'The basin claimed every remaining swimmer before 100 fragments could reunite.'}
+                </p>
+              </div>
+              {(isVictory || Boolean(matchResult.winnerName)) && (
+                <KeliKingShowcase
+                  championName={matchResult.winnerName || hud.player.name}
+                  reducedMotion={reducedMotion}
+                  playVictoryIntro={isVictory}
+                />
+              )}
+            </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-6 border-t border-[#263642]">
               <div className="compendium-plaque-subtle rounded-[2px] p-3">

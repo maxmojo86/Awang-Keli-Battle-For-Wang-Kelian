@@ -159,6 +159,7 @@ export interface CarcassValueGlowSpec {
   readonly glowOpacity: number;
   readonly pulseSpeed: number;
   readonly shimmerParticles: boolean;
+  readonly particleCount: number;
 }
 
 /**
@@ -227,20 +228,22 @@ export function getCarcassValueGlow(remainingFragments: number): CarcassValueGlo
     return {
       tier: 'high',
       colorHex: 0xfde047,
-      ringOpacity: 0.86,
-      glowOpacity: 0.78,
-      pulseSpeed: 4.0,
+      ringOpacity: 0.88,
+      glowOpacity: 0.8,
+      pulseSpeed: 4.2,
       shimmerParticles: true,
+      particleCount: 6,
     };
   }
   if (frags >= 10) {
     return {
       tier: 'medium',
       colorHex: 0xfbbf24,
-      ringOpacity: 0.64,
-      glowOpacity: 0.54,
-      pulseSpeed: 2.5,
+      ringOpacity: 0.66,
+      glowOpacity: 0.56,
+      pulseSpeed: 2.8,
       shimmerParticles: false,
+      particleCount: 2,
     };
   }
   return {
@@ -250,6 +253,7 @@ export function getCarcassValueGlow(remainingFragments: number): CarcassValueGlo
     glowOpacity: 0.32,
     pulseSpeed: 1.7,
     shimmerParticles: false,
+    particleCount: 0,
   };
 }
 

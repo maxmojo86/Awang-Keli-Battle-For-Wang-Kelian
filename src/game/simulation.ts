@@ -14,6 +14,7 @@ import {
   getHazardModifierForForm,
   getTerrainAt,
   getZoneAt,
+  hasClearObstacleLineOfSight,
   isPositionAccessible,
   LANDMARKS,
   resolveArenaCollision,
@@ -82,6 +83,23 @@ export const STAMINA_REGEN_DELAY_SEC = 0.55;
 
 export const STUN_RESIST_DURATION_SEC = 3.8;
 export const STUN_STACK_DECAY_SEC = 6.0;
+
+// Authoritative contested feeding & carcass pacing constants (Gameplay Improvement 03)
+export const FEED_RANGE_BASE = 62;
+export const FEED_CANCEL_RANGE_BUFFER = 14;
+export const FEED_WINDUP_SEC = 0.45; // Initial lock-in windup before first fragment transfers
+export const FEED_TICK_SEC_SMALL = 0.2; // Per-fragment transfer pace for 1–9 fragment carcasses
+export const FEED_TICK_SEC_MEDIUM = 0.16; // Per-fragment transfer pace for 10–29 fragment carcasses
+export const FEED_TICK_SEC_LARGE = 0.12; // Per-fragment transfer pace for 30+ fragment carcasses
+export const FEED_INTERRUPT_RECOVERY_SEC = 0.25; // Brief readable recovery after combat interruption
+export const FEED_MOVE_SPEED_MULT = 0.2; // 20% movement speed while committed to feeding
+export const FEED_INTERRUPT_DAMAGE_THRESHOLD = 8; // Qualifying direct damage threshold to interrupt feeding
+export const FEED_SOUND_ALERT_RANGE = 460; // Short-range ambush awareness cue for nearby rivals (not global)
+export const LARGE_CARCASS_MINIMAP_RANGE = 1100; // Tactical minimap visibility range for large (30+) carcasses
+export const MEDIUM_CARCASS_THRESHOLD = 10;
+export const LARGE_CARCASS_THRESHOLD = 30;
+export const FINAL_FEAST_FEED_WINDUP_SEC = 0.18;
+export const FINAL_FEAST_FEED_TICK_SEC = 0.06;
 
 function normalizeAngleDiff(target: number, source: number): number {
   let diff = target - source;
@@ -224,6 +242,7 @@ export class GameSimulation {
   private recentDamageHits: DamageHitEvent[] = [];
   private inputsById = new Map<string, PlayerInputState>();
   private playerMetaById = new Map<string, PlayerMetaState>();
+  private lastFeedAlertTimeByCarcass = new Map<string, number>();
   private prevPlayerX = 0;
   private prevPlayerZ = 0;
 
@@ -934,6 +953,18 @@ export class GameSimulation {
       case 'feed':
         soundEngine.playFeedComplete();
         break;
+      case 'feed_start':
+        soundEngine.playFeedStart();
+        break;
+      case 'feed_tick':
+        soundEngine.playFeedTick();
+        break;
+      case 'feed_interrupt':
+        soundEngine.playFeedInterrupt();
+        break;
+      case 'feed_nearby':
+        soundEngine.playNearbyFeedAlert();
+        break;
       case 'evolution':
         soundEngine.playEvolution();
         break;
@@ -1310,6 +1341,12 @@ export class GameSimulation {
         k.recoilStrength = 0;
       }
     }
+    if ((k.feedingRecoveryTimer ?? 0) > 0) {
+      k.feedingRecoveryTimer = Math.max(0, (k.feedingRecoveryTimer ?? 0) - dt);
+    }
+    if ((k.feedingFeedbackCooldown ?? 0) > 0) {
+      k.feedingFeedbackCooldown = Math.max(0, (k.feedingFeedbackCooldown ?? 0) - dt);
+    }
 
     if (k.frenzyTimer > 0) k.frenzyTimer = Math.max(0, k.frenzyTimer - dt);
     if (k.surgeTimer > 0) k.surgeTimer = Math.max(0, k.surgeTimer - dt);
@@ -1399,19 +1436,43 @@ export class GameSimulation {
     } else if (len > 0.05) {
       const nx = input.moveX / len;
       const nz = input.moveZ / len;
+
+      // Voluntary feeding cancel: actively pulling away from the carcass while not holding feed cancels cleanly
+      if (p.feedingTargetId && !input.biteHeld) {
+        const carc = this.carcasses.find((c) => c.id === p.feedingTargetId && !c.consumed && c.mass > 0);
+        if (carc) {
+          const toX = carc.x - p.x;
+          const toZ = carc.z - p.z;
+          const toLen = Math.hypot(toX, toZ);
+          const dotAway = toLen > 0.001 ? (nx * toX + nz * toZ) / toLen : -1;
+          if (dotAway < -0.5) {
+            p.feedingCancelHoldTimer = (p.feedingCancelHoldTimer ?? 0) + dt;
+            if (p.feedingCancelHoldTimer >= 0.14) {
+              this.cancelFeeding(p, 'voluntary');
+            }
+          } else {
+            p.feedingCancelHoldTimer = 0;
+          }
+        }
+      } else if (p.feedingCancelHoldTimer) {
+        p.feedingCancelHoldTimer = 0;
+      }
+
+      const effectiveSpeed = this.getMoveSpeed(p);
       const moveScale =
         p.bitePhase === 'windup'
           ? 0.58
           : p.bitePhase === 'recovery'
           ? 0.68
           : 1.0;
-      p.vx = nx * speed * moveScale;
-      p.vz = nz * speed * moveScale;
+      p.vx = nx * effectiveSpeed * moveScale;
+      p.vz = nz * effectiveSpeed * moveScale;
       if (p.bitePhase === 'idle' && !p.feedingTargetId) {
         const desired = Math.atan2(nz, nx);
         p.facingAngle = rotateAngleTowards(p.facingAngle, desired, 13.5 * dt);
       }
     } else {
+      if (p.feedingCancelHoldTimer) p.feedingCancelHoldTimer = 0;
       p.vx *= Math.pow(0.05, dt);
       p.vz *= Math.pow(0.05, dt);
     }
@@ -1450,7 +1511,7 @@ export class GameSimulation {
     if (k.stormFinTimer > 0) base *= 1.22;
     if (k.evoBoostTimer > 0) base *= 1.18;
     if ((k.bountyBoostTimer ?? 0) > 0) base *= 1.2;
-    if (k.feedingTargetId) base *= 0.28; // Slowed while committing to a feed
+    if (k.feedingTargetId) base *= FEED_MOVE_SPEED_MULT; // 20% speed while committing to a feed
     return base;
   }
 
@@ -1620,54 +1681,274 @@ export class GameSimulation {
     return closest;
   }
 
+  public getFeedRange(level: number): number {
+    return FEED_RANGE_BASE + this.computeRadius(level);
+  }
+
+  public getFeedPacing(mass: number): {
+    windupSec: number;
+    tickSec: number;
+    batchSize: number;
+    totalDuration: number;
+  } {
+    const safeMass = Math.max(1, Math.trunc(mass));
+    if (this.finalFeastActive) {
+      const windupSec = FINAL_FEAST_FEED_WINDUP_SEC;
+      const tickSec = FINAL_FEAST_FEED_TICK_SEC;
+      const batchSize = safeMass > 16 ? 2 : 1;
+      const remainingTicks = Math.max(0, Math.ceil((safeMass - 1) / batchSize));
+      return {
+        windupSec,
+        tickSec,
+        batchSize,
+        totalDuration: windupSec + remainingTicks * tickSec,
+      };
+    }
+
+    const windupSec = FEED_WINDUP_SEC;
+    const tickSec =
+      safeMass >= LARGE_CARCASS_THRESHOLD
+        ? FEED_TICK_SEC_LARGE
+        : safeMass >= MEDIUM_CARCASS_THRESHOLD
+        ? FEED_TICK_SEC_MEDIUM
+        : FEED_TICK_SEC_SMALL;
+    const batchSize = 1;
+    return {
+      windupSec,
+      tickSec,
+      batchSize,
+      totalDuration: windupSec + Math.max(0, safeMass - 1) * tickSec,
+    };
+  }
+
+  public canFeedOnCarcass(
+    k: KeliEntity,
+    carc: CarcassEntity,
+    includeHysteresis = false
+  ): {
+    ok: boolean;
+    reason:
+      | 'dead'
+      | 'match_ended'
+      | 'stunned'
+      | 'staggered'
+      | 'evading'
+      | 'recovering'
+      | 'depleted'
+      | 'range'
+      | 'obstacle'
+      | 'shore'
+      | null;
+  } {
+    if (!k.alive) return { ok: false, reason: 'dead' };
+    if (this.status !== 'playing' || this.matchConcluded) return { ok: false, reason: 'match_ended' };
+    if (k.stunTimer > 0) return { ok: false, reason: 'stunned' };
+    if (k.staggerTimer > 0) return { ok: false, reason: 'staggered' };
+    if (k.evadeTimer > 0 || k.dashTimer > 0) return { ok: false, reason: 'evading' };
+    if ((k.feedingRecoveryTimer ?? 0) > 0 && k.feedingTargetId !== carc.id) {
+      return { ok: false, reason: 'recovering' };
+    }
+    if (carc.consumed || carc.mass <= 0) return { ok: false, reason: 'depleted' };
+    if (getTerrainAt(carc.x, carc.z) === 'shore' && k.level < 40) {
+      return { ok: false, reason: 'shore' };
+    }
+
+    const maxRange = this.getFeedRange(k.level) + (includeHysteresis ? FEED_CANCEL_RANGE_BUFFER : 0);
+    const dist = Math.hypot(carc.x - k.x, carc.z - k.z);
+    if (dist > maxRange) return { ok: false, reason: 'range' };
+
+    if (!hasClearObstacleLineOfSight(k.x, k.z, carc.x, carc.z)) {
+      return { ok: false, reason: 'obstacle' };
+    }
+
+    return { ok: true, reason: null };
+  }
+
+  public cancelFeeding(
+    k: KeliEntity,
+    _reason: 'voluntary' | 'depleted' | 'out_of_range' | 'obstacle' | 'ability' = 'voluntary'
+  ): boolean {
+    if (!k.feedingTargetId) return false;
+    k.feedingTargetId = null;
+    k.feedingProgress = 0;
+    k.feedingWindupDone = false;
+    k.feedingTickTimer = 0;
+    k.feedingSessionFragments = 0;
+    k.feedingCancelHoldTimer = 0;
+    return true;
+  }
+
+  public cancelFeedingForPlayer(playerId = this.primaryPlayerId): boolean {
+    const p = this.kelis.find((k) => k.id === playerId);
+    if (!p || !p.alive) return false;
+    return this.cancelFeeding(p, 'voluntary');
+  }
+
+  private interruptFeeding(target: KeliEntity, attacker: KeliEntity | null): boolean {
+    if (!target.feedingTargetId) return false;
+    target.feedingTargetId = null;
+    target.feedingProgress = 0;
+    target.feedingWindupDone = false;
+    target.feedingTickTimer = 0;
+    target.feedingSessionFragments = 0;
+    target.feedingCancelHoldTimer = 0;
+    target.feedingRecoveryTimer = Math.max(
+      target.feedingRecoveryTimer ?? 0,
+      FEED_INTERRUPT_RECOVERY_SEC
+    );
+
+    if (target.isPlayer) {
+      this.emitSfxFor(target.id, 'feed_interrupt');
+    }
+    if (attacker?.isPlayer && attacker.id !== target.id) {
+      this.emitSfxFor(attacker.id, 'feed_interrupt');
+    }
+    if (target.isPlayer || attacker?.isPlayer) {
+      this.spawnCallout(target.x, target.z, 'FEED INTERRUPTED', '#fb923c');
+    }
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: 'feed_splash',
+      x: target.x,
+      z: target.z,
+      angle: Math.random() * Math.PI * 2,
+      radius: 28,
+      duration: 0.32,
+      elapsed: 0,
+      ownerId: target.id,
+      color: '#fb923c',
+    });
+    return true;
+  }
+
+  private notifyNearbyFeedingAlert(feeder: KeliEntity, carc: CarcassEntity) {
+    const prevTime = this.lastFeedAlertTimeByCarcass.get(carc.id) ?? -99;
+    if (this.matchTime - prevTime < 2.2) return;
+    this.lastFeedAlertTimeByCarcass.set(carc.id, this.matchTime);
+
+    for (const [pid, meta] of this.playerMetaById.entries()) {
+      if (pid === feeder.id) continue;
+      const listener = this.getPlayer(pid);
+      if (!listener || !listener.alive) continue;
+      const dist = Math.hypot(carc.x - listener.x, carc.z - listener.z);
+      if (dist > FEED_SOUND_ALERT_RANGE) continue;
+
+      const dirAngle = dist > 48 ? Math.atan2(carc.z - listener.z, carc.x - listener.x) : null;
+      const cue: SoundCue = {
+        id: this.nextId('cue'),
+        label: `Feeding nearby (+${Math.trunc(carc.mass)})`,
+        directionAngle: dirAngle,
+        severity: carc.mass >= LARGE_CARCASS_THRESHOLD ? 'danger' : 'warning',
+        timestamp: this.matchTime,
+      };
+      meta.soundCues.unshift(cue);
+      if (meta.soundCues.length > 5) meta.soundCues.length = 5;
+      if (pid === this.primaryPlayerId) {
+        this.soundCues = [...meta.soundCues];
+      }
+      this.emitSfxFor(pid, 'feed_nearby');
+    }
+  }
+
   private tryBiteOrFeed(k: KeliEntity, playPlayerAudio: boolean) {
     if (!k.alive || this.status !== 'playing' || this.matchConcluded) return;
     if (k.stunTimer > 0 || k.evadeTimer > 0) return;
 
-    const biteRange = 54 + this.computeRadius(k.level);
     const strikeReach = 64 + this.computeRadius(k.level);
     const input = k.isPlayer ? this.inputsById.get(k.id) : undefined;
     const baseAim = input ? input.aimAngle : k.facingAngle;
+
+    // Prevent simultaneous feeding and attacking: while actively feeding on a valid carcass,
+    // repeated feed/bite inputs are idempotent and never trigger an offensive bite mid-feed.
+    if (k.feedingTargetId) {
+      const activeCarc = this.carcasses.find(
+        (c) => c.id === k.feedingTargetId && !c.consumed && c.mass > 0
+      );
+      if (activeCarc && this.canFeedOnCarcass(k, activeCarc, true).ok) {
+        const carcAngle = Math.atan2(activeCarc.z - k.z, activeCarc.x - k.x);
+        k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 0.45);
+        if (input) input.aimAngle = carcAngle;
+        return;
+      }
+      this.cancelFeeding(k, activeCarc ? 'out_of_range' : 'depleted');
+    }
 
     // Only treat rivals in front hemisphere as immediate live combat interference for feeding
     const closestInFront = this.findClosestPreyInCone(k, strikeReach, baseAim, BITE_CONE_HALF_ANGLE);
     const hasLiveTargetInFront = Boolean(closestInFront);
 
-    // Check nearest unclaimed carcass inside feeding range
+    // Select nearest valid feedable carcass (checking range, LOS, shore Lv.40, and recovery)
     let nearestCarc: CarcassEntity | null = null;
     let nearestCarcDist = Infinity;
+    let nearestBlockedReason: 'obstacle' | 'shore' | 'recovering' | null = null;
+    let nearestBlockedDist = Infinity;
+
     for (const c of this.carcasses) {
       if (c.consumed || c.mass <= 0) continue;
       const d = Math.hypot(c.x - k.x, c.z - k.z);
-      if (d <= biteRange + 22 && d < nearestCarcDist) {
-        nearestCarcDist = d;
-        nearestCarc = c;
+      const check = this.canFeedOnCarcass(k, c, false);
+      if (check.ok) {
+        if (d < nearestCarcDist) {
+          nearestCarcDist = d;
+          nearestCarc = c;
+        }
+      } else if (
+        (check.reason === 'obstacle' || check.reason === 'shore' || check.reason === 'recovering') &&
+        d <= this.getFeedRange(k.level) + 12 &&
+        d < nearestBlockedDist
+      ) {
+        nearestBlockedDist = d;
+        nearestBlockedReason = check.reason;
       }
     }
 
-    // Deliberate feeding if carcass is right in front and no immediate live clash in front
+    // Deliberate feeding if valid carcass is in range, not mid-attack, and no immediate live clash in front
     if (
       nearestCarc &&
+      k.bitePhase === 'idle' &&
       k.staggerTimer <= 0 &&
-      (!hasLiveTargetInFront || k.feedingTargetId === nearestCarc.id)
+      !hasLiveTargetInFront
     ) {
       const carcAngle = Math.atan2(nearestCarc.z - k.z, nearestCarc.x - k.x);
       k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 0.45);
       if (input) {
         input.aimAngle = carcAngle;
       }
-      if (k.feedingTargetId !== nearestCarc.id) {
-        k.feedingTargetId = nearestCarc.id;
-        k.feedingProgress = 0;
-        // Proposed 0.5–1.65s commitment window scaling with carcass mass
-        k.feedingDuration = Math.min(1.65, 0.5 + nearestCarc.mass * 0.025);
+      const pacing = this.getFeedPacing(nearestCarc.mass);
+      k.feedingTargetId = nearestCarc.id;
+      k.feedingProgress = 0;
+      k.feedingDuration = pacing.totalDuration;
+      k.feedingWindupDone = false;
+      k.feedingTickTimer = 0;
+      k.feedingSessionFragments = 0;
+      k.feedingCancelHoldTimer = 0;
+
+      if (k.isPlayer) {
+        this.emitSfxFor(k.id, 'feed_start');
       }
+      this.notifyNearbyFeedingAlert(k, nearestCarc);
       return;
     }
 
-    // Cancel active feeding if initiating a combat bite
-    k.feedingTargetId = null;
-    k.feedingProgress = 0;
+    // Clear feedback if player explicitly attempted to feed on an unavailable nearby carcass
+    if (
+      k.isPlayer &&
+      playPlayerAudio &&
+      !hasLiveTargetInFront &&
+      nearestBlockedReason &&
+      (k.feedingFeedbackCooldown ?? 0) <= 0
+    ) {
+      k.feedingFeedbackCooldown = 0.85;
+      const msg =
+        nearestBlockedReason === 'obstacle'
+          ? 'BLOCKED BY ROCK'
+          : nearestBlockedReason === 'shore'
+          ? 'SHORE REQUIRES LV.40'
+          : 'FEED RECOVERING';
+      this.spawnCallout(k.x, k.z, msg, '#f59e0b');
+      this.emitSfxFor(k.id, 'hit_blocked');
+      return;
+    }
 
     // Input buffering (~150ms) near the end of recovery, cooldown, or brief stagger
     if (k.staggerTimer > 0) {
@@ -1732,13 +2013,23 @@ export class GameSimulation {
   }
 
   private updateBiteAndFeeding(k: KeliEntity, dt: number) {
-    if (!k.alive) return;
+    if (!k.alive || this.status !== 'playing' || this.matchConcluded) {
+      if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+      return;
+    }
 
-    // Interrupt feeding or bite windup if stunned, staggered, or evading
-    if (k.stunTimer > 0 || k.staggerTimer > 0 || k.evadeTimer > 0) {
+    // Interrupt feeding or bite windup if stunned or staggered; cleanly cancel on evade/dash
+    if (k.stunTimer > 0 || k.staggerTimer > 0) {
       if (k.feedingTargetId) {
-        k.feedingTargetId = null;
-        k.feedingProgress = 0;
+        this.interruptFeeding(k, null);
+      }
+      if (k.bitePhase === 'windup') {
+        k.bitePhase = 'idle';
+        k.bitePhaseTimer = 0;
+      }
+    } else if (k.evadeTimer > 0 || k.dashTimer > 0) {
+      if (k.feedingTargetId) {
+        this.cancelFeeding(k, 'ability');
       }
       if (k.bitePhase === 'windup') {
         k.bitePhase = 'idle';
@@ -1746,24 +2037,31 @@ export class GameSimulation {
       }
     }
 
-    // 1. Feeding commitment channel
+    // 1. Progressive contested feeding commitment channel
     if (k.feedingTargetId) {
-      const carcIdx = this.carcasses.findIndex(
+      const carc = this.carcasses.find(
         (c) => c.id === k.feedingTargetId && !c.consumed && c.mass > 0
       );
-      if (carcIdx === -1 || k.stunTimer > 0 || k.staggerTimer > 0) {
-        k.feedingTargetId = null;
-        k.feedingProgress = 0;
+      if (!carc) {
+        this.cancelFeeding(k, 'depleted');
       } else {
-        const carc = this.carcasses[carcIdx];
-        const dist = Math.hypot(carc.x - k.x, carc.z - k.z);
-        if (dist > 78 + this.computeRadius(k.level)) {
-          // Incomplete feeding: reset feeder progress while preserving the carcass's exact remaining fragments
-          k.feedingTargetId = null;
-          k.feedingProgress = 0;
+        const check = this.canFeedOnCarcass(k, carc, true);
+        if (!check.ok) {
+          this.cancelFeeding(
+            k,
+            check.reason === 'obstacle'
+              ? 'obstacle'
+              : check.reason === 'depleted'
+              ? 'depleted'
+              : 'out_of_range'
+          );
         } else {
+          // Smoothly face the carcass while feeding
+          const carcAngle = Math.atan2(carc.z - k.z, carc.x - k.x);
+          k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 10 * dt);
           k.feedingProgress += dt;
-          if (Math.random() < 0.22) {
+
+          if (Math.random() < 0.24) {
             this.effects.push({
               id: this.nextId('fx'),
               type: 'feed_splash',
@@ -1777,8 +2075,48 @@ export class GameSimulation {
               color: '#e6b86e',
             });
           }
-          if (k.feedingProgress >= k.feedingDuration) {
+
+          const pacing = this.getFeedPacing(carc.mass);
+
+          // Single-step full completion support (e.g., 1-fragment carcass or synthetic full-channel completion)
+          if (!k.feedingWindupDone && k.feedingProgress >= k.feedingDuration) {
             this.completeFeed(k, carc.id);
+          } else if (!k.feedingWindupDone && k.feedingProgress >= pacing.windupSec) {
+            // Initial windup finished: transfer first fragment atomically and enter progressive tick loop
+            k.feedingWindupDone = true;
+            k.feedingTickTimer = Math.max(0, k.feedingProgress - pacing.windupSec);
+            this.transferCarcassFragments(k, carc.id, 1, { keepChannel: true });
+            if (k.feedingTargetId === carc.id && !carc.consumed && carc.mass > 0) {
+              const remPacing = this.getFeedPacing(carc.mass);
+              k.feedingDuration =
+                k.feedingProgress +
+                Math.max(1, Math.ceil(carc.mass / remPacing.batchSize)) * remPacing.tickSec;
+            }
+          } else if (k.feedingWindupDone) {
+            k.feedingTickTimer = (k.feedingTickTimer ?? 0) + dt;
+            while (
+              k.feedingTickTimer >= pacing.tickSec &&
+              k.feedingTargetId === carc.id &&
+              !carc.consumed &&
+              carc.mass > 0 &&
+              k.alive &&
+              !this.matchConcluded
+            ) {
+              k.feedingTickTimer -= pacing.tickSec;
+              const transferred = this.transferCarcassFragments(k, carc.id, pacing.batchSize, {
+                keepChannel: true,
+              });
+              if (transferred <= 0) break;
+            }
+            if (k.feedingTargetId === carc.id && !carc.consumed && carc.mass > 0) {
+              const remPacing = this.getFeedPacing(carc.mass);
+              const remTime = Math.max(
+                0.05,
+                Math.ceil(carc.mass / remPacing.batchSize) * remPacing.tickSec -
+                  (k.feedingTickTimer ?? 0)
+              );
+              k.feedingDuration = k.feedingProgress + remTime;
+            }
           }
         }
       }
@@ -1931,8 +2269,7 @@ export class GameSimulation {
       if (target.stunTimer > 0) return 'resisted';
       target.staggerTimer = Math.max(target.staggerTimer, baseDuration);
       if (target.feedingTargetId) {
-        target.feedingTargetId = null;
-        target.feedingProgress = 0;
+        this.interruptFeeding(target, source);
       }
       if (target.bitePhase === 'windup') {
         target.bitePhase = 'idle';
@@ -1973,8 +2310,7 @@ export class GameSimulation {
 
     // Interrupt feeding & active bite windup on stun
     if (target.feedingTargetId) {
-      target.feedingTargetId = null;
-      target.feedingProgress = 0;
+      this.interruptFeeding(target, source);
     }
     if (target.bitePhase === 'windup') {
       target.bitePhase = 'idle';
@@ -2210,6 +2546,15 @@ export class GameSimulation {
         attacker ? `${attacker.name} (${cause})` : cause,
         'kill'
       );
+    } else if (
+      target.feedingTargetId &&
+      !mitigatedByEvade &&
+      attacker &&
+      attacker.id !== target.id &&
+      (finalAmount >= FEED_INTERRUPT_DAMAGE_THRESHOLD || finalAmount >= target.maxHp * 0.04)
+    ) {
+      // Qualifying direct combat damage interrupts active feeding and applies brief recovery
+      this.interruptFeeding(target, attacker);
     }
 
     return { appliedDamage: finalAmount, mitigatedByEvade, hitKind };
@@ -2227,6 +2572,10 @@ export class GameSimulation {
     victim.hp = 0;
     victim.feedingTargetId = null;
     victim.feedingProgress = 0;
+    victim.feedingWindupDone = false;
+    victim.feedingTickTimer = 0;
+    victim.feedingSessionFragments = 0;
+    victim.feedingCancelHoldTimer = 0;
 
     // Atomically transfer ALL integer fragments out of the defeated Keli's active inventory
     const droppedMass = Math.max(0, Math.trunc(victim.level));
@@ -2365,7 +2714,8 @@ export class GameSimulation {
   public transferCarcassFragments(
     eater: KeliEntity,
     carcassId: string,
-    maxAmount?: number
+    maxAmount?: number,
+    opts?: { keepChannel?: boolean }
   ): number {
     if (!eater.alive || this.matchConcluded || this.status !== 'playing') return 0;
 
@@ -2384,28 +2734,36 @@ export class GameSimulation {
     // Deduct from carcass BEFORE crediting eater so total never momentarily exceeds 100
     carc.mass = available - transfer;
     const fullyConsumed = carc.mass <= 0;
+    const keepChannel = Boolean(opts?.keepChannel) && !fullyConsumed;
+    const prevSession = eater.feedingSessionFragments ?? 0;
+    const nextSession = prevSession + transfer;
 
     if (fullyConsumed) {
       carc.mass = 0;
       carc.consumed = true;
       this.carcasses.splice(carcassIndex, 1);
+      this.lastFeedAlertTimeByCarcass.delete(carc.id);
 
       // Immediately cancel every competing Keli's active feed channel on this carcass
       for (const other of this.kelis) {
         if (other.feedingTargetId === carc.id) {
-          other.feedingTargetId = null;
-          other.feedingProgress = 0;
+          this.cancelFeeding(other, 'depleted');
         }
       }
+    } else if (keepChannel) {
+      eater.feedingSessionFragments = nextSession;
     } else {
-      eater.feedingTargetId = null;
-      eater.feedingProgress = 0;
+      this.cancelFeeding(eater, 'voluntary');
     }
 
     this.grantFragments(eater, transfer, carc.sourceName);
 
-    // Health restore on feed
-    const heal = eater.maxHp * (0.3 + transfer * 0.015);
+    // Health restore on feed (incremental during progressive ticks + completion bonus on finish)
+    const heal = keepChannel
+      ? eater.maxHp * (0.018 * transfer)
+      : opts?.keepChannel
+      ? eater.maxHp * (0.16 + transfer * 0.012)
+      : eater.maxHp * (0.3 + transfer * 0.015);
     eater.hp = Math.min(eater.maxHp, eater.hp + heal);
 
     // Lv.70 Feeding Frenzy
@@ -2432,8 +2790,24 @@ export class GameSimulation {
     }
 
     if (eater.isPlayer) {
-      this.emitSfxFor(eater.id, 'feed');
-      this.spawnCallout(eater.x, eater.z, `+${transfer} FRAGMENTS`, '#e6b86e');
+      if (keepChannel) {
+        this.emitSfxFor(eater.id, 'feed_tick');
+        this.spawnCallout(
+          eater.x,
+          eater.z,
+          transfer === 1 ? '+1 FRAGMENT' : `+${transfer} FRAGMENTS`,
+          '#e6b86e'
+        );
+      } else {
+        this.emitSfxFor(eater.id, 'feed');
+        const labelAmount = opts?.keepChannel && nextSession > transfer ? nextSession : transfer;
+        this.spawnCallout(
+          eater.x,
+          eater.z,
+          labelAmount === 1 ? '+1 FRAGMENT' : `+${labelAmount} FRAGMENTS`,
+          '#fde047'
+        );
+      }
     }
 
     if (fullyConsumed && carc.sourceId && carc.sourceId !== eater.id) {
@@ -2546,9 +2920,8 @@ export class GameSimulation {
     k.cooldowns.evade = EVADE_COOLDOWN_SEC;
     k.evadeTimer = EVADE_DURATION_SEC;
 
-    // Cancel feeding or bite windup so the player can reactively dodge telegraphed hits
-    k.feedingTargetId = null;
-    k.feedingProgress = 0;
+    // Cancel feeding cleanly (zero recovery penalty) or bite windup so the player can reactively dodge
+    this.cancelFeeding(k, 'ability');
     if (k.bitePhase === 'windup') {
       k.bitePhase = 'idle';
       k.bitePhaseTimer = 0;
@@ -2611,7 +2984,7 @@ export class GameSimulation {
     const angle = k.facingAngle;
     k.dashDirX = Math.cos(angle);
     k.dashDirZ = Math.sin(angle);
-    k.feedingTargetId = null;
+    this.cancelFeeding(k, 'ability');
 
     this.effects.push({
       id: this.nextId('fx'),
@@ -2676,6 +3049,7 @@ export class GameSimulation {
     k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.veil = 10.0;
     k.veilTimer = 4.0;
+    this.cancelFeeding(k, 'ability');
 
     this.effects.push({
       id: this.nextId('fx'),
@@ -2705,6 +3079,7 @@ export class GameSimulation {
     k.stamina = Math.max(0, k.stamina - ELECTROSHOCK_STAMINA_COST);
     k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.electroshock = 11.0;
+    this.cancelFeeding(k, 'ability');
     const radius = 155;
     const dmg = (26 + k.level * 0.65) * (k.predatorTimer > 0 ? 1.38 : 1.0);
 
@@ -2763,6 +3138,7 @@ export class GameSimulation {
     k.stamina = Math.max(0, k.stamina - MAELSTROM_STAMINA_COST);
     k.staminaRegenDelay = Math.max(k.staminaRegenDelay, 0.45);
     k.cooldowns.maelstrom = 14.0;
+    this.cancelFeeding(k, 'ability');
 
     this.effects.push({
       id: this.nextId('fx'),
@@ -3487,6 +3863,9 @@ export class GameSimulation {
     this.winnerId = king.id;
     this.winnerName = king.name;
     this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
+    for (const k of this.kelis) {
+      if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+    }
 
     const subtitle = sourceLabel
       ? `Reunited all 100 fragments from ${sourceLabel}`
@@ -3551,6 +3930,9 @@ export class GameSimulation {
       this.matchConcluded = true;
       this.finalFeastActive = false;
       this.status = 'draw';
+      for (const k of this.kelis) {
+        if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+      }
       for (const [pid, meta] of this.playerMetaById.entries()) {
         const entity = this.getPlayer(pid);
         if (entity.alive || meta.survivalTime === 0) {
@@ -3712,8 +4094,37 @@ export class GameSimulation {
     }
 
     const feedingCarcass = focus.feedingTargetId
-      ? this.carcasses.find((c) => c.id === focus.feedingTargetId) ?? null
+      ? this.carcasses.find((c) => c.id === focus.feedingTargetId && !c.consumed && c.mass > 0) ?? null
       : null;
+
+    // Count active feeders per carcass for contested-feeding HUD and minimap ambush visibility
+    const feedersPerCarcass = new Map<string, number>();
+    for (const k of aliveKelis) {
+      if (k.feedingTargetId) {
+        feedersPerCarcass.set(k.feedingTargetId, (feedersPerCarcass.get(k.feedingTargetId) ?? 0) + 1);
+      }
+    }
+    const feedingCompetitorCount = feedingCarcass
+      ? feedersPerCarcass.get(feedingCarcass.id) ?? 1
+      : 0;
+    const feedingContested = feedingCompetitorCount >= 2;
+
+    const tacticalCarcasses: NonNullable<HudSnapshot['tacticalCarcasses']> = [];
+    for (const c of activeCarcasses) {
+      if (c.mass < LARGE_CARCASS_THRESHOLD) continue;
+      const dist = Math.hypot(c.x - focus.x, c.z - focus.z);
+      if (dist <= LARGE_CARCASS_MINIMAP_RANGE) {
+        const count = feedersPerCarcass.get(c.id) ?? 0;
+        tacticalCarcasses.push({
+          id: c.id,
+          x: c.x,
+          z: c.z,
+          mass: Math.trunc(c.mass),
+          activelyFed: count > 0,
+          contested: count >= 2,
+        });
+      }
+    }
 
     const zoneMeta = getZoneAt(focus.x, focus.z);
     const inSafeZone =
@@ -3731,9 +4142,29 @@ export class GameSimulation {
 
     const playerRadius = this.computeRadius(p.level);
     const hasPreyInRange = p.alive && Boolean(this.findClosestPrey(p, 64 + playerRadius + 95));
-    const hasCarcassInRange =
-      p.alive &&
-      this.carcasses.some((c) => Math.hypot(c.x - p.x, c.z - p.z) <= 54 + playerRadius + 22);
+    let hasCarcassInRange = false;
+    let nearbyCarcassMass: number | null = null;
+    let nearbyCarcassBlockedReason: 'obstacle' | 'shore' | 'recovering' | null = null;
+    if (p.alive) {
+      let bestDist = Infinity;
+      let bestBlockedDist = Infinity;
+      for (const c of activeCarcasses) {
+        const d = Math.hypot(c.x - p.x, c.z - p.z);
+        const check = this.canFeedOnCarcass(p, c, p.feedingTargetId === c.id);
+        if (check.ok && d < bestDist) {
+          bestDist = d;
+          hasCarcassInRange = true;
+          nearbyCarcassMass = Math.trunc(c.mass);
+        } else if (
+          (check.reason === 'obstacle' || check.reason === 'shore' || check.reason === 'recovering') &&
+          d <= this.getFeedRange(p.level) + 12 &&
+          d < bestBlockedDist
+        ) {
+          bestBlockedDist = d;
+          nearbyCarcassBlockedReason = check.reason;
+        }
+      }
+    }
 
     const pForm = getEvolutionForm(p.level);
     const pHazardMod = p.activeHazard ? getHazardModifierForForm(p.activeHazard, pForm) : null;
@@ -3814,10 +4245,18 @@ export class GameSimulation {
         feedingProgress: focus.feedingProgress,
         feedingDuration: focus.feedingDuration,
         feedingTargetName: feedingCarcass ? `${feedingCarcass.sourceName} (+${feedingCarcass.mass})` : null,
+        feedingTargetMass: feedingCarcass ? Math.trunc(feedingCarcass.mass) : 0,
+        feedingWindupDone: Boolean(focus.feedingWindupDone),
+        feedingSessionFragments: focus.feedingSessionFragments ?? 0,
+        feedingContested,
+        feedingCompetitorCount,
+        feedingRecoveryTimeLeft: Math.round((p.feedingRecoveryTimer ?? 0) * 100) / 100,
         cooldowns: { ...p.cooldowns },
         kills: p.kills,
         hasPreyInRange,
         hasCarcassInRange,
+        nearbyCarcassMass,
+        nearbyCarcassBlockedReason,
         x: focus.x,
         z: focus.z,
         facingAngle: focus.facingAngle,
@@ -3825,6 +4264,7 @@ export class GameSimulation {
       zone: { ...this.zone },
       weather: { ...this.weather },
       sonarContacts,
+      tacticalCarcasses,
       pickups: this.pickups.map((pk) => ({
         id: pk.id,
         kind: pk.kind,
@@ -3975,6 +4415,8 @@ export class GameSimulation {
         feedingTargetId: k.feedingTargetId,
         feedingProgress: Math.round(k.feedingProgress * 100) / 100,
         feedingDuration: Math.round(k.feedingDuration * 100) / 100,
+        feedingRecoveryTimer: Math.round((k.feedingRecoveryTimer ?? 0) * 100) / 100,
+        feedingSessionFragments: k.feedingSessionFragments ?? 0,
         cooldowns: { ...k.cooldowns },
         activeEmote: k.activeEmote ?? null,
       }));

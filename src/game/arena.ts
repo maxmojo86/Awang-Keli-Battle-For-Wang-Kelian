@@ -627,6 +627,43 @@ export function findNearestAccessiblePosition(
   return { x: SPAWN_FALLBACK.x, z: SPAWN_FALLBACK.z };
 }
 
+/**
+ * Checks whether the straight line segment between (x1, z1) and (x2, z2) is
+ * unobstructed by solid rock obstacles or perimeter cliffs (used to prevent
+ * feeding or interacting through solid walls).
+ */
+export function hasClearObstacleLineOfSight(
+  x1: number,
+  z1: number,
+  x2: number,
+  z2: number,
+  padding = 4
+): boolean {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq < 1e-4) return true;
+
+  // Reject if midpoint lies inside outer perimeter cliff
+  if (getTerrainAt((x1 + x2) * 0.5, (z1 + z2) * 0.5) === 'cliff') {
+    return false;
+  }
+
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const obs = OBSTACLES[i];
+    const effectiveR = Math.max(4, obs.radius - padding);
+    // Project obstacle center onto segment [0, 1]
+    const t = Math.max(0, Math.min(1, ((obs.x - x1) * dx + (obs.z - z1) * dz) / lenSq));
+    const closestX = x1 + t * dx;
+    const closestZ = z1 + t * dz;
+    const distSq = (obs.x - closestX) * (obs.x - closestX) + (obs.z - closestZ) * (obs.z - closestZ);
+    if (distSq < effectiveR * effectiveR) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const SPAWN_RING_MIN = scaleArenaDist(310);
 const SPAWN_RING_SPAN = scaleArenaDist(440);
 const SPAWN_RETRY_MIN = scaleArenaDist(240);

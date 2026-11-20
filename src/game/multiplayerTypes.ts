@@ -129,6 +129,8 @@ export interface RemoteKeliState {
   feedingTargetId: string | null;
   feedingProgress: number;
   feedingDuration: number;
+  feedingRecoveryTimer?: number;
+  feedingSessionFragments?: number;
   cooldowns: AbilityCooldowns;
   activeEmote: EmoteId | null;
 }
@@ -145,6 +147,10 @@ export interface ClientSfxEvent {
     | 'evade'
     | 'death'
     | 'feed'
+    | 'feed_start'
+    | 'feed_tick'
+    | 'feed_interrupt'
+    | 'feed_nearby'
     | 'evolution'
     | 'dash'
     | 'sonar'

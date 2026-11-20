@@ -35,12 +35,16 @@ import {
   ActorAnimState,
   advanceActorAnim,
   applyFrameUVsToGeometry,
+  applyKeliKingFrameUVsToGeometry,
   computeKeliWaterSubmersion,
   createActorAnimState,
   createActorSpriteGeometry,
   getSpriteSheetMeta,
+  isKeliKingLevel,
+  KELI_KING_SHEET_META,
   SpriteSheetAtlasManager,
 } from './spriteAnimation';
+import { soundEngine } from './audio';
 import {
   collectActiveStatusIndicators,
   MAX_FLOATING_STATUS_ICONS,
@@ -74,6 +78,8 @@ export interface RenderableSimulation {
   weather: WeatherState;
   cameraShake: number;
   damageImpulse?: DamageImpulse | null;
+  status?: 'playing' | 'victory' | 'defeat' | 'draw';
+  winnerId?: string | null;
   getPlayer: () => KeliEntity;
   getSpectateTarget: () => KeliEntity | null;
   getDeathCam?: () => DeathCamState | null;
@@ -129,6 +135,10 @@ interface CarcassVisual {
   ringMesh: THREE.Mesh;
   feedRippleMesh: THREE.Mesh;
   shimmerMotes: THREE.Mesh[];
+  badgeMesh: THREE.Mesh;
+  badgeTex: THREE.CanvasTexture;
+  badgeCtx: CanvasRenderingContext2D;
+  lastBadgeKey: string;
 }
 
 interface PickupVisual {
@@ -153,7 +163,7 @@ export class ArenaScene3D {
   private envAtlases: EnvSpriteAtlasManager;
   private envSprites: EnvironmentalSprite[] = [];
   private envSpriteGroup!: THREE.Group;
-  private activeFeedingCarcassIds = new Set<string>();
+  private activeFeedingCounts = new Map<string, number>();
   private arenaTextures!: ArenaTextureSet;
   private isSoftwareGl: boolean;
 
@@ -224,6 +234,30 @@ export class ArenaScene3D {
   private lastHitStopSeq = 0;
   private visualHitStopTimer = 0;
 
+  // Keli King Level 100 victory presentation & pooled royal VFX (single-fire per match)
+  private keliKingVictoryState: {
+    kingId: string;
+    elapsed: number;
+    roarFired: boolean;
+    shockwaveAge: number;
+    shakeTimer: number;
+  } | null = null;
+  private keliKingFxGroup!: THREE.Group;
+  private keliKingCrownMesh!: THREE.Mesh;
+  private keliKingCrownTex!: THREE.CanvasTexture;
+  private keliKingBaseGlowMesh!: THREE.Mesh;
+  private keliKingBaseGlowTex!: THREE.CanvasTexture;
+  private keliKingShockwaveMesh!: THREE.Mesh;
+  private keliKingWaterRippleMesh!: THREE.Mesh;
+  private keliKingMotes: Array<{
+    mesh: THREE.Mesh;
+    angle: number;
+    radius: number;
+    speed: number;
+    phase: number;
+    maxH: number;
+  }> = [];
+
   constructor(
     container: HTMLElement,
     reducedMotion = false,
@@ -289,6 +323,7 @@ export class ArenaScene3D {
     this.buildZoneBoundary();
     this.initWeatherVisuals();
     this.initFloatingStatusIcons();
+    this.initKeliKingVictoryFx();
     this.ambientParticles = new AmbientHazardParticles(
       this.scene,
       this.renderer.getPixelRatio()
@@ -296,6 +331,266 @@ export class ArenaScene3D {
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
+    }
+  }
+
+  private initKeliKingVictoryFx() {
+    this.keliKingFxGroup = new THREE.Group();
+    this.keliKingFxGroup.visible = false;
+    this.scene.add(this.keliKingFxGroup);
+
+    // 1. Subtle golden crown-shaped light motif billboard rendered behind the Keli King
+    const crownCanvas = document.createElement('canvas');
+    crownCanvas.width = 256;
+    crownCanvas.height = 256;
+    const cctx = crownCanvas.getContext('2d')!;
+    const cx = 128;
+    const cy = 136;
+
+    // Soft radial golden halo
+    const halo = cctx.createRadialGradient(cx, cy, 12, cx, cy, 118);
+    halo.addColorStop(0, 'rgba(255, 226, 138, 0.58)');
+    halo.addColorStop(0.42, 'rgba(243, 198, 86, 0.24)');
+    halo.addColorStop(0.75, 'rgba(201, 146, 46, 0.08)');
+    halo.addColorStop(1, 'rgba(201, 146, 46, 0)');
+    cctx.fillStyle = halo;
+    cctx.fillRect(0, 0, 256, 256);
+
+    // Restrained three-spire golden crown silhouette behind shoulders/head
+    cctx.save();
+    cctx.translate(cx, 72);
+    const crownGrad = cctx.createLinearGradient(0, -44, 0, 34);
+    crownGrad.addColorStop(0, 'rgba(255, 244, 196, 0.78)');
+    crownGrad.addColorStop(0.55, 'rgba(243, 200, 92, 0.44)');
+    crownGrad.addColorStop(1, 'rgba(201, 146, 46, 0.0)');
+    cctx.fillStyle = crownGrad;
+    cctx.beginPath();
+    cctx.moveTo(-64, 24);
+    cctx.lineTo(-76, -18);
+    cctx.lineTo(-34, 4);
+    cctx.lineTo(0, -44);
+    cctx.lineTo(34, 4);
+    cctx.lineTo(76, -18);
+    cctx.lineTo(64, 24);
+    cctx.closePath();
+    cctx.fill();
+
+    cctx.strokeStyle = 'rgba(255, 242, 188, 0.65)';
+    cctx.lineWidth = 2.5;
+    cctx.stroke();
+
+    // Subtle crest diamonds above each spire
+    const drawDiamond = (dx: number, dy: number, r: number) => {
+      cctx.beginPath();
+      cctx.moveTo(dx, dy - r);
+      cctx.lineTo(dx + r * 0.65, dy);
+      cctx.lineTo(dx, dy + r);
+      cctx.lineTo(dx - r * 0.65, dy);
+      cctx.closePath();
+      cctx.fillStyle = 'rgba(255, 248, 214, 0.85)';
+      cctx.fill();
+    };
+    drawDiamond(0, -54, 7);
+    drawDiamond(-76, -27, 4.5);
+    drawDiamond(76, -27, 4.5);
+    cctx.restore();
+
+    this.keliKingCrownTex = new THREE.CanvasTexture(crownCanvas);
+    this.keliKingCrownTex.colorSpace = THREE.SRGBColorSpace;
+    const crownMat = new THREE.MeshBasicMaterial({
+      map: this.keliKingCrownTex,
+      transparent: true,
+      opacity: 0.45,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.keliKingCrownMesh = new THREE.Mesh(this.sharedQuadGeo, crownMat);
+    this.keliKingCrownMesh.renderOrder = 3;
+    this.keliKingFxGroup.add(this.keliKingCrownMesh);
+
+    // 2. Golden circular energy pulse beneath the Keli King's feet
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = 192;
+    glowCanvas.height = 192;
+    const gctx = glowCanvas.getContext('2d')!;
+    const rg = gctx.createRadialGradient(96, 96, 12, 96, 96, 92);
+    rg.addColorStop(0, 'rgba(255, 232, 148, 0.52)');
+    rg.addColorStop(0.55, 'rgba(234, 179, 58, 0.30)');
+    rg.addColorStop(0.82, 'rgba(243, 210, 133, 0.45)');
+    rg.addColorStop(1, 'rgba(201, 156, 74, 0)');
+    gctx.fillStyle = rg;
+    gctx.fillRect(0, 0, 192, 192);
+    this.keliKingBaseGlowTex = new THREE.CanvasTexture(glowCanvas);
+    this.keliKingBaseGlowTex.colorSpace = THREE.SRGBColorSpace;
+
+    const baseGlowMat = new THREE.MeshBasicMaterial({
+      map: this.keliKingBaseGlowTex,
+      transparent: true,
+      opacity: 0.65,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.keliKingBaseGlowMesh = new THREE.Mesh(this.sharedDiscGeo, baseGlowMat);
+    this.keliKingBaseGlowMesh.rotation.x = -Math.PI / 2;
+    this.keliKingBaseGlowMesh.renderOrder = 4;
+    this.keliKingFxGroup.add(this.keliKingBaseGlowMesh);
+
+    // 3. Expanding golden shockwave ring synchronized to Frame 4 roar
+    const shockMat = new THREE.MeshBasicMaterial({
+      color: 0xfde68a,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.keliKingShockwaveMesh = new THREE.Mesh(this.sharedRingGeo, shockMat);
+    this.keliKingShockwaveMesh.rotation.x = -Math.PI / 2;
+    this.keliKingShockwaveMesh.visible = false;
+    this.keliKingShockwaveMesh.renderOrder = 5;
+    this.keliKingFxGroup.add(this.keliKingShockwaveMesh);
+
+    // 4. Subtle terrain-appropriate water ripple ring when Keli King stands in water
+    const rippleMat = new THREE.MeshBasicMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.keliKingWaterRippleMesh = new THREE.Mesh(this.sharedRingGeo, rippleMat);
+    this.keliKingWaterRippleMesh.rotation.x = -Math.PI / 2;
+    this.keliKingWaterRippleMesh.visible = false;
+    this.keliKingWaterRippleMesh.renderOrder = 4;
+    this.keliKingFxGroup.add(this.keliKingWaterRippleMesh);
+
+    // 5. 12 pooled rising golden light motes (zero runtime allocations)
+    for (let i = 0; i < 12; i++) {
+      const moteMat = new THREE.MeshBasicMaterial({
+        color: i % 3 === 0 ? 0xfffbeb : 0xf3d285,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sharedDiscGeo, moteMat);
+      mesh.renderOrder = 6;
+      mesh.visible = false;
+      this.keliKingFxGroup.add(mesh);
+      this.keliKingMotes.push({
+        mesh,
+        angle: (i / 12) * Math.PI * 2 + (i % 2) * 0.25,
+        radius: 2.6 + (i % 4) * 0.95,
+        speed: 0.42 + (i % 3) * 0.14,
+        phase: (i / 12),
+        maxH: 5.5 + (i % 3) * 2.2,
+      });
+    }
+  }
+
+  private updateKeliKingVictoryFx(
+    king: KeliEntity | null,
+    kingVis: ActorVisual | undefined,
+    dt: number,
+    elapsed: number
+  ) {
+    const state = this.keliKingVictoryState;
+    if (!state || !king || !king.alive) {
+      this.keliKingFxGroup.visible = false;
+      return;
+    }
+
+    this.keliKingFxGroup.visible = true;
+    const kingX = simTo3D(king.x);
+    const kingZ = simTo3D(king.z);
+    const groundY = kingVis ? kingVis.group.position.y : king.isOnShore ? getElevationAt(king.x, king.z) : 0.05;
+    const surfaceY = king.isOnShore ? groundY + 0.08 : 0.16;
+
+    // Subtle fade-in over first 0.35s so the crown aura emerges gracefully
+    const fadeIn = Math.min(1, state.elapsed / 0.35);
+    const pulse = this.reducedMotion ? 0 : Math.sin(elapsed * 3.4);
+
+    // Crown motif placed slightly behind the Keli King along the camera view direction
+    const camDirX = this.camera.position.x - kingX;
+    const camDirZ = this.camera.position.z - kingZ;
+    const camDirLen = Math.max(0.001, Math.hypot(camDirX, camDirZ));
+    const backOffset = 1.65;
+    const crownSpriteY = kingVis ? kingVis.spriteMesh.position.y + 1.15 : 4.6;
+    this.keliKingCrownMesh.position.set(
+      kingX - (camDirX / camDirLen) * backOffset,
+      groundY + crownSpriteY,
+      kingZ - (camDirZ / camDirLen) * backOffset
+    );
+    this.keliKingCrownMesh.quaternion.copy(this.camera.quaternion);
+    const crownScale = 12.2 + pulse * 0.45;
+    this.keliKingCrownMesh.scale.set(crownScale, crownScale, 1);
+    const crownMat = this.keliKingCrownMesh.material as THREE.MeshBasicMaterial;
+    const roarBoost = state.roarFired && state.shockwaveAge < 0.75
+      ? (1 - state.shockwaveAge / 0.75) * 0.28
+      : 0;
+    crownMat.opacity = (0.38 + pulse * 0.06 + roarBoost) * fadeIn;
+    if (kingVis) {
+      this.keliKingCrownMesh.renderOrder = Math.max(1, kingVis.spriteMesh.renderOrder - 1);
+    }
+
+    // Golden energy pulse disc under feet
+    this.keliKingBaseGlowMesh.position.set(kingX, surfaceY, kingZ);
+    const baseRadius = 5.4 + pulse * 0.42;
+    this.keliKingBaseGlowMesh.scale.set(baseRadius, baseRadius, 1);
+    const baseMat = this.keliKingBaseGlowMesh.material as THREE.MeshBasicMaterial;
+    baseMat.opacity = (0.58 + pulse * 0.1 + roarBoost * 0.6) * fadeIn;
+
+    // Frame-4 roar expanding golden shockwave ring
+    if (state.roarFired && state.shockwaveAge >= 0 && state.shockwaveAge < 0.95) {
+      state.shockwaveAge += dt;
+      const t = Math.min(1, state.shockwaveAge / 0.95);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const waveRadius = 3.6 + eased * 18.5;
+      this.keliKingShockwaveMesh.visible = true;
+      this.keliKingShockwaveMesh.position.set(kingX, surfaceY + 0.04, kingZ);
+      this.keliKingShockwaveMesh.scale.set(waveRadius, waveRadius, 1);
+      const shockMat = this.keliKingShockwaveMesh.material as THREE.MeshBasicMaterial;
+      shockMat.opacity = (1 - t) * (1 - t) * 0.85;
+    } else {
+      this.keliKingShockwaveMesh.visible = false;
+    }
+
+    // Terrain-appropriate subtle water ripple when victorious Keli King stands in water
+    if (!king.isOnShore) {
+      const rippleCycle = (elapsed * 0.75) % 1;
+      const rippleRadius = 4.2 + rippleCycle * 4.8;
+      this.keliKingWaterRippleMesh.visible = true;
+      this.keliKingWaterRippleMesh.position.set(kingX, 0.14, kingZ);
+      this.keliKingWaterRippleMesh.scale.set(rippleRadius, rippleRadius, 1);
+      const rMat = this.keliKingWaterRippleMesh.material as THREE.MeshBasicMaterial;
+      rMat.opacity = (1 - rippleCycle) * 0.34 * fadeIn;
+    } else {
+      this.keliKingWaterRippleMesh.visible = false;
+    }
+
+    // Subtle rising golden motes around the Keli King
+    for (let i = 0; i < this.keliKingMotes.length; i++) {
+      const m = this.keliKingMotes[i];
+      if (this.reducedMotion) {
+        m.mesh.visible = false;
+        continue;
+      }
+      const p = (m.phase + elapsed * m.speed * 0.45) % 1;
+      const ang = m.angle + elapsed * 0.35;
+      const rad = m.radius * (1 - p * 0.18);
+      m.mesh.visible = true;
+      m.mesh.position.set(
+        kingX + Math.cos(ang) * rad,
+        surfaceY + 0.35 + p * m.maxH,
+        kingZ + Math.sin(ang) * rad
+      );
+      m.mesh.quaternion.copy(this.camera.quaternion);
+      const moteSize = (0.16 + Math.sin(p * Math.PI) * 0.14) * (1 + roarBoost * 0.5);
+      m.mesh.scale.setScalar(moteSize);
+      const mMat = m.mesh.material as THREE.MeshBasicMaterial;
+      mMat.opacity = Math.sin(p * Math.PI) * 0.68 * fadeIn;
     }
   }
 
@@ -1365,9 +1660,9 @@ export class ArenaScene3D {
     feedRippleMesh.renderOrder = 6;
     group.add(feedRippleMesh);
 
-    // Pooled rising gold shimmer particles for high-value carcasses (30+ remaining fragments)
+    // Pooled rising gold shimmer particles (2 subtle motes for 10-29, 6 rich motes for 30+)
     const shimmerMotes: THREE.Mesh[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
       const mote = new THREE.Mesh(
         this.sharedQuadGeo,
         new THREE.MeshBasicMaterial({
@@ -1386,6 +1681,27 @@ export class ArenaScene3D {
       shimmerMotes.push(mote);
     }
 
+    // Pooled proximity fragment count badge (visible only when player is nearby)
+    const badgeCanvas = document.createElement('canvas');
+    badgeCanvas.width = 180;
+    badgeCanvas.height = 52;
+    const badgeCtx = badgeCanvas.getContext('2d')!;
+    const badgeTex = new THREE.CanvasTexture(badgeCanvas);
+    badgeTex.colorSpace = THREE.SRGBColorSpace;
+    const badgeMesh = new THREE.Mesh(
+      this.sharedQuadGeo,
+      new THREE.MeshBasicMaterial({
+        map: badgeTex,
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+      })
+    );
+    badgeMesh.scale.set(2.8, 0.82, 1);
+    badgeMesh.visible = false;
+    badgeMesh.renderOrder = 14;
+    group.add(badgeMesh);
+
     this.scene.add(group);
     return {
       group,
@@ -1398,7 +1714,55 @@ export class ArenaScene3D {
       ringMesh,
       feedRippleMesh,
       shimmerMotes,
+      badgeMesh,
+      badgeTex,
+      badgeCtx,
+      lastBadgeKey: '',
     };
+  }
+
+  private updateCarcassProximityBadge(
+    vis: CarcassVisual,
+    mass: number,
+    feederCount: number,
+    tier: 'low' | 'medium' | 'high'
+  ) {
+    const contested = feederCount >= 2;
+    const active = feederCount > 0;
+    const key = `${mass}|${contested ? 2 : active ? 1 : 0}|${tier}`;
+    if (vis.lastBadgeKey === key) return;
+    vis.lastBadgeKey = key;
+
+    const ctx = vis.badgeCtx;
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const accent = contested
+      ? '#fb923c'
+      : tier === 'high'
+      ? '#fde047'
+      : tier === 'medium'
+      ? '#fbbf24'
+      : '#7dd3fc';
+
+    ctx.fillStyle = contested ? 'rgba(42, 14, 6, 0.88)' : 'rgba(8, 18, 24, 0.84)';
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.2;
+    const padX = contested ? 10 : 32;
+    const boxW = w - padX * 2;
+    ctx.beginPath();
+    ctx.roundRect(padX, 6, boxW, h - 12, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 20px monospace';
+    ctx.fillStyle = accent;
+    const label = contested ? `+${mass} · CONTESTED` : `+${mass} FRAG`;
+    ctx.fillText(label, w * 0.5, h * 0.5 + 1);
+    vis.badgeTex.needsUpdate = true;
   }
 
   private createPickupVisual(kind: PickupKind): PickupVisual {
@@ -1878,12 +2242,46 @@ export class ArenaScene3D {
       this.paperBoatGroup.rotation.z = Math.sin(elapsed * 1.6) * 0.06;
     }
 
-    const killerEntity = deathCamActive
+    // Detect living Level 100 Keli King for unified victory presentation (solo, multiplayer & spectators)
+    const livingKeliKing =
+      (sim.winnerId
+        ? sim.kelis.find((k) => k.alive && k.id === sim.winnerId && isKeliKingLevel(k.level))
+        : null) ??
+      sim.kelis.find((k) => k.alive && isKeliKingLevel(k.level)) ??
+      null;
+
+    if (livingKeliKing && !this.keliKingVictoryState) {
+      this.keliKingVictoryState = {
+        kingId: livingKeliKing.id,
+        elapsed: 0,
+        roarFired: false,
+        shockwaveAge: -1,
+        shakeTimer: 0,
+      };
+      soundEngine.playKeliKingAscension();
+    } else if (this.keliKingVictoryState) {
+      this.keliKingVictoryState.elapsed += dt;
+      if (this.keliKingVictoryState.shakeTimer > 0) {
+        this.keliKingVictoryState.shakeTimer = Math.max(
+          0,
+          this.keliKingVictoryState.shakeTimer - dt
+        );
+      }
+    }
+
+    const victoryCamKing =
+      this.keliKingVictoryState && livingKeliKing && livingKeliKing.id === this.keliKingVictoryState.kingId
+        ? livingKeliKing
+        : null;
+
+    const killerEntity = deathCamActive && !victoryCamKing
       ? sim.kelis.find((k) => k.alive && k.id === deathCam!.killerId) ?? null
       : null;
-    const focus = player.alive
-      ? player
-      : killerEntity ?? sim.getSpectateTarget() ?? player;
+    const focus = victoryCamKing
+      ? victoryCamKing
+      : player.alive
+        ? player
+        : killerEntity ?? sim.getSpectateTarget() ?? player;
 
     const targetCamX = simTo3D(focus.x);
     const targetCamZ = simTo3D(focus.z);
@@ -1900,7 +2298,8 @@ export class ArenaScene3D {
       );
       this.cameraInitialized = true;
     } else {
-      const dampFactor = 1 - Math.exp(-8 * dt);
+      const focusSpeed = victoryCamKing ? 10 : 8;
+      const dampFactor = 1 - Math.exp(-focusSpeed * dt);
       this.currentCamFocus.lerp(_camTarget, dampFactor);
     }
 
@@ -1911,7 +2310,62 @@ export class ArenaScene3D {
       this.currentCamFocus.z + this.camOffset.z * zoomScale
     );
 
-    if (deathCamActive && deathCam) {
+    if (victoryCamKing && this.keliKingVictoryState) {
+      // 3.0s Keli King Victory Camera Choreography:
+      // 0.0–0.4s center | 0.4–1.2s zoom closer | 1.2–2.0s victory pose & roar | 2.0–3.0s pull back to full Keli King
+      const vt = this.keliKingVictoryState.elapsed;
+      const smoothstep = (u: number) => {
+        const c = Math.max(0, Math.min(1, u));
+        return c * c * (3 - 2 * c);
+      };
+      const aspect = this.camera.aspect || 1.6;
+      // Preserve full character framing (head, whiskers, raised fists, tail, feet) on portrait mobile & wide desktop
+      const closeZoom = this.reducedMotion
+        ? aspect < 0.9
+          ? 0.96
+          : 0.9
+        : aspect < 0.85
+          ? 0.88
+          : aspect < 1.1
+            ? 0.82
+            : 0.74;
+      const endZoom = this.reducedMotion
+        ? 0.98
+        : aspect < 0.85
+          ? 0.98
+          : 0.92;
+
+      let zoomMult = 1.0;
+      let heroLift = 0;
+      if (vt < 0.4) {
+        const u = smoothstep(vt / 0.4);
+        zoomMult = 1.0;
+        heroLift = u * 1.1;
+      } else if (vt < 1.2) {
+        const u = smoothstep((vt - 0.4) / 0.8);
+        zoomMult = 1.0 + (closeZoom - 1.0) * u;
+        heroLift = 1.1 + u * 1.3;
+      } else if (vt < 2.0) {
+        zoomMult = closeZoom;
+        heroLift = 2.4;
+      } else {
+        const u = smoothstep((vt - 2.0) / 1.0);
+        zoomMult = closeZoom + (endZoom - closeZoom) * u;
+        heroLift = 2.4 - u * 0.5;
+      }
+
+      const elevOffset = this.reducedMotion ? 0 : (1 - zoomMult) * 10.5;
+      const kingLookY = victoryCamKing.isOnShore
+        ? getElevationAt(victoryCamKing.x, victoryCamKing.z) + heroLift
+        : heroLift;
+
+      _camDesiredLook.set(this.currentCamFocus.x, kingLookY, this.currentCamFocus.z);
+      _camDesiredPos.set(
+        this.currentCamFocus.x + this.camOffset.x * zoomScale * zoomMult,
+        Math.max(15, this.camOffset.y * zoomScale * zoomMult - elevOffset),
+        this.currentCamFocus.z + this.camOffset.z * zoomScale * zoomMult
+      );
+    } else if (deathCamActive && deathCam) {
       const dur = Math.max(0.01, deathCam.duration);
       const progress = Math.max(0, Math.min(1, 1 - deathCam.remaining / dur));
 
@@ -1961,7 +2415,7 @@ export class ArenaScene3D {
       _camDesiredLook.lerp(_deathCamLook, cinematicBlend);
     }
 
-    const posDamp = 1 - Math.exp((deathCamActive ? -9.5 : -14) * dt);
+    const posDamp = 1 - Math.exp((victoryCamKing ? -7.5 : deathCamActive ? -9.5 : -14) * dt);
     this.currentCamPos.lerp(_camDesiredPos, posDamp);
     this.currentCamLook.lerp(_camDesiredLook, posDamp);
 
@@ -1984,7 +2438,11 @@ export class ArenaScene3D {
     let shakeRoll = 0;
     if (!this.reducedMotion) {
       this.shakeClock += dt;
-      const trauma = Math.min(1, Math.max(0, sim.cameraShake));
+      const roarShake =
+        this.keliKingVictoryState && this.keliKingVictoryState.shakeTimer > 0
+          ? Math.min(1, this.keliKingVictoryState.shakeTimer / 0.32) * 0.68
+          : 0;
+      const trauma = Math.min(1, Math.max(0, sim.cameraShake, roarShake));
       const traumaSq = trauma * trauma;
       if (traumaSq > 0.002 || Math.abs(this.impulseOffsetX) > 0.01 || Math.abs(this.impulseOffsetZ) > 0.01) {
         const t = this.shakeClock;
@@ -2046,13 +2504,16 @@ export class ArenaScene3D {
       );
     }
 
-    this.activeFeedingCarcassIds.clear();
+    this.activeFeedingCounts.clear();
     const activeIds = new Set<string>();
     for (const k of sim.kelis) {
       if (!k.alive) continue;
       activeIds.add(k.id);
       if (k.feedingTargetId) {
-        this.activeFeedingCarcassIds.add(k.feedingTargetId);
+        this.activeFeedingCounts.set(
+          k.feedingTargetId,
+          (this.activeFeedingCounts.get(k.feedingTargetId) ?? 0) + 1
+        );
       }
 
       let vis = this.actorPool.get(k.id);
@@ -2068,19 +2529,41 @@ export class ArenaScene3D {
       else if (facingCos > 0.15) vis.facingLeft = false;
       const isNorth = facingSin < -0.45;
 
-      // Advance authoritative frame-by-frame sprite animation (6x4 grid per evolution phase)
+      // Advance authoritative frame-by-frame sprite animation (6x4 grid for Lv.1-99, 6x2 Keli King sheet at Lv.100)
       const anim = advanceActorAnim(vis.animState, k, visualDt, this.reducedMotion);
-      const sheetMeta = getSpriteSheetMeta(anim.phase);
 
-      if (anim.phaseChanged) {
-        const nextTex = this.spriteAtlases.getTexture(anim.phase);
-        if (vis.spriteMat.map !== nextTex) {
-          vis.spriteMat.map = nextTex;
-          vis.spriteMat.needsUpdate = true;
-        }
+      // Synchronize Frame 4 victory roar audio, shockwave, and triumphant camera shake once
+      if (
+        anim.isKeliKing &&
+        anim.keliKingRoarJustTriggered &&
+        this.keliKingVictoryState &&
+        this.keliKingVictoryState.kingId === k.id &&
+        !this.keliKingVictoryState.roarFired
+      ) {
+        this.keliKingVictoryState.roarFired = true;
+        this.keliKingVictoryState.shockwaveAge = 0;
+        this.keliKingVictoryState.shakeTimer = this.reducedMotion ? 0 : 0.32;
+        soundEngine.playKeliKingRoar();
       }
-      if (anim.frameChanged) {
-        applyFrameUVsToGeometry(vis.spriteGeo, anim.phase, anim.row, anim.col);
+
+      const sheetMeta = anim.isKeliKing
+        ? KELI_KING_SHEET_META
+        : getSpriteSheetMeta(anim.phase);
+
+      const nextTex = anim.isKeliKing
+        ? this.spriteAtlases.getKeliKingTexture()
+        : this.spriteAtlases.getTexture(anim.phase);
+      const textureSwitched = vis.spriteMat.map !== nextTex;
+      if (textureSwitched) {
+        vis.spriteMat.map = nextTex;
+        vis.spriteMat.needsUpdate = true;
+      }
+      if (anim.frameChanged || textureSwitched) {
+        if (anim.isKeliKing) {
+          applyKeliKingFrameUVsToGeometry(vis.spriteGeo, anim.row, anim.col);
+        } else {
+          applyFrameUVsToGeometry(vis.spriteGeo, anim.phase, anim.row, anim.col);
+        }
       }
 
       const hitTintHex =
@@ -2091,8 +2574,9 @@ export class ArenaScene3D {
             : k.lastHitKind === 'stun'
               ? 0xfde68a
               : 0xff9988;
-      const tintHex =
-        k.hitFlashTimer > 0
+      const tintHex = anim.isKeliKing
+        ? 0xffffff
+        : k.hitFlashTimer > 0
           ? hitTintHex
           : k.evadeTimer > 0
             ? 0xa5f3fc
@@ -2103,8 +2587,9 @@ export class ArenaScene3D {
                 : isNorth
                   ? 0xe2ebf0
                   : 0xffffff;
-      const spriteOpacity =
-        k.veilTimer > 0 && !k.isPlayer
+      const spriteOpacity = anim.isKeliKing
+        ? 1.0
+        : k.veilTimer > 0 && !k.isPlayer
           ? 0.35
           : k.evadeTimer > 0
             ? 0.84
@@ -2121,30 +2606,31 @@ export class ArenaScene3D {
       const renderedHeight = size3D * sheetMeta.worldHeightScale;
       const renderedWidth = renderedHeight * sheetMeta.aspect;
 
-      // Subtle whole-character combat feedback only (knockback recoil nudge + stun/stagger shudder)
+      // Subtle whole-character combat feedback only (suppressed on concluded Lv.100 Keli King)
       const motionScale = this.reducedMotion ? 0.25 : 1.0;
       let feedbackX = 0;
       let feedbackZ = 0;
-      if (k.recoilTimer > 0) {
+      if (!anim.isKeliKing && k.recoilTimer > 0) {
         const rNorm = Math.min(1, k.recoilTimer / 0.22);
         const rMag = rNorm * rNorm * Math.min(1.2, k.recoilStrength || 0.7) * 0.24 * motionScale;
         feedbackX += k.recoilDirX * rMag;
         feedbackZ += k.recoilDirZ * rMag;
       }
-      if (k.stunTimer > 0 || k.staggerTimer > 0) {
+      if (!anim.isKeliKing && (k.stunTimer > 0 || k.staggerTimer > 0)) {
         const shudderAmp = (k.staggerTimer > 0 ? 0.065 : 0.045) * motionScale;
         feedbackX += Math.sin(elapsed * 28 + k.x) * shudderAmp;
       }
 
       // 3D water submersion: Phase 1 fully aquatic Kelis submerge fully in water;
-      // Phase 2 & 3 amphibious Kelis submerge partially in water and stay 100% dry on land.
+      // Phase 2 & 3 amphibious Kelis (and Lv.100 Keli King) submerge partially in water and stay 100% dry on land.
       const elev = getElevationAt(k.x, k.z);
       const submersion = computeKeliWaterSubmersion(
         anim.phase,
         k.isOnShore,
         elev,
         renderedHeight,
-        sheetMeta.groundPadRatio
+        sheetMeta.groundPadRatio,
+        anim.isKeliKing
       );
       vis.waterUniforms.uSubmergeMode.value = submersion.shaderMode;
       vis.waterUniforms.uSubmergeBlend.value =
@@ -2170,11 +2656,20 @@ export class ArenaScene3D {
       vis.shadowMesh.renderOrder = submersion.shadowRenderOrder;
       (vis.shadowMesh.material as THREE.MeshBasicMaterial).opacity =
         submersion.mode === 'dry' ? 0.48 : 0.32;
-      vis.shadowMesh.scale.setScalar(size3D * 0.36);
+      vis.shadowMesh.scale.setScalar(size3D * (anim.isKeliKing ? 0.44 : 0.36));
       vis.ringMesh.scale.setScalar(size3D * 0.46);
       const ringMat = vis.ringMesh.material as THREE.MeshBasicMaterial;
       const runeMat = vis.runeMesh.material as THREE.MeshBasicMaterial;
-      if (k.isPlayer) {
+      if (anim.isKeliKing) {
+        // Radiant golden royal circle beneath the Level 100 Keli King
+        vis.runeMesh.visible = true;
+        const runeDiam = size3D * 1.28;
+        vis.runeMesh.scale.set(runeDiam, runeDiam, 1);
+        vis.runeMesh.rotation.z = this.reducedMotion ? 0 : elapsed * 0.28;
+        runeMat.color.setHex(0xf3d285);
+        runeMat.opacity = 0.92 + Math.sin(elapsed * 3.2) * 0.07;
+        ringMat.opacity = 0;
+      } else if (k.isPlayer) {
         // Glowing cerulean rune circle matching Plate 2 Lv.86 Awang Keli
         vis.runeMesh.visible = true;
         const runeDiam = size3D * 1.18;
@@ -2199,6 +2694,12 @@ export class ArenaScene3D {
           vis.ringMesh.scale.setScalar(size3D * 0.58);
           ringMat.color.setHex(0x38bdf8);
           ringMat.opacity = 0.62;
+        } else if (k.feedingTargetId) {
+          const feedPulse = this.reducedMotion ? 1.06 : 1.02 + Math.sin(elapsed * 8) * 0.1;
+          const contested = (this.activeFeedingCounts.get(k.feedingTargetId) ?? 0) >= 2;
+          vis.ringMesh.scale.setScalar(size3D * 0.62 * feedPulse);
+          ringMat.color.setHex(contested ? 0xfb923c : 0x4ade80);
+          ringMat.opacity = 0.72;
         } else if (k.isSpeaking) {
           const voicePulse = this.reducedMotion ? 1.1 : 1.05 + Math.sin(elapsed * 12) * 0.14;
           vis.ringMesh.scale.setScalar(size3D * 0.64 * voicePulse);
@@ -2228,6 +2729,14 @@ export class ArenaScene3D {
         vis.ringMesh.scale.setScalar(size3D * 0.56);
         ringMat.color.setHex(0x38bdf8);
         ringMat.opacity = 0.58;
+      } else if (k.feedingTargetId) {
+        // Visible disturbance ring around any actively feeding Keli so rivals spot ambush openings
+        vis.runeMesh.visible = !player.alive && k.id === focus.id;
+        const feedPulse = this.reducedMotion ? 1.06 : 1.02 + Math.sin(elapsed * 8 + k.x) * 0.1;
+        const contested = (this.activeFeedingCounts.get(k.feedingTargetId) ?? 0) >= 2;
+        vis.ringMesh.scale.setScalar(size3D * 0.62 * feedPulse);
+        ringMat.color.setHex(contested ? 0xfb923c : 0xe6b86e);
+        ringMat.opacity = 0.72;
       } else if (k.isSpeaking) {
         // Pulsing acoustic voice ring for nearby speaking multiplayer Kelis
         vis.runeMesh.visible = !player.alive && k.id === focus.id;
@@ -2265,7 +2774,10 @@ export class ArenaScene3D {
         ringMat.opacity = 0;
       }
 
-      if (k.bitePhase === 'windup' || k.bitePhase === 'strike' || k.bitePhase === 'recovery') {
+      if (
+        !anim.isKeliKing &&
+        (k.bitePhase === 'windup' || k.bitePhase === 'strike' || k.bitePhase === 'recovery')
+      ) {
         vis.biteCone.visible = true;
         // Visually matches authoritative bite range (55 + level * 0.22) * SIM_TO_3D
         const reach3D = (55 + k.level * 0.22) * SIM_TO_3D;
@@ -2291,6 +2803,14 @@ export class ArenaScene3D {
 
       this.updateActorBadge(vis, k, focus.level);
     }
+
+    // Update pooled Keli King royal victory VFX (crown light motif, golden pulse, Frame 4 shockwave, rising motes)
+    this.updateKeliKingVictoryFx(
+      victoryCamKing,
+      victoryCamKing ? this.actorPool.get(victoryCamKing.id) : undefined,
+      dt,
+      elapsed
+    );
 
     for (const [id, vis] of this.actorPool.entries()) {
       if (!activeIds.has(id)) {
@@ -2342,9 +2862,13 @@ export class ArenaScene3D {
 
       // Evolution-phase visual scale (1.0x / 1.4x / 1.8x) with gentle progressive shrink as depleted
       const dims = computeCarcassVisualScale(phase, c.mass, c.initialMass);
-      const isBeingFed = this.activeFeedingCarcassIds.has(c.id);
+      const feederCount = this.activeFeedingCounts.get(c.id) ?? 0;
+      const isBeingFed = feederCount > 0;
+      const isContested = feederCount >= 2;
       const feedTremorX =
-        isBeingFed && !this.reducedMotion ? Math.sin(elapsed * 22 + c.bobPhase) * 0.035 : 0;
+        isBeingFed && !this.reducedMotion
+          ? Math.sin(elapsed * (isContested ? 28 : 22) + c.bobPhase) * (isContested ? 0.05 : 0.035)
+          : 0;
 
       vis.spriteMesh.scale.set(dims.width, dims.height, 1);
       vis.spriteMesh.position.set(feedTremorX, -0.08, 0);
@@ -2357,34 +2881,38 @@ export class ArenaScene3D {
         : 0.5 + 0.5 * Math.sin(elapsed * glowSpec.pulseSpeed + c.bobPhase);
       const glowSpan = Math.max(dims.width, dims.height) * (1.28 + pulseWave * 0.14);
       const glowMat = vis.glowMesh.material as THREE.MeshBasicMaterial;
-      glowMat.color.setHex(glowSpec.colorHex);
+      glowMat.color.setHex(isContested ? 0xfb923c : glowSpec.colorHex);
       glowMat.opacity = glowSpec.glowOpacity * (0.78 + pulseWave * 0.22);
       vis.glowMesh.scale.set(glowSpan, glowSpan, 1);
 
       const ringMat = vis.ringMesh.material as THREE.MeshBasicMaterial;
-      ringMat.color.setHex(glowSpec.colorHex);
+      ringMat.color.setHex(isContested ? 0xfb923c : glowSpec.colorHex);
       ringMat.opacity = glowSpec.ringOpacity * (0.82 + pulseWave * 0.18);
       vis.ringMesh.scale.setScalar(dims.width * 0.48 + (pulseWave - 0.5) * 0.18);
 
-      // Restrained feeding disturbance ripple above carcass while actively consumed
+      // Restrained feeding disturbance ripple above carcass while actively consumed (faster & amber if contested)
       if (isBeingFed) {
         vis.feedRippleMesh.visible = true;
-        const cycle = this.reducedMotion ? 0.5 : (elapsed * 1.9 + c.bobPhase) % 1;
-        const ripR = dims.width * (0.32 + cycle * 0.36);
+        const speed = isContested ? 2.8 : 1.9;
+        const cycle = this.reducedMotion ? 0.5 : (elapsed * speed + c.bobPhase) % 1;
+        const ripR = dims.width * (0.34 + cycle * (isContested ? 0.48 : 0.36));
         vis.feedRippleMesh.scale.setScalar(ripR);
-        (vis.feedRippleMesh.material as THREE.MeshBasicMaterial).opacity = (1 - cycle) * 0.62;
+        const rippleMat = vis.feedRippleMesh.material as THREE.MeshBasicMaterial;
+        rippleMat.color.setHex(isContested ? 0xfb923c : 0xe0f2fe);
+        rippleMat.opacity = (1 - cycle) * (isContested ? 0.78 : 0.62);
       } else if (vis.feedRippleMesh.visible) {
         vis.feedRippleMesh.visible = false;
       }
 
-      // Occasional rising gold shimmer particles for high-value carcasses (30+ fragments)
-      const showMotes = glowSpec.shimmerParticles && !this.reducedMotion;
+      // Pooled rising shimmer particles scaled by fragment tier (0 for small, 2 subtle for medium, 6 for large 30+)
+      const activeMotes = this.reducedMotion ? 0 : glowSpec.particleCount;
       for (let i = 0; i < vis.shimmerMotes.length; i++) {
         const mote = vis.shimmerMotes[i];
-        mote.visible = showMotes;
-        if (!showMotes) continue;
-        const life = (elapsed * 0.65 + i * 0.25 + c.bobPhase * 0.31) % 1;
-        const angle = c.bobPhase + i * 1.57 + life * 0.9;
+        const show = i < activeMotes;
+        mote.visible = show;
+        if (!show) continue;
+        const life = (elapsed * (glowSpec.tier === 'high' ? 0.7 : 0.5) + i / Math.max(1, activeMotes) + c.bobPhase * 0.31) % 1;
+        const angle = c.bobPhase + i * 1.15 + life * 0.9;
         const orbitR = dims.width * (0.22 + (i % 2) * 0.12);
         mote.position.set(
           Math.cos(angle) * orbitR,
@@ -2392,10 +2920,22 @@ export class ArenaScene3D {
           Math.sin(angle) * orbitR * 0.5
         );
         mote.quaternion.copy(this.camera.quaternion);
-        const moteScale = (0.42 + (i % 2) * 0.18) * (1 - life * 0.35);
+        const moteScale = (glowSpec.tier === 'high' ? 0.44 : 0.32) * (1 - life * 0.35);
         mote.scale.set(moteScale, moteScale, 1);
         const fade = life < 0.2 ? life / 0.2 : life > 0.72 ? (1 - life) / 0.28 : 1;
-        (mote.material as THREE.MeshBasicMaterial).opacity = fade * 0.85;
+        const moteMat = mote.material as THREE.MeshBasicMaterial;
+        moteMat.color.setHex(glowSpec.tier === 'high' ? 0xfef08a : 0xfbbf24);
+        moteMat.opacity = fade * (glowSpec.tier === 'high' ? 0.85 : 0.55);
+      }
+
+      // Proximity fragment count badge when focus Keli is within tactical sight distance (360 sim units)
+      const distToFocus = Math.hypot(c.x - focus.x, c.z - focus.z);
+      const showBadge = distToFocus <= 360 || isBeingFed;
+      vis.badgeMesh.visible = showBadge;
+      if (showBadge) {
+        this.updateCarcassProximityBadge(vis, Math.trunc(c.mass), feederCount, glowSpec.tier);
+        vis.badgeMesh.position.set(0, dims.height + 0.55, 0);
+        vis.badgeMesh.quaternion.copy(this.camera.quaternion);
       }
 
       const elev = getElevationAt(c.x, c.z);
@@ -2412,6 +2952,8 @@ export class ArenaScene3D {
         (vis.glowMesh.material as THREE.Material).dispose();
         (vis.ringMesh.material as THREE.Material).dispose();
         (vis.feedRippleMesh.material as THREE.Material).dispose();
+        vis.badgeTex.dispose();
+        (vis.badgeMesh.material as THREE.Material).dispose();
         for (let i = 0; i < vis.shimmerMotes.length; i++) {
           (vis.shimmerMotes[i].material as THREE.Material).dispose();
         }
@@ -2654,6 +3196,11 @@ export class ArenaScene3D {
     }
     this.calloutPool.clear();
 
+    for (const [, vis] of this.carcassPool.entries()) {
+      vis.badgeTex.dispose();
+    }
+    this.carcassPool.clear();
+
     for (let i = 0; i < this.envSprites.length; i++) {
       this.envSprites[i].dispose();
     }
@@ -2662,6 +3209,8 @@ export class ArenaScene3D {
     this.spriteAtlases?.dispose();
     this.arenaTextures?.dispose();
     this.statusIconCache?.dispose();
+    this.keliKingCrownTex?.dispose();
+    this.keliKingBaseGlowTex?.dispose();
     this.sharedQuadGeo.dispose();
     this.sharedRingGeo.dispose();
     this.sharedDiscGeo.dispose();

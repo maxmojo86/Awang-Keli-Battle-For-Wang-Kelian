@@ -473,7 +473,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         finishedSent = true;
         soundEngine.stopAmbient();
         if (snap.matchResult.status === 'victory') {
-          const delayMs = settingsRef.current.reducedMotion ? 1850 : 2350;
+          const delayMs = settingsRef.current.reducedMotion ? 2000 : 3000;
           victoryTimeoutId = window.setTimeout(() => {
             finishWithReplay(snap);
           }, delayMs);
@@ -1084,6 +1084,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         onComplete={() => setEvolutionEvent(null)}
       />
 
+      {/* Restrained Keli King Victory Screen-Space Golden Glow (non-blocking, preserves sprite visibility) */}
+      {hud?.matchResult.status === 'victory' && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-20 transition-opacity duration-500"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 48%, rgba(255, 224, 130, 0.0) 34%, rgba(212, 166, 78, 0.16) 76%, rgba(164, 114, 34, 0.30) 100%)',
+          }}
+        />
+      )}
+
       {contextLost && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#091117]/95 p-6 text-center">
           <div className="compendium-plaque max-w-sm space-y-3 rounded-sm p-6">
@@ -1690,19 +1702,53 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             )}
 
             {p.feedingTargetName && p.feedingDuration > 0 && (
-              <div className={`compendium-plaque rounded-sm text-center ${isCompactMode ? 'w-36 px-2 py-1' : 'w-60 px-3 py-2'}`}>
-                <div className={`${isCompactMode ? 'text-[9.5px] mb-0.5' : 'text-[11px] mb-1'} font-medium text-[#f3d285] truncate`}>
-                  {isCompactMode ? p.feedingTargetName : `Consuming ${p.feedingTargetName}`}
+              <div
+                className={`compendium-plaque rounded-sm text-center ${
+                  isCompactMode ? 'w-44 px-2 py-1' : 'w-68 px-3 py-2'
+                } ${p.feedingContested ? 'border-[#fb923c]' : ''}`}
+              >
+                <div className="flex items-center justify-between gap-1.5 mb-0.5">
+                  <span
+                    className={`${
+                      isCompactMode ? 'text-[9.5px]' : 'text-[11px]'
+                    } font-medium ${
+                      p.feedingContested ? 'text-[#fdba74]' : 'text-[#f3d285]'
+                    } truncate`}
+                  >
+                    {p.feedingWindupDone
+                      ? isCompactMode
+                        ? p.feedingTargetName
+                        : `Consuming ${p.feedingTargetName}`
+                      : `Locking ${p.feedingTargetName}`}
+                  </span>
+                  {p.feedingContested ? (
+                    <span className="text-[9px] font-mono-num font-bold uppercase tracking-wider text-[#fb923c] shrink-0">
+                      CONTESTED
+                    </span>
+                  ) : (p.feedingSessionFragments ?? 0) > 0 ? (
+                    <span className="text-[9.5px] font-mono-num font-semibold text-[#4ade80] shrink-0">
+                      +{p.feedingSessionFragments}
+                    </span>
+                  ) : null}
                 </div>
                 <div className={`compendium-track ${isCompactMode ? 'h-1.5' : 'h-2'} rounded-[2px] overflow-hidden`}>
                   <div
-                    className="h-full"
+                    className="h-full transition-[width] duration-75"
                     style={{
                       width: `${Math.min(100, (p.feedingProgress / p.feedingDuration) * 100)}%`,
-                      background: 'linear-gradient(90deg, #059669, #4ade80)',
+                      background: p.feedingContested
+                        ? 'linear-gradient(90deg, #ea580c, #fbbf24)'
+                        : p.feedingWindupDone
+                        ? 'linear-gradient(90deg, #059669, #4ade80)'
+                        : 'linear-gradient(90deg, #b45309, #f59e0b)',
                     }}
                   />
                 </div>
+                {!isCompactMode && (
+                  <div className="text-[9.5px] text-[#94a3b8] mt-0.5">
+                    Move away or Evade to cancel
+                  </div>
+                )}
               </div>
             )}
 
@@ -2540,40 +2586,89 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 );
               })()}
 
-              <button
-                type="button"
-                data-mobile-control="true"
-                onPointerDown={handleMobileBiteDown}
-                onPointerUp={handleMobileBiteUp}
-                onPointerCancel={handleMobileBiteUp}
-                onClick={(e) => {
-                  if (e.detail === 0) {
-                    soundEngine.startAmbient();
-                    dispatchAbility('bite');
-                  }
-                }}
-                aria-label="Bite and Feed"
-                className={`pointer-events-auto absolute right-3 rounded-full border-2 flex flex-col items-center justify-center gap-0.5 touch-none select-none shadow-2xl transition-transform ${
-                  canPlaceControlsBesideBar ? 'bottom-2.5' : 'bottom-16'
-                } ${isCompactMode ? 'w-[72px] h-[72px]' : 'w-20 h-20'} ${
-                  bitePressed
-                    ? 'scale-95 border-[#f3d285] bg-gradient-to-b from-[#7f1d1d] to-[#3f0f12] text-[#fef3c7]'
-                    : p.hasPreyInRange
-                    ? 'border-[#ef4444] bg-gradient-to-b from-[#451418] to-[#1a0b0e] text-[#fecaca]'
-                    : p.hasCarcassInRange
-                    ? 'border-[#4ade80] bg-gradient-to-b from-[#133827] to-[#0a1d15] text-[#bbf7d0]'
-                    : 'compendium-medallion text-[#f7f2e7]'
-                }`}
-              >
-                <Swords className={`${isCompactMode ? 'w-5 h-5' : 'w-6 h-6'} pointer-events-none`} />
-                <span className={`${isCompactMode ? 'text-[9.5px]' : 'text-[10.5px]'} font-display font-semibold tracking-wide pointer-events-none leading-none`}>
-                  {p.feedingTargetName
-                    ? 'FEED'
-                    : p.hasCarcassInRange && !p.hasPreyInRange
-                    ? 'FEED'
-                    : 'BITE'}
-                </span>
-              </button>
+              {(() => {
+                const isFeedingNow = Boolean(p.feedingTargetName && p.feedingDuration > 0);
+                const feedRatio = isFeedingNow
+                  ? Math.min(1, Math.max(0, p.feedingProgress / p.feedingDuration))
+                  : 0;
+                const feedRecovering = (p.feedingRecoveryTimeLeft ?? 0) > 0.02;
+                const showFeedMode =
+                  isFeedingNow || (p.hasCarcassInRange && !p.hasPreyInRange);
+                const ringCircumference = 2 * Math.PI * 34;
+                const displayMass = isFeedingNow
+                  ? p.feedingTargetMass ?? 0
+                  : p.nearbyCarcassMass ?? 0;
+                return (
+                  <button
+                    type="button"
+                    data-mobile-control="true"
+                    onPointerDown={handleMobileBiteDown}
+                    onPointerUp={handleMobileBiteUp}
+                    onPointerCancel={handleMobileBiteUp}
+                    onClick={(e) => {
+                      if (e.detail === 0) {
+                        soundEngine.startAmbient();
+                        dispatchAbility('bite');
+                      }
+                    }}
+                    aria-label="Bite and Feed"
+                    className={`pointer-events-auto absolute right-3 rounded-full border-2 flex flex-col items-center justify-center gap-0.5 touch-none select-none shadow-2xl transition-transform ${
+                      canPlaceControlsBesideBar ? 'bottom-2.5' : 'bottom-16'
+                    } ${isCompactMode ? 'w-[72px] h-[72px]' : 'w-20 h-20'} ${
+                      isFeedingNow
+                        ? p.feedingContested
+                          ? 'scale-95 border-[#fb923c] bg-gradient-to-b from-[#5c2308] to-[#230e04] text-[#fed7aa]'
+                          : 'scale-95 border-[#4ade80] bg-gradient-to-b from-[#134e31] to-[#082416] text-[#dcfce7]'
+                        : bitePressed
+                        ? 'scale-95 border-[#f3d285] bg-gradient-to-b from-[#7f1d1d] to-[#3f0f12] text-[#fef3c7]'
+                        : feedRecovering && p.hasCarcassInRange && !p.hasPreyInRange
+                        ? 'border-[#f59e0b]/70 bg-gradient-to-b from-[#332208] to-[#1a1104] text-[#fde68a]'
+                        : p.hasPreyInRange
+                        ? 'border-[#ef4444] bg-gradient-to-b from-[#451418] to-[#1a0b0e] text-[#fecaca]'
+                        : p.hasCarcassInRange
+                        ? 'border-[#4ade80] bg-gradient-to-b from-[#133827] to-[#0a1d15] text-[#bbf7d0]'
+                        : 'compendium-medallion text-[#f7f2e7]'
+                    }`}
+                  >
+                    {isFeedingNow && (
+                      <svg
+                        viewBox="0 0 76 76"
+                        className="pointer-events-none absolute -inset-[3px] w-[calc(100%+6px)] h-[calc(100%+6px)] -rotate-90"
+                        aria-hidden="true"
+                      >
+                        <circle
+                          cx="38"
+                          cy="38"
+                          r="34"
+                          fill="none"
+                          stroke="rgba(15, 23, 42, 0.55)"
+                          strokeWidth="4"
+                        />
+                        <circle
+                          cx="38"
+                          cy="38"
+                          r="34"
+                          fill="none"
+                          stroke={p.feedingContested ? '#fb923c' : p.feedingWindupDone ? '#4ade80' : '#f59e0b'}
+                          strokeWidth="4"
+                          strokeLinecap="round"
+                          strokeDasharray={ringCircumference}
+                          strokeDashoffset={ringCircumference * (1 - feedRatio)}
+                        />
+                      </svg>
+                    )}
+                    <Swords className={`${isCompactMode ? 'w-5 h-5' : 'w-6 h-6'} pointer-events-none`} />
+                    <span className={`${isCompactMode ? 'text-[9.5px]' : 'text-[10.5px]'} font-display font-semibold tracking-wide pointer-events-none leading-none`}>
+                      {showFeedMode ? 'FEED' : 'BITE'}
+                    </span>
+                    {showFeedMode && displayMass > 0 && (
+                      <span className="text-[9px] font-mono-num font-bold text-[#fde68a] pointer-events-none leading-none">
+                        +{displayMass}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()}
             </>
           )}
 

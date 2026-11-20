@@ -92,6 +92,8 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     feedingTargetId: r?.feedingTargetId ?? null,
     feedingProgress: r?.feedingProgress ?? 0,
     feedingDuration: r?.feedingDuration ?? 0,
+    feedingRecoveryTimer: r?.feedingRecoveryTimer ?? 0,
+    feedingSessionFragments: r?.feedingSessionFragments ?? 0,
     cooldowns: r?.cooldowns ?? {
       evade: 0,
       dash: 0,
@@ -154,6 +156,8 @@ export class RemoteSimulationView implements RenderableSimulation {
   public cameraShake = 0;
   public damageImpulse: DamageImpulse | null = null;
   public hitStop: HitStopEvent | null = null;
+  public status: 'playing' | 'victory' | 'defeat' | 'draw' = 'playing';
+  public winnerId: string | null = null;
 
   private targetsById = new Map<string, RemoteKeliState>();
   private entityById = new Map<string, KeliEntity>();
@@ -173,6 +177,8 @@ export class RemoteSimulationView implements RenderableSimulation {
 
   public applyServerState(packet: WorldStatePacket) {
     this.latestHud = packet.hud;
+    this.status = packet.status;
+    this.winnerId = packet.hud.matchResult.winnerId ?? null;
     this.zone = packet.zone;
     this.weather = packet.weather;
     this.cameraShake = Math.max(this.cameraShake, packet.cameraShake);
@@ -269,6 +275,8 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.feedingTargetId = remote.feedingTargetId;
         ent.feedingProgress = remote.feedingProgress;
         ent.feedingDuration = remote.feedingDuration;
+        ent.feedingRecoveryTimer = remote.feedingRecoveryTimer ?? 0;
+        ent.feedingSessionFragments = remote.feedingSessionFragments ?? 0;
         ent.cooldowns = remote.cooldowns;
         ent.activeEmote = remote.activeEmote ?? null;
       }
@@ -319,6 +327,18 @@ export class RemoteSimulationView implements RenderableSimulation {
         break;
       case 'feed':
         soundEngine.playFeedComplete();
+        break;
+      case 'feed_start':
+        soundEngine.playFeedStart();
+        break;
+      case 'feed_tick':
+        soundEngine.playFeedTick();
+        break;
+      case 'feed_interrupt':
+        soundEngine.playFeedInterrupt();
+        break;
+      case 'feed_nearby':
+        soundEngine.playNearbyFeedAlert();
         break;
       case 'evolution':
         soundEngine.playEvolution();

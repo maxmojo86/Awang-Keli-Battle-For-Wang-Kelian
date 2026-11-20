@@ -465,6 +465,49 @@ export const Minimap: React.FC<MinimapProps> = ({
       ctx.restore();
     }
 
+    // Tactical large (30+ fragment) carcasses within ambush range, pulsing when actively fed on
+    if (hud.tacticalCarcasses && hud.tacticalCarcasses.length > 0 && !hud.finalFeast?.active) {
+      for (const tc of hud.tacticalCarcasses) {
+        const tx = toPxX(tc.x);
+        const ty = toPxY(tc.z);
+        ctx.save();
+        if (tc.activelyFed) {
+          const pulse = 5.5 + Math.sin(hud.matchTime * (tc.contested ? 11 : 7)) * 2.2;
+          ctx.strokeStyle = tc.contested
+            ? 'rgba(251, 146, 60, 0.85)'
+            : 'rgba(253, 224, 71, 0.72)';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(tx, ty, pulse + 1.8, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.fillStyle = tc.contested ? '#fb923c' : '#fde047';
+        ctx.strokeStyle = '#1c1204';
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - 4.4);
+        ctx.lineTo(tx + 4.4, ty);
+        ctx.lineTo(tx, ty + 4.4);
+        ctx.lineTo(tx - 4.4, ty);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        if (!compact || zoomMode === 'local') {
+          const tag = `+${tc.mass}`;
+          ctx.font = 'bold 8px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          const tw = ctx.measureText(tag).width + 4;
+          ctx.fillStyle = 'rgba(18, 12, 4, 0.88)';
+          ctx.fillRect(tx - tw * 0.5, ty - 14, tw, 9);
+          ctx.fillStyle = tc.contested ? '#fdba74' : '#fde68a';
+          ctx.fillText(tag, tx, ty - 5.5);
+        }
+        ctx.restore();
+      }
+    }
+
     if (hud.finalFeast?.active && hud.finalFeast.remainingCarcasses.length > 0) {
       const pxGuide = toPxX(hud.player.x);
       const pyGuide = toPxY(hud.player.z);

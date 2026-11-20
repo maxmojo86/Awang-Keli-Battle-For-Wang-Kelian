@@ -157,6 +157,12 @@ export interface KeliEntity {
   feedingTargetId: string | null;
   feedingProgress: number;
   feedingDuration: number;
+  feedingWindupDone?: boolean;
+  feedingTickTimer?: number;
+  feedingRecoveryTimer?: number;
+  feedingSessionFragments?: number;
+  feedingCancelHoldTimer?: number;
+  feedingFeedbackCooldown?: number;
 
   cooldowns: AbilityCooldowns;
   kills: number;
@@ -392,6 +398,14 @@ export interface HudSnapshot {
     feedingProgress: number;
     feedingDuration: number;
     feedingTargetName: string | null;
+    feedingTargetMass?: number;
+    feedingWindupDone?: boolean;
+    feedingSessionFragments?: number;
+    feedingContested?: boolean;
+    feedingCompetitorCount?: number;
+    feedingRecoveryTimeLeft?: number;
+    nearbyCarcassMass?: number | null;
+    nearbyCarcassBlockedReason?: string | null;
     cooldowns: AbilityCooldowns;
     kills: number;
     hasPreyInRange: boolean;
@@ -405,6 +419,14 @@ export interface HudSnapshot {
   weather: WeatherState;
   pickups: Array<{ id: string; kind: PickupKind; x: number; z: number; rainFed?: boolean }>;
   sonarContacts: SonarContact[];
+  tacticalCarcasses?: Array<{
+    id: string;
+    x: number;
+    z: number;
+    mass: number;
+    activelyFed: boolean;
+    contested: boolean;
+  }>;
   lastRequiredCarcass: { x: number; z: number; mass: number } | null;
   finalFeast?: FinalFeastState | null;
   offscreenIndicators: Array<{
