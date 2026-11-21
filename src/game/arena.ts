@@ -406,88 +406,269 @@ export function getCurrentVectorAt(x: number, z: number): { vx: number; vz: numb
 
 const MAX_PLAYABLE_RADIUS = scaleArenaDist(885);
 
+interface StaticCircleCollider {
+  x: number;
+  z: number;
+  radius: number;
+}
+
+const COLLIDER_CELL_SIZE = 320;
+const COLLIDER_GRID_STRIDE = Math.ceil(WORLD_SIZE / COLLIDER_CELL_SIZE) + 4;
+const COLLIDER_QUERY_PADDING = 52;
+
+function colliderCellKey(cx: number, cz: number): number {
+  return cx + 2 + (cz + 2) * COLLIDER_GRID_STRIDE;
+}
+
+// Precompute all solid circular colliders (rocks + palong wooden pilings) into a static spatial grid once at load
+// so 100-Keli movement & swept collision queries run in O(1) time with zero per-call heap allocations.
+const STATIC_COLLIDER_GRID = new Map<number, StaticCircleCollider[]>();
+
+(function buildStaticColliderGrid() {
+  const allColliders: StaticCircleCollider[] = [];
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const obs = OBSTACLES[i];
+    allColliders.push({ x: obs.x, z: obs.z, radius: obs.radius });
+  }
+  for (let i = 0; i < PALONG_GATES.length; i++) {
+    const gate = PALONG_GATES[i];
+    const cos = Math.cos(gate.angle);
+    const sin = Math.sin(gate.angle);
+    const halfW = gate.width * 0.55;
+    allColliders.push({ x: gate.x - cos * halfW, z: gate.z - sin * halfW, radius: 16 });
+    allColliders.push({ x: gate.x + cos * halfW, z: gate.z + sin * halfW, radius: 16 });
+  }
+
+  for (let i = 0; i < allColliders.length; i++) {
+    const c = allColliders[i];
+    const span = c.radius + COLLIDER_QUERY_PADDING;
+    const minCx = Math.floor((c.x - span) / COLLIDER_CELL_SIZE);
+    const maxCx = Math.floor((c.x + span) / COLLIDER_CELL_SIZE);
+    const minCz = Math.floor((c.z - span) / COLLIDER_CELL_SIZE);
+    const maxCz = Math.floor((c.z + span) / COLLIDER_CELL_SIZE);
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      for (let cz = minCz; cz <= maxCz; cz++) {
+        const key = colliderCellKey(cx, cz);
+        let bucket = STATIC_COLLIDER_GRID.get(key);
+        if (!bucket) {
+          bucket = [];
+          STATIC_COLLIDER_GRID.set(key, bucket);
+        }
+        bucket.push(c);
+      }
+    }
+  }
+})();
+
+export interface ArenaCollisionResult {
+  x: number;
+  z: number;
+  blockedByShore: boolean;
+  collided: boolean;
+  normalX: number;
+  normalZ: number;
+}
+
 /**
- * Resolves circle collision against arena cliffs, rocks, palong pillars, and shore walls (for Lv < 40).
+ * Computes the unit outward water-pointing normal along any shoreline contour using
+ * central finite differences on getElevationAt(). Works cleanly on both Tebing Kering
+ * and Boat Spit so Lv.1–39 aquatic Kelis slide tangentially without stuttering.
+ */
+function computeShoreWaterNormal(x: number, z: number): { nx: number; nz: number } {
+  const h = 8;
+  const gx = getElevationAt(x + h, z) - getElevationAt(x - h, z);
+  const gz = getElevationAt(x, z + h) - getElevationAt(x, z - h);
+  const gLen = Math.hypot(gx, gz);
+  if (gLen > 1e-5) {
+    // Downhill points back into water
+    return { nx: -gx / gLen, nz: -gz / gLen };
+  }
+  // Fallback if directly at bank crest: point away from nearest land feature
+  const bankD = Math.hypot(x - BANK_CENTER_X, z - BANK_CENTER_Z);
+  const spitD = Math.hypot(x - BOAT_SPIT_X, z - BOAT_SPIT_Z);
+  const cx = spitD < bankD * 0.45 ? BOAT_SPIT_X : BANK_CENTER_X;
+  const cz = spitD < bankD * 0.45 ? BOAT_SPIT_Z : BANK_CENTER_Z;
+  const dx = x - cx;
+  const dz = z - cz;
+  const d = Math.hypot(dx, dz);
+  if (d < 1e-4) {
+    return { nx: -1, nz: 0 };
+  }
+  return { nx: dx / d, nz: dz / d };
+}
+
+/**
+ * Resolves circle collision against arena cliffs, rocks, palong pillars, and shore walls (for Lv < 40)
+ * using up to 3 iterative constraint passes over the prebuilt static spatial grid.
+ * Returns final safe coordinates plus accumulated contact normal for smooth tangential sliding.
  */
 export function resolveArenaCollision(
   x: number,
   z: number,
   radius: number,
   canGoAshore: boolean
-): { x: number; z: number; blockedByShore: boolean } {
+): ArenaCollisionResult {
   let nx = x;
   let nz = z;
   let blockedByShore = false;
+  let collided = false;
+  let accNormalX = 0;
+  let accNormalZ = 0;
 
-  // Keep inside outer circular limestone basin
   const maxR = MAX_PLAYABLE_RADIUS - radius;
-  const dx = nx - WORLD_CENTER;
-  const dz = nz - WORLD_CENTER;
-  const d = Math.hypot(dx, dz);
-  if (d > maxR && d > 0.001) {
-    nx = WORLD_CENTER + (dx / d) * maxR;
-    nz = WORLD_CENTER + (dz / d) * maxR;
-  }
 
-  // Rock & pillar obstacles
-  for (let i = 0; i < OBSTACLES.length; i++) {
-    const obs = OBSTACLES[i];
-    const ox = nx - obs.x;
-    const oz = nz - obs.z;
-    const dist = Math.hypot(ox, oz);
-    const minDist = obs.radius + radius;
-    if (dist < minDist) {
-      if (dist > 0.001) {
-        const push = minDist - dist;
-        nx += (ox / dist) * push;
-        nz += (oz / dist) * push;
-      } else {
-        nx += minDist;
-      }
+  for (let pass = 0; pass < 3; pass++) {
+    let movedThisPass = false;
+
+    // 1. Keep inside outer circular limestone basin
+    const dx = nx - WORLD_CENTER;
+    const dz = nz - WORLD_CENTER;
+    const d = Math.hypot(dx, dz);
+    if (d > maxR && d > 0.001) {
+      const invD = 1 / d;
+      nx = WORLD_CENTER + dx * invD * maxR;
+      nz = WORLD_CENTER + dz * invD * maxR;
+      accNormalX -= dx * invD;
+      accNormalZ -= dz * invD;
+      collided = true;
+      movedThisPass = true;
     }
-  }
 
-  // Palong gate side pilings (leave wide center passage open!)
-  for (let i = 0; i < PALONG_GATES.length; i++) {
-    const gate = PALONG_GATES[i];
-    const cos = Math.cos(gate.angle);
-    const sin = Math.sin(gate.angle);
-    const halfW = gate.width * 0.55;
-    // Left and right wooden posts
-    for (const side of [-1, 1]) {
-      const px = gate.x + cos * halfW * side;
-      const pz = gate.z + sin * halfW * side;
-      const ox = nx - px;
-      const oz = nz - pz;
-      const dist = Math.hypot(ox, oz);
-      const minDist = 16 + radius;
-      if (dist < minDist) {
-        if (dist > 0.001) {
-          const push = minDist - dist;
-          nx += (ox / dist) * push;
-          nz += (oz / dist) * push;
-        } else {
-          nx += minDist;
+    // 2. Rock obstacles & Palong side pilings via O(1) static spatial grid
+    const bucket = STATIC_COLLIDER_GRID.get(
+      colliderCellKey(Math.floor(nx / COLLIDER_CELL_SIZE), Math.floor(nz / COLLIDER_CELL_SIZE))
+    );
+    if (bucket) {
+      for (let i = 0; i < bucket.length; i++) {
+        const obs = bucket[i];
+        const ox = nx - obs.x;
+        const oz = nz - obs.z;
+        const minDist = obs.radius + radius;
+        const distSq = ox * ox + oz * oz;
+        if (distSq < minDist * minDist) {
+          if (distSq > 1e-6) {
+            const dist = Math.sqrt(distSq);
+            const invDist = 1 / dist;
+            const push = minDist - dist;
+            const ux = ox * invDist;
+            const uz = oz * invDist;
+            nx += ux * push;
+            nz += uz * push;
+            accNormalX += ux;
+            accNormalZ += uz;
+          } else {
+            nx += minDist;
+            accNormalX += 1;
+          }
+          collided = true;
+          movedThisPass = true;
         }
       }
     }
+
+    // 3. Smooth contour-following shore restriction for Level 1–39 (cannot go ashore)
+    if (!canGoAshore && getTerrainAt(nx, nz) === 'shore') {
+      blockedByShore = true;
+      collided = true;
+      movedThisPass = true;
+      const shoreNorm = computeShoreWaterNormal(nx, nz);
+      accNormalX += shoreNorm.nx;
+      accNormalZ += shoreNorm.nz;
+
+      // Step smoothly downhill along local elevation gradient until cleanly in water
+      // Fine 6u steps near the waterline preserve smooth contour sliding; wider 16u steps guarantee escape from deep bank interiors
+      let prevX = nx;
+      let prevZ = nz;
+      for (let step = 0; step < 28; step++) {
+        if (getTerrainAt(nx, nz) !== 'shore') break;
+        const n = step === 0 ? shoreNorm : computeShoreWaterNormal(nx, nz);
+        const stepSize = step < 6 ? 6 : 16;
+        prevX = nx;
+        prevZ = nz;
+        nx += n.nx * stepSize;
+        nz += n.nz * stepSize;
+      }
+      // Binary refine back toward the exact shoreline edge so there is zero visible bounce/stutter
+      if (getTerrainAt(nx, nz) !== 'shore') {
+        let loX = prevX;
+        let loZ = prevZ;
+        let hiX = nx;
+        let hiZ = nz;
+        for (let b = 0; b < 4; b++) {
+          const midX = (loX + hiX) * 0.5;
+          const midZ = (loZ + hiZ) * 0.5;
+          if (getTerrainAt(midX, midZ) === 'shore') {
+            loX = midX;
+            loZ = midZ;
+          } else {
+            hiX = midX;
+            hiZ = midZ;
+          }
+        }
+        nx = hiX;
+        nz = hiZ;
+      }
+    }
+
+    if (!movedThisPass) break;
   }
 
-  // Shore restriction for Level 1–39 (cannot go ashore onto Tebing Kering)
-  if (!canGoAshore && getTerrainAt(nx, nz) === 'shore') {
-    blockedByShore = true;
-    // Push smoothly radially away from shore bank center
-    const sx = nx - BANK_CENTER_X;
-    const sz = nz - BANK_CENTER_Z;
-    const sLen = Math.hypot(sx, sz) || 1;
-    for (let step = 0; step < 12; step++) {
-      if (getTerrainAt(nx, nz) !== 'shore') break;
-      nx += (sx / sLen) * 14;
-      nz += (sz / sLen) * 14;
+  let normalX = 0;
+  let normalZ = 0;
+  const nLen = Math.hypot(accNormalX, accNormalZ);
+  if (nLen > 1e-4) {
+    normalX = accNormalX / nLen;
+    normalZ = accNormalZ / nLen;
+  }
+
+  return { x: nx, z: nz, blockedByShore, collided, normalX, normalZ };
+}
+
+/**
+ * Swept/substepped movement collision resolver so high-speed Dash, Slip Evade, or heavy
+ * knockback impulses can never tunnel through narrow pilings, boulders, or shorelines.
+ */
+export function resolveSweptMovement(
+  fromX: number,
+  fromZ: number,
+  toX: number,
+  toZ: number,
+  radius: number,
+  canGoAshore: boolean
+): ArenaCollisionResult {
+  const dx = toX - fromX;
+  const dz = toZ - fromZ;
+  const totalDist = Math.hypot(dx, dz);
+  const maxStep = Math.max(10, radius * 0.65);
+
+  if (totalDist <= maxStep) {
+    return resolveArenaCollision(toX, toZ, radius, canGoAshore);
+  }
+
+  const steps = Math.min(8, Math.ceil(totalDist / maxStep));
+  const stepDx = dx / steps;
+  const stepDz = dz / steps;
+
+  let curX = fromX;
+  let curZ = fromZ;
+  let blockedByShore = false;
+  let collided = false;
+  let normalX = 0;
+  let normalZ = 0;
+
+  for (let s = 0; s < steps; s++) {
+    const res = resolveArenaCollision(curX + stepDx, curZ + stepDz, radius, canGoAshore);
+    curX = res.x;
+    curZ = res.z;
+    if (res.blockedByShore) blockedByShore = true;
+    if (res.collided) {
+      collided = true;
+      normalX = res.normalX;
+      normalZ = res.normalZ;
     }
   }
 
-  return { x: nx, z: nz, blockedByShore };
+  return { x: curX, z: curZ, blockedByShore, collided, normalX, normalZ };
 }
 
 /**
@@ -508,22 +689,16 @@ export function isPositionAccessible(
   if (terrain === 'cliff') return false;
   if (!canGoAshore && terrain === 'shore') return false;
 
-  for (let i = 0; i < OBSTACLES.length; i++) {
-    const obs = OBSTACLES[i];
-    if (Math.hypot(x - obs.x, z - obs.z) < obs.radius + radius + 2) {
-      return false;
-    }
-  }
-
-  for (let i = 0; i < PALONG_GATES.length; i++) {
-    const gate = PALONG_GATES[i];
-    const cos = Math.cos(gate.angle);
-    const sin = Math.sin(gate.angle);
-    const halfW = gate.width * 0.55;
-    for (const side of [-1, 1]) {
-      const px = gate.x + cos * halfW * side;
-      const pz = gate.z + sin * halfW * side;
-      if (Math.hypot(x - px, z - pz) < 16 + radius + 2) {
+  const bucket = STATIC_COLLIDER_GRID.get(
+    colliderCellKey(Math.floor(x / COLLIDER_CELL_SIZE), Math.floor(z / COLLIDER_CELL_SIZE))
+  );
+  if (bucket) {
+    for (let i = 0; i < bucket.length; i++) {
+      const obs = bucket[i];
+      const minDist = obs.radius + radius + 2;
+      const ox = x - obs.x;
+      const oz = z - obs.z;
+      if (ox * ox + oz * oz < minDist * minDist) {
         return false;
       }
     }
@@ -834,6 +1009,80 @@ export function getHazardModifierForForm(
 }
 
 /**
+ * Validates that a candidate water spawn coordinate is strictly accessible water
+ * (deep or shallow, respecting Lv.1–39 shore restrictions), inside the playable basin,
+ * clear of all rock/Palong colliders via the O(1) static spatial grid, outside hazards,
+ * and possesses viable escape lanes in at least `minEscapeDirs` cardinal directions.
+ */
+export function isWaterSpawnValid(
+  x: number,
+  z: number,
+  obstacleClearance = 44,
+  minEscapeDirs = 2
+): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+  if (Math.hypot(x - WORLD_CENTER, z - WORLD_CENTER) > MAX_PLAYABLE_RADIUS - obstacleClearance - 40) {
+    return false;
+  }
+  const terrain = getTerrainAt(x, z);
+  if (terrain !== 'deep' && terrain !== 'shallow') return false;
+  if (getHazardAt(x, z)) return false;
+
+  const bucket = STATIC_COLLIDER_GRID.get(
+    colliderCellKey(Math.floor(x / COLLIDER_CELL_SIZE), Math.floor(z / COLLIDER_CELL_SIZE))
+  );
+  if (bucket) {
+    for (let i = 0; i < bucket.length; i++) {
+      const obs = bucket[i];
+      const minD = obs.radius + obstacleClearance;
+      const dx = x - obs.x;
+      const dz = z - obs.z;
+      if (dx * dx + dz * dz < minD * minD) return false;
+    }
+  }
+
+  if (minEscapeDirs > 0) {
+    const step = 76;
+    const dirs = [
+      [step, 0],
+      [-step, 0],
+      [0, step],
+      [0, -step],
+    ];
+    let openDirs = 0;
+    for (let d = 0; d < dirs.length; d++) {
+      const nx = x + dirs[d][0];
+      const nz = z + dirs[d][1];
+      const nt = getTerrainAt(nx, nz);
+      if (nt !== 'deep' && nt !== 'shallow') continue;
+      let blocked = false;
+      const nb = STATIC_COLLIDER_GRID.get(
+        colliderCellKey(Math.floor(nx / COLLIDER_CELL_SIZE), Math.floor(nz / COLLIDER_CELL_SIZE))
+      );
+      if (nb) {
+        for (let i = 0; i < nb.length; i++) {
+          const obs = nb[i];
+          const minD = obs.radius + 26;
+          const dx = nx - obs.x;
+          const dz = nz - obs.z;
+          if (dx * dx + dz * dz < minD * minD) {
+            blocked = true;
+            break;
+          }
+        }
+      }
+      if (!blocked) {
+        openDirs++;
+        if (openDirs >= minEscapeDirs) break;
+      }
+    }
+    if (openDirs < minEscapeDirs) return false;
+  }
+
+  return true;
+}
+
+/**
  * Finds a safe water spawn coordinate away from rocks, hazard tiles & Tebing Kering shore.
  */
 export function findWaterSpawn(seedIndex: number, total: number): { x: number; z: number } {
@@ -845,15 +1094,7 @@ export function findWaterSpawn(seedIndex: number, total: number): { x: number; z
 
   // Nudge out of obstacles, hazards, and shore
   for (let attempt = 0; attempt < 32; attempt++) {
-    const terrain = getTerrainAt(x, z);
-    let insideRock = false;
-    for (const obs of OBSTACLES) {
-      if (Math.hypot(x - obs.x, z - obs.z) < obs.radius + 36) {
-        insideRock = true;
-        break;
-      }
-    }
-    if ((terrain === 'deep' || terrain === 'shallow') && !insideRock && !getHazardAt(x, z)) {
+    if (isWaterSpawnValid(x, z, 36, 1)) {
       return { x, z };
     }
     const a = ringAngle + attempt * 0.45;

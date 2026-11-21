@@ -4,6 +4,7 @@ import type {
   AbilityId,
   BitePhase,
   CarcassEntity,
+  EvolutionForm,
   FloatingCallout,
   HazardTileKind,
   HitReactKind,
@@ -119,6 +120,11 @@ export interface RemoteKeliState {
   stormFinTimer: number;
   thunderRoeTimer: number;
   evoBoostTimer?: number;
+  highestFormReached?: EvolutionForm;
+  evolutionSeq?: number;
+  lastEvolutionForm?: EvolutionForm;
+  lastEvolutionTime?: number;
+  lastMinorLevelTime?: number;
   sonarTimer: number;
   sonarIsHunter: boolean;
   kills: number;
@@ -152,6 +158,11 @@ export interface ClientSfxEvent {
     | 'feed_interrupt'
     | 'feed_nearby'
     | 'evolution'
+    | 'level_up_minor'
+    | 'ability_unlock'
+    | 'evolution_form_2'
+    | 'evolution_form_3'
+    | 'evolution_king'
     | 'dash'
     | 'sonar'
     | 'hunter_sonar'

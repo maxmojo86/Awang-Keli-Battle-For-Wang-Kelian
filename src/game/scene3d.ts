@@ -13,7 +13,7 @@ import {
   threeDToSim,
   WORLD_SIZE,
 } from './arena';
-import { getMilestoneTier } from '../data/abilities';
+import { getEvolutionForm, getMilestoneTier } from '../data/abilities';
 import { getEmoteSpec } from '../data/emotes';
 import { AmbientHazardParticles } from './ambientParticles';
 import { ArenaTextureSet, createArenaTextureSet } from './arenaTextures';
@@ -31,6 +31,13 @@ import {
   resolveCarcassEvolutionPhase,
   resolveTwoFrameIndex,
 } from './environmentalSprites';
+import {
+  evaluateTransformationPhase,
+  EVOLUTION_FORM_SPECS,
+  getEvolutionVisualProfile,
+  MAJOR_TRANSFORM_DURATION_SEC,
+  MAJOR_TRANSFORM_REDUCED_DURATION_SEC,
+} from './evolutionExperience';
 import {
   ActorAnimState,
   advanceActorAnim,
@@ -57,6 +64,7 @@ import {
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
+  EvolutionForm,
   FloatingCallout,
   HitStopEvent,
   KeliEntity,
@@ -100,8 +108,11 @@ const _skyClear = new THREE.Color(0x162b35);
 const _skyRain = new THREE.Color(0x10222c);
 const _skyFog = new THREE.Color(0x283e46);
 const _workSky = new THREE.Color();
+const _evoColor = new THREE.Color();
 const RAIN_COUNT = 360;
 const SPLASH_COUNT = 26;
+const EVO_MOTE_POOL_SIZE = 96;
+const EVO_RING_POOL_SIZE = 16;
 
 interface ActorVisual {
   group: THREE.Group;
@@ -122,6 +133,14 @@ interface ActorVisual {
   badgeTex: THREE.CanvasTexture;
   badgeCtx: CanvasRenderingContext2D;
   lastBadgeKey: string;
+  // Non-blocking transformation & progressive growth presentation state
+  lastObservedForm: EvolutionForm;
+  lastObservedLevel: number;
+  transformForm: EvolutionForm | null;
+  transformElapsed: number;
+  minorPulseTimer: number;
+  prevSize3D: number;
+  scaleBlendTimer: number;
 }
 
 interface CarcassVisual {
@@ -257,6 +276,33 @@ export class ArenaScene3D {
     phase: number;
     maxH: number;
   }> = [];
+
+  // Pooled, offscreen-culled evolution transformation VFX (zero per-frame allocations)
+  private evoMoteGeo!: THREE.SphereGeometry;
+  private evoMoteMat!: THREE.MeshBasicMaterial;
+  private evoMoteMesh!: THREE.InstancedMesh;
+  private evoMotePos = new Float32Array(EVO_MOTE_POOL_SIZE * 3);
+  private evoMoteVel = new Float32Array(EVO_MOTE_POOL_SIZE * 3);
+  private evoMoteLife = new Float32Array(EVO_MOTE_POOL_SIZE);
+  private evoMoteMaxLife = new Float32Array(EVO_MOTE_POOL_SIZE);
+  private evoMoteBaseScale = new Float32Array(EVO_MOTE_POOL_SIZE);
+  private evoMoteCursor = 0;
+  private evoRingPool: Array<{
+    mesh: THREE.Mesh;
+    mat: THREE.MeshBasicMaterial;
+    active: boolean;
+    x: number;
+    y: number;
+    z: number;
+    startR: number;
+    endR: number;
+    age: number;
+    maxAge: number;
+    baseOpacity: number;
+  }> = [];
+  private activeLocalTransformZoomDelta = 0;
+  private activeLocalTransformLightBoost = 0;
+  private activeLocalTransformShake = 0;
 
   constructor(
     container: HTMLElement,
@@ -487,6 +533,192 @@ export class ArenaScene3D {
         phase: (i / 12),
         maxH: 5.5 + (i % 3) * 2.2,
       });
+    }
+
+    // 6. Pooled evolution transformation particles & water-displacement rings (zero runtime GC)
+    this.evoMoteGeo = new THREE.SphereGeometry(0.24, 6, 5);
+    this.evoMoteMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.88,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.evoMoteMesh = new THREE.InstancedMesh(
+      this.evoMoteGeo,
+      this.evoMoteMat,
+      EVO_MOTE_POOL_SIZE
+    );
+    this.evoMoteMesh.frustumCulled = false;
+    this.evoMoteMesh.renderOrder = 8;
+    _dummy.position.set(0, -100, 0);
+    _dummy.scale.setScalar(0.0001);
+    _dummy.updateMatrix();
+    for (let i = 0; i < EVO_MOTE_POOL_SIZE; i++) {
+      this.evoMoteMesh.setMatrixAt(i, _dummy.matrix);
+      this.evoMoteMesh.setColorAt(i, _evoColor.setHex(0x7dd3fc));
+      this.evoMoteLife[i] = 0;
+      this.evoMoteMaxLife[i] = 1;
+    }
+    this.evoMoteMesh.instanceMatrix.needsUpdate = true;
+    if (this.evoMoteMesh.instanceColor) this.evoMoteMesh.instanceColor.needsUpdate = true;
+    this.scene.add(this.evoMoteMesh);
+
+    for (let i = 0; i < EVO_RING_POOL_SIZE; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xf3d285,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sharedRingGeo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.visible = false;
+      mesh.renderOrder = 7;
+      this.scene.add(mesh);
+      this.evoRingPool.push({
+        mesh,
+        mat,
+        active: false,
+        x: 0,
+        y: 0.2,
+        z: 0,
+        startR: 1,
+        endR: 6,
+        age: 0,
+        maxAge: 0.7,
+        baseOpacity: 0.75,
+      });
+    }
+  }
+
+  private spawnEvolutionMoteBurst(
+    x3d: number,
+    y3d: number,
+    z3d: number,
+    rawCount: number,
+    colorHex: number,
+    radialSpeed: number,
+    riseSpeed: number,
+    maxLife: number,
+    baseScale = 1
+  ) {
+    // Offscreen / distant culling for 100-Keli matches
+    const dx = x3d - this.currentCamFocus.x;
+    const dz = z3d - this.currentCamFocus.z;
+    if (dx * dx + dz * dz > 44 * 44) return;
+
+    const profile = getEvolutionVisualProfile(this.reducedMotion);
+    const count = Math.max(1, Math.round(rawCount * profile.particleScale));
+    _evoColor.setHex(colorHex);
+
+    for (let i = 0; i < count; i++) {
+      const idx = this.evoMoteCursor;
+      this.evoMoteCursor = (this.evoMoteCursor + 1) % EVO_MOTE_POOL_SIZE;
+      const angle = (i / count) * Math.PI * 2 + (idx % 7) * 0.27;
+      const jitter = 0.65 + ((idx * 17) % 10) * 0.06;
+      const p3 = idx * 3;
+      this.evoMotePos[p3] = x3d + Math.cos(angle) * 0.65;
+      this.evoMotePos[p3 + 1] = y3d + 0.35 + (idx % 3) * 0.25;
+      this.evoMotePos[p3 + 2] = z3d + Math.sin(angle) * 0.65;
+      this.evoMoteVel[p3] = Math.cos(angle) * radialSpeed * jitter;
+      this.evoMoteVel[p3 + 1] = riseSpeed * (0.7 + ((idx * 13) % 10) * 0.06);
+      this.evoMoteVel[p3 + 2] = Math.sin(angle) * radialSpeed * jitter;
+      this.evoMoteMaxLife[idx] = maxLife * (0.78 + (idx % 5) * 0.09);
+      this.evoMoteLife[idx] = this.evoMoteMaxLife[idx];
+      this.evoMoteBaseScale[idx] = baseScale * (0.75 + (idx % 4) * 0.22);
+      this.evoMoteMesh.setColorAt(idx, _evoColor);
+    }
+    if (this.evoMoteMesh.instanceColor) {
+      this.evoMoteMesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  private spawnEvolutionRing(
+    x3d: number,
+    y3d: number,
+    z3d: number,
+    startR: number,
+    endR: number,
+    maxAge: number,
+    colorHex: number,
+    baseOpacity = 0.78
+  ) {
+    const dx = x3d - this.currentCamFocus.x;
+    const dz = z3d - this.currentCamFocus.z;
+    if (dx * dx + dz * dz > 46 * 46) return;
+
+    let slot = this.evoRingPool.find((r) => !r.active);
+    if (!slot) {
+      // Recycle oldest ring if pool saturated
+      slot = this.evoRingPool.reduce((oldest, cur) => (cur.age > oldest.age ? cur : oldest));
+    }
+    slot.active = true;
+    slot.x = x3d;
+    slot.y = y3d;
+    slot.z = z3d;
+    slot.startR = startR;
+    slot.endR = endR;
+    slot.age = 0;
+    slot.maxAge = Math.max(0.15, maxAge);
+    slot.baseOpacity = this.reducedMotion ? baseOpacity * 0.6 : baseOpacity;
+    slot.mat.color.setHex(colorHex);
+    slot.mat.opacity = slot.baseOpacity;
+    slot.mesh.position.set(x3d, y3d, z3d);
+    slot.mesh.scale.setScalar(startR);
+    slot.mesh.visible = true;
+  }
+
+  private updateEvolutionVfxPool(dt: number) {
+    let anyMoteDirty = false;
+    for (let i = 0; i < EVO_MOTE_POOL_SIZE; i++) {
+      const life = this.evoMoteLife[i];
+      if (life <= 0) continue;
+      anyMoteDirty = true;
+      const nextLife = Math.max(0, life - dt);
+      this.evoMoteLife[i] = nextLife;
+      const p3 = i * 3;
+      if (nextLife <= 0) {
+        _dummy.position.set(0, -100, 0);
+        _dummy.scale.setScalar(0.0001);
+        _dummy.updateMatrix();
+        this.evoMoteMesh.setMatrixAt(i, _dummy.matrix);
+        continue;
+      }
+      const drag = Math.exp(-2.4 * dt);
+      this.evoMoteVel[p3] *= drag;
+      this.evoMoteVel[p3 + 2] *= drag;
+      this.evoMotePos[p3] += this.evoMoteVel[p3] * dt;
+      this.evoMotePos[p3 + 1] += this.evoMoteVel[p3 + 1] * dt;
+      this.evoMotePos[p3 + 2] += this.evoMoteVel[p3 + 2] * dt;
+
+      const u = nextLife / Math.max(0.01, this.evoMoteMaxLife[i]);
+      const sc = this.evoMoteBaseScale[i] * Math.sin(u * Math.PI) * 1.15;
+      _dummy.position.set(this.evoMotePos[p3], this.evoMotePos[p3 + 1], this.evoMotePos[p3 + 2]);
+      _dummy.scale.setScalar(Math.max(0.001, sc));
+      _dummy.updateMatrix();
+      this.evoMoteMesh.setMatrixAt(i, _dummy.matrix);
+    }
+    if (anyMoteDirty) {
+      this.evoMoteMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    for (let i = 0; i < EVO_RING_POOL_SIZE; i++) {
+      const slot = this.evoRingPool[i];
+      if (!slot.active) continue;
+      slot.age += dt;
+      if (slot.age >= slot.maxAge) {
+        slot.active = false;
+        slot.mesh.visible = false;
+        continue;
+      }
+      const t = slot.age / slot.maxAge;
+      const eased = 1 - Math.pow(1 - t, 2.4);
+      const r = slot.startR + (slot.endR - slot.startR) * eased;
+      slot.mesh.scale.setScalar(r);
+      slot.mat.opacity = (1 - t) * (1 - t) * slot.baseOpacity;
     }
   }
 
@@ -1433,6 +1665,13 @@ export class ArenaScene3D {
       badgeTex,
       badgeCtx,
       lastBadgeKey: '',
+      lastObservedForm: 1,
+      lastObservedLevel: 1,
+      transformForm: null,
+      transformElapsed: 0,
+      minorPulseTimer: 0,
+      prevSize3D: 2.9,
+      scaleBlendTimer: 0,
     };
   }
 
@@ -2056,18 +2295,18 @@ export class ArenaScene3D {
     (this.scene.background as THREE.Color).copy(fog.color);
 
     const targetKeyInt =
-      kind === 'basin_fog'
+      (kind === 'basin_fog'
         ? 1.72 - intensity * 0.56
         : kind === 'light_rain'
           ? 1.72 - intensity * 0.44
-          : 1.72;
+          : 1.72) + this.activeLocalTransformLightBoost;
     const targetHemiInt =
       kind === 'basin_fog'
         ? 1.08 + intensity * 0.14
         : kind === 'light_rain'
           ? 1.08 - intensity * 0.16
           : 1.08;
-    this.keyLight.intensity = THREE.MathUtils.damp(this.keyLight.intensity, targetKeyInt, 2.5, dt);
+    this.keyLight.intensity = THREE.MathUtils.damp(this.keyLight.intensity, targetKeyInt, 6.0, dt);
     this.hemiLight.intensity = THREE.MathUtils.damp(this.hemiLight.intensity, targetHemiInt, 2.5, dt);
 
     const cx = this.currentCamFocus.x;
@@ -2259,6 +2498,13 @@ export class ArenaScene3D {
         shakeTimer: 0,
       };
       soundEngine.playKeliKingAscension();
+      // Initial royal water-ripple & rising golden fragment burst upon reuniting all 100 fragments
+      const kx = simTo3D(livingKeliKing.x);
+      const kz = simTo3D(livingKeliKing.z);
+      const ky = livingKeliKing.isOnShore ? getElevationAt(livingKeliKing.x, livingKeliKing.z) + 0.18 : 0.2;
+      this.spawnEvolutionRing(kx, ky, kz, 2.2, 16.5, 1.1, 0xfde68a, 0.85);
+      this.spawnEvolutionRing(kx, ky + 0.04, kz, 1.4, 11.2, 0.85, 0xf59e0b, 0.72);
+      this.spawnEvolutionMoteBurst(kx, ky, kz, 28, 0xfde68a, 7.2, 6.4, 1.35, 1.35);
     } else if (this.keliKingVictoryState) {
       this.keliKingVictoryState.elapsed += dt;
       if (this.keliKingVictoryState.shakeTimer > 0) {
@@ -2285,7 +2531,11 @@ export class ArenaScene3D {
 
     const targetCamX = simTo3D(focus.x);
     const targetCamZ = simTo3D(focus.z);
-    const zoomScale = 1 + (focus.level / 100) * 0.25;
+    const baseZoomScale = 1 + (focus.level / 100) * 0.25;
+    const zoomScale = Math.max(
+      0.86,
+      baseZoomScale * (1 + (victoryCamKing ? 0 : this.activeLocalTransformZoomDelta))
+    );
     _camTarget.set(targetCamX, 0, targetCamZ);
 
     if (!this.cameraInitialized) {
@@ -2442,7 +2692,10 @@ export class ArenaScene3D {
         this.keliKingVictoryState && this.keliKingVictoryState.shakeTimer > 0
           ? Math.min(1, this.keliKingVictoryState.shakeTimer / 0.32) * 0.68
           : 0;
-      const trauma = Math.min(1, Math.max(0, sim.cameraShake, roarShake));
+      const trauma = Math.min(
+        1,
+        Math.max(0, sim.cameraShake, roarShake, this.activeLocalTransformShake)
+      );
       const traumaSq = trauma * trauma;
       if (traumaSq > 0.002 || Math.abs(this.impulseOffsetX) > 0.01 || Math.abs(this.impulseOffsetZ) > 0.01) {
         const t = this.shakeClock;
@@ -2505,6 +2758,21 @@ export class ArenaScene3D {
     }
 
     this.activeFeedingCounts.clear();
+    let nextLocalTransformZoom = 0;
+    let nextLocalTransformLight = 0;
+    let nextLocalTransformShake = 0;
+    if (this.keliKingVictoryState) {
+      const vt = this.keliKingVictoryState.elapsed;
+      const kingLightEnv =
+        vt < 2.2
+          ? Math.sin(Math.min(1, vt / 2.2) * Math.PI) * 0.52
+          : Math.max(0, 1 - (vt - 2.2) / 1.4) * 0.14;
+      nextLocalTransformLight = Math.max(
+        nextLocalTransformLight,
+        kingLightEnv * getEvolutionVisualProfile(this.reducedMotion).lightFlashScale
+      );
+    }
+
     const activeIds = new Set<string>();
     for (const k of sim.kelis) {
       if (!k.alive) continue;
@@ -2517,12 +2785,113 @@ export class ArenaScene3D {
       }
 
       let vis = this.actorPool.get(k.id);
+      const isNewVis = !vis;
       if (!vis) {
         vis = this.createActorVisual();
+        vis.lastObservedForm = getEvolutionForm(k.level);
+        vis.lastObservedLevel = Math.trunc(k.level);
+        const initTier = getMilestoneTier(k.level);
+        const initTierStep = initTier >= 100 ? 1.55 : initTier >= 80 ? 0.95 : initTier >= 40 ? 0.45 : 0;
+        vis.prevSize3D = 2.85 + (k.level / 100) * 4.2 + initTierStep;
         this.actorPool.set(k.id, vis);
       }
 
       const tier = getMilestoneTier(k.level);
+      const currentForm = getEvolutionForm(k.level);
+      const currentLevelInt = Math.trunc(k.level);
+      const kX3D = simTo3D(k.x);
+      const kZ3D = simTo3D(k.z);
+      const kSurfaceY = k.isOnShore ? getElevationAt(k.x, k.z) + 0.16 : 0.2;
+
+      // Detect monotonic form evolution or minor level-up (non-blocking, works for players & bots)
+      if (!isNewVis && currentForm > vis.lastObservedForm) {
+        vis.lastObservedForm = currentForm;
+        vis.lastObservedLevel = Math.max(vis.lastObservedLevel, currentLevelInt);
+        if (currentForm === 2 || currentForm === 3) {
+          vis.transformForm = currentForm;
+          vis.transformElapsed = 0;
+          vis.scaleBlendTimer = 0.55;
+          const burstHex = currentForm === 3 ? 0x38bdf8 : 0xf59e0b;
+          const rippleHex = currentForm === 3 ? 0x7dd3fc : 0xfde68a;
+          this.spawnEvolutionRing(kX3D, kSurfaceY, kZ3D, 1.4, currentForm === 3 ? 11.5 : 8.8, 0.92, burstHex, 0.85);
+          this.spawnEvolutionRing(kX3D, kSurfaceY + 0.03, kZ3D, 0.9, currentForm === 3 ? 7.8 : 5.8, 0.65, rippleHex, 0.7);
+          this.spawnEvolutionMoteBurst(
+            kX3D,
+            kSurfaceY,
+            kZ3D,
+            currentForm === 3 ? 24 : 18,
+            burstHex,
+            currentForm === 3 ? 6.2 : 4.8,
+            currentForm === 3 ? 5.6 : 4.4,
+            1.05,
+            currentForm === 3 ? 1.25 : 1.05
+          );
+        }
+      } else if (!isNewVis && currentLevelInt > vis.lastObservedLevel) {
+        vis.lastObservedLevel = currentLevelInt;
+        vis.minorPulseTimer = 0.28;
+        if (!k.isOnShore) {
+          this.spawnEvolutionRing(kX3D, 0.18, kZ3D, 0.85, 2.8 + (k.level / 100) * 1.4, 0.42, 0xbae6fd, 0.42);
+        }
+        this.spawnEvolutionMoteBurst(kX3D, kSurfaceY, kZ3D, 4, 0xbae6fd, 2.2, 2.8, 0.48, 0.65);
+      }
+
+      if (vis.minorPulseTimer > 0) {
+        vis.minorPulseTimer = Math.max(0, vis.minorPulseTimer - visualDt);
+      }
+      if (vis.scaleBlendTimer > 0) {
+        vis.scaleBlendTimer = Math.max(0, vis.scaleBlendTimer - visualDt);
+      }
+
+      let transformSample = null as ReturnType<typeof evaluateTransformationPhase> | null;
+      if (vis.transformForm !== null) {
+        const prevT = vis.transformElapsed;
+        vis.transformElapsed += visualDt;
+        const maxDur = this.reducedMotion
+          ? MAJOR_TRANSFORM_REDUCED_DURATION_SEC
+          : MAJOR_TRANSFORM_DURATION_SEC;
+        transformSample = evaluateTransformationPhase(
+          vis.transformElapsed,
+          vis.transformForm,
+          this.reducedMotion
+        );
+        // Trigger secondary surge ring & mote burst when entering the 0.20s surge phase
+        const surgeMark = maxDur * (0.2 / MAJOR_TRANSFORM_DURATION_SEC);
+        if (prevT < surgeMark && vis.transformElapsed >= surgeMark) {
+          const isF3 = vis.transformForm >= 3;
+          this.spawnEvolutionRing(
+            kX3D,
+            kSurfaceY + 0.04,
+            kZ3D,
+            1.8,
+            isF3 ? 13.5 : 10.2,
+            0.82,
+            isF3 ? 0x4ade80 : 0xf3d285,
+            0.82
+          );
+          this.spawnEvolutionMoteBurst(
+            kX3D,
+            kSurfaceY + 0.4,
+            kZ3D,
+            isF3 ? 18 : 12,
+            isF3 ? 0x7dd3fc : 0xfde68a,
+            isF3 ? 5.6 : 4.2,
+            isF3 ? 6.2 : 4.8,
+            0.95,
+            1.1
+          );
+        }
+        if (k.id === focus.id && transformSample.phase !== 'complete') {
+          nextLocalTransformZoom = Math.min(nextLocalTransformZoom, transformSample.cameraZoomDelta);
+          nextLocalTransformLight = Math.max(nextLocalTransformLight, transformSample.lightBoost);
+          nextLocalTransformShake = Math.max(nextLocalTransformShake, transformSample.shakeAmount);
+        }
+        if (transformSample.phase === 'complete') {
+          vis.transformForm = null;
+          transformSample = null;
+        }
+      }
+
       const facingCos = Math.cos(k.facingAngle);
       const facingSin = Math.sin(k.facingAngle);
       if (facingCos < -0.15) vis.facingLeft = true;
@@ -2532,7 +2901,7 @@ export class ArenaScene3D {
       // Advance authoritative frame-by-frame sprite animation (6x4 grid for Lv.1-99, 6x2 Keli King sheet at Lv.100)
       const anim = advanceActorAnim(vis.animState, k, visualDt, this.reducedMotion);
 
-      // Synchronize Frame 4 victory roar audio, shockwave, and triumphant camera shake once
+      // Synchronize Frame 4 victory roar audio, shockwave, environmental ripples, and triumphant camera shake once
       if (
         anim.isKeliKing &&
         anim.keliKingRoarJustTriggered &&
@@ -2544,6 +2913,9 @@ export class ArenaScene3D {
         this.keliKingVictoryState.shockwaveAge = 0;
         this.keliKingVictoryState.shakeTimer = this.reducedMotion ? 0 : 0.32;
         soundEngine.playKeliKingRoar();
+        this.spawnEvolutionRing(kX3D, kSurfaceY + 0.05, kZ3D, 3.0, 21.0, 1.05, 0xfde68a, 0.9);
+        this.spawnEvolutionRing(kX3D, kSurfaceY + 0.03, kZ3D, 2.0, 14.5, 0.85, 0xf59e0b, 0.72);
+        this.spawnEvolutionMoteBurst(kX3D, kSurfaceY + 0.6, kZ3D, 26, 0xfffbeb, 8.8, 7.2, 1.25, 1.4);
       }
 
       const sheetMeta = anim.isKeliKing
@@ -2602,9 +2974,23 @@ export class ArenaScene3D {
       // Scale progression aligned with Lv.1-100 growth while preserving exact sprite aspect ratio
       const tierStep =
         tier >= 100 ? 1.55 : tier >= 80 ? 0.95 : tier >= 40 ? 0.45 : 0;
-      const size3D = 2.85 + (k.level / 100) * 4.2 + tierStep;
+      const targetSize3D = 2.85 + (k.level / 100) * 4.2 + tierStep;
+      // Smooth non-popping scale blend across form upgrades
+      vis.prevSize3D = THREE.MathUtils.damp(vis.prevSize3D, targetSize3D, vis.scaleBlendTimer > 0 ? 7.5 : 14, dt);
+      const minorPop =
+        vis.minorPulseTimer > 0 && !anim.isKeliKing
+          ? 1 + Math.sin((vis.minorPulseTimer / 0.28) * Math.PI) * (this.reducedMotion ? 0.02 : 0.055)
+          : 1;
+      const transformScaleMult = transformSample && !anim.isKeliKing ? transformSample.scaleMult : 1;
+      const size3D = vis.prevSize3D * minorPop * transformScaleMult;
       const renderedHeight = size3D * sheetMeta.worldHeightScale;
       const renderedWidth = renderedHeight * sheetMeta.aspect;
+
+      // Subtle silhouette accent during active non-blocking transformation
+      if (transformSample && !anim.isKeliKing && transformSample.glowIntensity > 0.15) {
+        const specHex = vis.transformForm ? parseInt(EVOLUTION_FORM_SPECS[vis.transformForm].accentHex.slice(1), 16) : 0xfde68a;
+        vis.spriteMat.color.lerp(_evoColor.setHex(specHex), Math.min(0.42, transformSample.glowIntensity * 0.36));
+      }
 
       // Subtle whole-character combat feedback only (suppressed on concluded Lv.100 Keli King)
       const motionScale = this.reducedMotion ? 0.25 : 1.0;
@@ -2644,8 +3030,36 @@ export class ArenaScene3D {
         renderedHeight,
         1
       );
-      vis.spriteMesh.position.set(0, submersion.spriteLocalY, 0);
+
+      // Subtle, restrained whole-sprite locomotion bobbing & burst lean (zero on Lv.100 Keli King)
+      const moveSpeed = Math.hypot(k.vx, k.vz);
+      const speedNorm = Math.min(1, moveSpeed / 190);
+      let locoBobY = 0;
+      let locoLeanZ = 0;
+      if (!anim.isKeliKing && k.stunTimer <= 0 && !k.feedingTargetId && speedNorm > 0.08) {
+        const phaseOffset = (k.id.charCodeAt(0) + k.id.charCodeAt(k.id.length - 1)) * 0.7;
+        if (k.isOnShore) {
+          // Form 2 heavy arm-drag heave vs Form 3 weighted amphibious stride
+          const freq = anim.phase === 2 ? 4.8 : 6.8;
+          const amp = anim.phase === 2 ? 0.085 : 0.07;
+          locoBobY = Math.abs(Math.sin(elapsed * freq + phaseOffset)) * amp * speedNorm * motionScale;
+          if (anim.phase === 2) {
+            locoLeanZ = Math.sin(elapsed * freq + phaseOffset) * 0.04 * speedNorm * motionScale;
+          }
+        } else {
+          // Gentle aquatic swim bob
+          locoBobY = Math.sin(elapsed * 7.4 + phaseOffset) * 0.055 * speedNorm * motionScale;
+        }
+        if (k.dashTimer > 0 || k.evadeTimer > 0) {
+          locoLeanZ = (vis.facingLeft ? 0.07 : -0.07) * motionScale;
+        }
+      }
+
+      vis.spriteMesh.position.set(0, submersion.spriteLocalY + locoBobY, 0);
       vis.spriteMesh.quaternion.copy(this.camera.quaternion);
+      if (locoLeanZ !== 0) {
+        vis.spriteMesh.rotateZ(locoLeanZ);
+      }
 
       vis.badgeMesh.quaternion.copy(this.camera.quaternion);
       vis.badgeMesh.position.y = submersion.visibleTopLocalY + 0.65;
@@ -2700,6 +3114,13 @@ export class ArenaScene3D {
           vis.ringMesh.scale.setScalar(size3D * 0.62 * feedPulse);
           ringMat.color.setHex(contested ? 0xfb923c : 0x4ade80);
           ringMat.opacity = 0.72;
+        } else if (k.level >= 40 && k.level < 80 && k.isOnShore && k.shoreReserve < 3.5) {
+          // Clear visual low-shore-reserve warning pulse for Form 2 Keli on dry land
+          const urgent = k.shoreReserve < 1.8;
+          const warnPulse = this.reducedMotion ? 1.06 : 1.0 + Math.sin(elapsed * (urgent ? 14 : 9)) * 0.12;
+          vis.ringMesh.scale.setScalar(size3D * 0.6 * warnPulse);
+          ringMat.color.setHex(urgent ? 0xef4444 : 0xf59e0b);
+          ringMat.opacity = urgent ? 0.85 : 0.72;
         } else if (k.isSpeaking) {
           const voicePulse = this.reducedMotion ? 1.1 : 1.05 + Math.sin(elapsed * 12) * 0.14;
           vis.ringMesh.scale.setScalar(size3D * 0.64 * voicePulse);
@@ -2765,10 +3186,19 @@ export class ArenaScene3D {
         vis.ringMesh.scale.setScalar(size3D * 0.56 * pulse);
         ringMat.color.setHex(0xf59e0b);
         ringMat.opacity = 0.62;
+      } else if (k.level >= 40 && k.level < 80 && k.isOnShore && k.shoreReserve < 3.5) {
+        vis.runeMesh.visible = false;
+        const urgent = k.shoreReserve < 1.8;
+        const warnPulse = this.reducedMotion ? 1.04 : 1.0 + Math.sin(elapsed * (urgent ? 12 : 8) + k.x) * 0.1;
+        vis.ringMesh.scale.setScalar(size3D * 0.56 * warnPulse);
+        ringMat.color.setHex(urgent ? 0xef4444 : 0xf59e0b);
+        ringMat.opacity = urgent ? 0.75 : 0.58;
       } else if (!k.isOnShore) {
         vis.runeMesh.visible = false;
+        const rippleScale = 0.46 + speedNorm * 0.12;
+        vis.ringMesh.scale.setScalar(size3D * rippleScale);
         ringMat.color.setHex(0x5eead4);
-        ringMat.opacity = 0.3 + Math.sin(elapsed * 4 + k.x) * 0.1;
+        ringMat.opacity = (0.24 + speedNorm * 0.18) + Math.sin(elapsed * (4 + speedNorm * 4) + k.x) * 0.08;
       } else {
         vis.runeMesh.visible = false;
         ringMat.opacity = 0;
@@ -2803,6 +3233,22 @@ export class ArenaScene3D {
 
       this.updateActorBadge(vis, k, focus.level);
     }
+
+    // Smoothly apply local transformation camera/lighting accents and advance pooled evolution VFX
+    this.activeLocalTransformZoomDelta = THREE.MathUtils.damp(
+      this.activeLocalTransformZoomDelta,
+      nextLocalTransformZoom,
+      9,
+      dt
+    );
+    this.activeLocalTransformLightBoost = THREE.MathUtils.damp(
+      this.activeLocalTransformLightBoost,
+      nextLocalTransformLight,
+      9,
+      dt
+    );
+    this.activeLocalTransformShake = nextLocalTransformShake;
+    this.updateEvolutionVfxPool(visualDt);
 
     // Update pooled Keli King royal victory VFX (crown light motif, golden pulse, Frame 4 shockwave, rising motes)
     this.updateKeliKingVictoryFx(
@@ -3070,7 +3516,7 @@ export class ArenaScene3D {
 
       if (!mesh) {
         const geo =
-          fx.type === 'veil_cloud' || fx.type === 'maelstrom'
+          fx.type === 'veil_cloud' || fx.type === 'maelstrom' || fx.type === 'land_dust'
             ? this.sharedDiscGeo
             : fx.type === 'bite_arc'
               ? this.sharedConeGeo
@@ -3084,7 +3530,12 @@ export class ArenaScene3D {
         });
         mesh = new THREE.Mesh(geo, mat);
         mesh.rotation.x = fx.type === 'bite_arc' ? 0 : -Math.PI / 2;
-        mesh.position.y = fx.type === 'crit_impact' || fx.type === 'stun_burst' ? 0.34 : 0.22;
+        mesh.position.y =
+          fx.type === 'crit_impact' || fx.type === 'stun_burst'
+            ? 0.34
+            : fx.type === 'land_dust'
+              ? 0.28
+              : 0.22;
         mesh.renderOrder = 6;
         this.scene.add(mesh);
         this.fxPool.set(fx.id, mesh);
@@ -3100,6 +3551,11 @@ export class ArenaScene3D {
         const curR = r3d * (0.2 + eased * 1.15);
         mesh.scale.setScalar(curR);
         mat.opacity = (1 - t) * 0.92;
+      } else if (fx.type === 'level_pulse') {
+        const eased = 1 - Math.pow(1 - t, 2.0);
+        const curR = r3d * (0.3 + eased * 0.85);
+        mesh.scale.setScalar(curR);
+        mat.opacity = (1 - t) * 0.62;
       } else if (fx.type === 'bite_arc') {
         mesh.rotation.y = -fx.angle;
         mesh.scale.setScalar(r3d * (0.88 + t * 0.2));
@@ -3121,6 +3577,18 @@ export class ArenaScene3D {
         const eased = 1 - Math.pow(1 - t, 2.0);
         mesh.scale.setScalar(r3d * (0.35 + eased * 0.85));
         mat.opacity = (1 - t) * 0.72;
+      } else if (fx.type === 'shore_splash') {
+        const eased = 1 - Math.pow(1 - t, 2.2);
+        mesh.scale.setScalar(r3d * (0.3 + eased * 0.95));
+        mat.opacity = (1 - t) * 0.72;
+      } else if (fx.type === 'water_ripple') {
+        const eased = 1 - Math.pow(1 - t, 1.8);
+        mesh.scale.setScalar(r3d * (0.35 + eased * 0.85));
+        mat.opacity = (1 - t) * 0.34;
+      } else if (fx.type === 'land_dust') {
+        const eased = 1 - Math.pow(1 - t, 1.9);
+        mesh.scale.setScalar(r3d * (0.32 + eased * 0.68));
+        mat.opacity = (1 - t) * 0.32;
       } else if (fx.type === 'mitigated_ring') {
         const eased = 1 - Math.pow(1 - t, 2.2);
         mesh.scale.setScalar(r3d * (0.4 + eased * 0.65));
@@ -3215,6 +3683,12 @@ export class ArenaScene3D {
     this.sharedRingGeo.dispose();
     this.sharedDiscGeo.dispose();
     this.sharedConeGeo.dispose();
+    this.evoMoteGeo?.dispose();
+    this.evoMoteMat?.dispose();
+    for (let i = 0; i < this.evoRingPool.length; i++) {
+      this.evoRingPool[i].mat.dispose();
+    }
+    this.evoRingPool.length = 0;
 
     this.rainLines?.geometry?.dispose();
     (this.rainLines?.material as THREE.Material | undefined)?.dispose();

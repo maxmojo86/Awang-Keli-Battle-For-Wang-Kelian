@@ -18,24 +18,52 @@ import {
   isPositionAccessible,
   LANDMARKS,
   resolveArenaCollision,
+  resolveSweptMovement,
   scaleArenaCoord,
   scaleArenaDist,
   WORLD_CENTER,
   WORLD_SIZE,
 } from './arena.ts';
 import { soundEngine } from './audio.ts';
+import {
+  applyLocomotionVelocity,
+  clampPostBurstVelocity,
+  computeTurnRate,
+  getLocomotionProfile,
+  projectVelocityAlongCollisionNormal,
+} from './movement.ts';
 import type {
   ClientSfxEvent,
   RemoteKeliState,
   WorldStatePacket,
 } from './multiplayerTypes.ts';
+import {
+  AiController,
+  createSeededRng,
+  type AiSimulationContext,
+} from './enemyAI.ts';
+import {
+  generateFairWaterSpawns,
+  MatchPacingDirector,
+} from './matchPacing.ts';
+import {
+  computeInitialMilestoneMask,
+  EVOLUTION_FORM_SPECS,
+  type EvolutionEventKind,
+  getEvolutionProgressInfo,
+  resolveEvolutionTransition,
+} from './evolutionExperience.ts';
 import type {
   AbilityId,
+  ActivityHotspot,
+  AiDebugEntry,
+  AiDifficulty,
   BountyTarget,
   CarcassEntity,
   DamageHitEvent,
   DamageImpulse,
   DeathCamState,
+  EvolutionForm,
   FinalFeastState,
   FloatingCallout,
   HitReactKind,
@@ -45,6 +73,8 @@ import type {
   LobbySize,
   MassLedgerEntry,
   MatchMode,
+  MatchPacingMetrics,
+  MatchPhase,
   PickupItem,
   PickupKind,
   SonarContact,
@@ -150,6 +180,8 @@ export interface SimulationOptions {
   humanEntrants?: HumanEntrant[];
   emitLocalSound?: boolean;
   isMultiplayerMatch?: boolean;
+  aiDifficulty?: AiDifficulty;
+  matchSeed?: number;
 }
 
 /**
@@ -245,6 +277,13 @@ export class GameSimulation {
   private lastFeedAlertTimeByCarcass = new Map<string, number>();
   private prevPlayerX = 0;
   private prevPlayerZ = 0;
+  private matchSeed: number;
+  private explicitMatchSeed: boolean;
+  private aiController: AiController;
+  private botRegisterSeq = 0;
+  private aiContext!: AiSimulationContext;
+  private pacingDirector: MatchPacingDirector;
+  private zonePaceMultiplier = 1.0;
 
   constructor(
     lobbySize: LobbySize,
@@ -258,6 +297,12 @@ export class GameSimulation {
     this.emitLocalSound = options.emitLocalSound ?? true;
     this.isMultiplayerMatch =
       options.isMultiplayerMatch ?? (Boolean(options.humanEntrants && options.humanEntrants.length > 1));
+    this.explicitMatchSeed = typeof options.matchSeed === 'number';
+    this.matchSeed =
+      typeof options.matchSeed === 'number'
+        ? options.matchSeed >>> 0
+        : (Math.floor(Math.random() * 0xffffffff) >>> 0);
+    this.aiController = new AiController(this.matchSeed, options.aiDifficulty ?? 'normal');
 
     const entrants =
       options.humanEntrants && options.humanEntrants.length > 0
@@ -296,14 +341,24 @@ export class GameSimulation {
       });
     }
 
+    this.pacingDirector = new MatchPacingDirector(
+      lobbySize,
+      Math.max(lobbySize, entrants.length),
+      this.matchSeed
+    );
+    const pacingProfile = this.pacingDirector.profile;
+    const initialZoneRadius =
+      mode === 'tutorial' ? scaleArenaDist(960) : pacingProfile.initialZoneRadius;
+
     this.zone = {
       centerX: scaleArenaCoord(1030),
       centerZ: scaleArenaCoord(1210), // converges smoothly toward Jantung Tasik
-      currentRadius: scaleArenaDist(960),
-      targetRadius: scaleArenaDist(960),
+      currentRadius: initialZoneRadius,
+      targetRadius: initialZoneRadius,
       phase: 1,
-      warningTimer: 26,
+      warningTimer: mode === 'tutorial' ? 26 : pacingProfile.initialWarningSec,
       isShrinking: false,
+      warningActive: false,
     };
 
     this.weather = {
@@ -312,6 +367,30 @@ export class GameSimulation {
       intensity: 0,
       remainingSec: mode === 'tutorial' ? 24 : 18 + Math.random() * 8,
       visibilityRange: 1.0,
+    };
+
+    this.aiContext = {
+      matchTime: 0,
+      finalFeastActive: false,
+      zone: this.zone,
+      weather: this.weather,
+      kelis: this.kelis,
+      carcasses: this.carcasses,
+      pickups: this.pickups,
+      directorHotspots: [],
+      matchPhase: 'early',
+      getMoveSpeed: (k) => this.getMoveSpeed(k),
+      computeRadius: (lvl) => this.computeRadius(lvl),
+      getFeedRange: (lvl) => this.getFeedRange(lvl),
+      canFeedOnCarcass: (k, c, hyst) => this.canFeedOnCarcass(k, c, hyst),
+      cancelFeeding: (k, reason) => this.cancelFeeding(k, reason),
+      tryBiteOrFeed: (k, audio) => this.tryBiteOrFeed(k, audio),
+      tryEvade: (k) => this.tryEvade(k),
+      tryDash: (k) => this.tryDash(k),
+      trySonar: (k) => this.trySonar(k),
+      tryVeil: (k) => this.tryVeil(k),
+      tryElectroshock: (k) => this.tryElectroshock(k),
+      tryMaelstrom: (k) => this.tryMaelstrom(k),
     };
 
     this.initMatch();
@@ -335,7 +414,9 @@ export class GameSimulation {
     isPlayer: boolean,
     x: number,
     z: number,
-    level: number
+    level: number,
+    spawnRng: () => number = Math.random,
+    facingAngleOverride?: number
   ): KeliEntity {
     const intLevel = Math.max(0, Math.min(TOTAL_MATCH_FRAGMENTS, Math.trunc(level)));
     const maxHp = this.computeMaxHp(intLevel);
@@ -347,7 +428,7 @@ export class GameSimulation {
       z,
       vx: 0,
       vz: 0,
-      facingAngle: Math.random() * Math.PI * 2,
+      facingAngle: facingAngleOverride ?? spawnRng() * Math.PI * 2,
       level: intLevel,
       hp: maxHp,
       maxHp,
@@ -399,6 +480,12 @@ export class GameSimulation {
       stormFinTimer: 0,
       thunderRoeTimer: 0,
       evoBoostTimer: 0,
+      highestFormReached: getEvolutionForm(Math.max(1, intLevel)),
+      unlockedMilestoneMask: computeInitialMilestoneMask(Math.max(1, intLevel)),
+      evolutionSeq: 0,
+      lastEvolutionForm: getEvolutionForm(Math.max(1, intLevel)),
+      lastEvolutionTime: -1,
+      lastMinorLevelTime: -1,
       veilTimer: 0,
       dashTimer: 0,
       dashDirX: 0,
@@ -431,10 +518,10 @@ export class GameSimulation {
       lastAttackerName: null,
       lastDamageCause: null,
 
-      aiWanderAngle: Math.random() * Math.PI * 2,
-      aiGoalTimer: 0.5 + Math.random() * 1.5,
+      aiWanderAngle: spawnRng() * Math.PI * 2,
+      aiGoalTimer: 0.5 + spawnRng() * 1.5,
       aiTargetId: null,
-      aiAggression: 0.35 + Math.random() * 0.55,
+      aiAggression: 0.35 + spawnRng() * 0.55,
       aiRetreatingFromShore: false,
       activeEmote: null,
       emoteTimer: 0,
@@ -527,23 +614,47 @@ export class GameSimulation {
       const baseFrag = Math.floor(TOTAL_MATCH_FRAGMENTS / n);
       const remainder = TOTAL_MATCH_FRAGMENTS % n;
 
-      // Shuffle indices for random +1 remainder distribution
+      // Shuffle indices for +1 remainder distribution (deterministic when matchSeed is set)
+      const shuffleRng = this.explicitMatchSeed
+        ? createSeededRng(this.matchSeed ^ 0x9e3779b9)
+        : Math.random;
       const indices = Array.from({ length: n }, (_, i) => i);
       for (let i = indices.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(shuffleRng() * (i + 1));
         [indices[i], indices[j]] = [indices[j], indices[i]];
       }
       const bonusSet = new Set(indices.slice(0, remainder));
+
+      // Stratified, distance-aware, seeded fair water spawn distribution
+      const spawnRng = this.explicitMatchSeed
+        ? createSeededRng(this.matchSeed ^ 0x517cc1b7)
+        : Math.random;
+      const fairSpawns = generateFairWaterSpawns(
+        n,
+        this.pacingDirector.profile,
+        this.zone.centerX,
+        this.zone.centerZ,
+        spawnRng
+      );
 
       // Place human players first, then fill remaining slots with AI bots
       for (let i = 0; i < n; i++) {
         const human = this.humanEntrants[i];
         const isHuman = Boolean(human);
         const startLvl = baseFrag + (bonusSet.has(i) ? 1 : 0);
-        const sp = findWaterSpawn(i, n);
+        const sp = fairSpawns[i] ?? findWaterSpawn(i, n);
         const id = isHuman ? human.id : `bot-${i}`;
         const name = isHuman ? human.name : BOT_NAMES[(i - this.humanEntrants.length) % BOT_NAMES.length];
-        const entity = this.createKeli(id, name, isHuman, sp.x, sp.z, startLvl);
+        const entity = this.createKeli(
+          id,
+          name,
+          isHuman,
+          sp.x,
+          sp.z,
+          startLvl,
+          spawnRng,
+          'facingAngle' in sp ? sp.facingAngle : undefined
+        );
         this.kelis.push(entity);
         const meta = this.playerMetaById.get(id);
         if (meta) {
@@ -563,6 +674,13 @@ export class GameSimulation {
       this.pushBanner('Battle for Wang Kelian', humanLabel);
     }
 
+    // Deterministically register every AI bot with the utility AI controller
+    for (const k of this.kelis) {
+      if (!k.isPlayer) {
+        this.aiController.registerBot(k, this.botRegisterSeq++);
+      }
+    }
+
     const initialPickups = this.mode === 'tutorial' ? 6 : 18;
     for (let i = 0; i < initialPickups; i++) {
       this.spawnRandomPickup(this.mode === 'tutorial');
@@ -572,6 +690,26 @@ export class GameSimulation {
     this.recordLedger('spawn', 'Lubuk Hitam', `${this.kelis.length} Entrants`, 100);
     this.emitSfxGlobal('whistle');
     this.addSoundCue('Shift whistle echoes across Lubuk Hitam', null, 'info');
+  }
+
+  public getMatchSeed(): number {
+    return this.matchSeed;
+  }
+
+  public getAiDifficulty(): AiDifficulty {
+    return this.aiController.getDifficulty();
+  }
+
+  public setAiDifficulty(difficulty: AiDifficulty): void {
+    this.aiController.setDifficulty(difficulty);
+  }
+
+  /**
+   * Dev-only AI inspection snapshot. Never returns server AI state in multiplayer matches.
+   */
+  public getAiDebugSnapshot(): AiDebugEntry[] {
+    if (this.isMultiplayerMatch) return [];
+    return this.aiController.getDebugEntries(this.kelis);
   }
 
   public getPlayer(playerId = this.primaryPlayerId): KeliEntity {
@@ -968,6 +1106,21 @@ export class GameSimulation {
       case 'evolution':
         soundEngine.playEvolution();
         break;
+      case 'level_up_minor':
+        soundEngine.playMinorLevelUp(this.getPlayer().level);
+        break;
+      case 'ability_unlock':
+        soundEngine.playAbilityUnlock();
+        break;
+      case 'evolution_form_2':
+        soundEngine.playForm2Transformation();
+        break;
+      case 'evolution_form_3':
+        soundEngine.playForm3Transformation();
+        break;
+      case 'evolution_king':
+        soundEngine.playKeliKingAscension();
+        break;
       case 'dash':
         soundEngine.playDash();
         break;
@@ -1144,6 +1297,43 @@ export class GameSimulation {
     this.updateZone(dt);
     this.updateWeather(dt);
 
+    // 1a. Lightweight 1 Hz Match Pacing Director (royale mode only)
+    if (this.mode !== 'tutorial') {
+      const dirRes = this.pacingDirector.step(
+        dt,
+        this.matchTime,
+        this.zone,
+        this.kelis,
+        this.carcasses,
+        this.primaryPlayerId,
+        this.finalFeastActive
+      );
+      this.zonePaceMultiplier = dirRes.zonePaceMultiplier;
+      this.aiContext.directorHotspots = dirRes.publicHotspots;
+      this.aiContext.matchPhase = dirRes.phase;
+      if (dirRes.zoneWarningJustTriggered) {
+        this.addSoundCue('Radioactive zone closing soon', null, 'warning');
+      }
+      if (dirRes.phaseChanged) {
+        if (dirRes.phase === 'mid') {
+          this.pushBanner(
+            'Mid-Game · Basin Pressure Rising',
+            'Predators evolving · Watch for contested carcasses and zone shifts'
+          );
+        } else if (dirRes.phase === 'endgame') {
+          this.pushBanner(
+            'Endgame · Final Convergence',
+            'Surviving Kelis closing in · Reunite 100 fragments to ascend'
+          );
+        }
+      }
+    }
+
+    // 1b. Rebuild lightweight AI spatial grid once per step (O(N) for 100-Keli matches)
+    this.aiController.beginStep(this.kelis, this.carcasses, this.pickups, this.matchTime);
+    this.aiContext.matchTime = this.matchTime;
+    this.aiContext.finalFeastActive = this.finalFeastActive;
+
     // 2. Update each living Keli (timers, player input / AI brain, movement, combat)
     for (let i = 0; i < this.kelis.length; i++) {
       if (this.status !== 'playing' || this.matchConcluded) break;
@@ -1269,24 +1459,46 @@ export class GameSimulation {
 
   private updateZone(dt: number) {
     if (this.finalFeastActive) {
+      this.zone.warningActive = false;
       return; // Pause radioactive contraction during Final Feast so the sole survivor can collect remaining fragments
     }
     if (this.mode === 'tutorial' && this.tutorial && this.tutorial.step < 4) {
+      this.zone.warningActive = false;
       return; // Pause radioactive contraction during early guided steps
     }
 
+    const usePacingProfile = this.mode !== 'tutorial';
+    const profile = this.pacingDirector.profile;
+
     if (!this.zone.isShrinking) {
-      this.zone.warningTimer -= dt;
+      // Gently accelerate idle wait countdown during verified lulls while preserving the full pre-contraction warning window
+      const canAccelerateWait =
+        usePacingProfile &&
+        this.zonePaceMultiplier > 1.0 &&
+        this.zone.warningTimer > profile.preContractionAlertSec;
+      const stepDt = canAccelerateWait ? dt * this.zonePaceMultiplier : dt;
+      if (canAccelerateWait) {
+        this.zone.warningTimer = Math.max(
+          profile.preContractionAlertSec,
+          this.zone.warningTimer - stepDt
+        );
+      } else {
+        this.zone.warningTimer -= dt;
+      }
+
       if (this.zone.warningTimer <= 0 && this.zone.phase < 5) {
         this.zone.isShrinking = true;
+        this.zone.warningActive = false;
         this.zone.phase += 1;
-        const radii = [
-          scaleArenaDist(960),
-          scaleArenaDist(720),
-          scaleArenaDist(490),
-          scaleArenaDist(300),
-          scaleArenaDist(160),
-        ];
+        const radii = usePacingProfile
+          ? profile.zoneRadii
+          : [
+              scaleArenaDist(960),
+              scaleArenaDist(720),
+              scaleArenaDist(490),
+              scaleArenaDist(300),
+              scaleArenaDist(160),
+            ];
         this.zone.targetRadius = radii[this.zone.phase - 1] ?? scaleArenaDist(160);
         if (this.zone.phase >= 2) {
           this.pushBanner(
@@ -1298,7 +1510,7 @@ export class GameSimulation {
         }
       }
     } else {
-      const shrinkSpeed = Math.round(24 * ARENA_SCALE);
+      const shrinkSpeed = usePacingProfile ? profile.shrinkSpeed : Math.round(24 * ARENA_SCALE);
       this.zone.currentRadius = Math.max(
         this.zone.targetRadius,
         this.zone.currentRadius - shrinkSpeed * dt
@@ -1306,7 +1518,7 @@ export class GameSimulation {
       if (this.zone.currentRadius <= this.zone.targetRadius + 0.5) {
         this.zone.currentRadius = this.zone.targetRadius;
         this.zone.isShrinking = false;
-        this.zone.warningTimer = 28;
+        this.zone.warningTimer = usePacingProfile ? profile.phasePauseSec : 28;
       }
     }
   }
@@ -1315,7 +1527,13 @@ export class GameSimulation {
     if (k.biteCooldown > 0) k.biteCooldown = Math.max(0, k.biteCooldown - dt);
     if (k.biteBufferTimer > 0) k.biteBufferTimer = Math.max(0, k.biteBufferTimer - dt);
     if (k.staminaRegenDelay > 0) k.staminaRegenDelay = Math.max(0, k.staminaRegenDelay - dt);
-    if (k.evadeTimer > 0) k.evadeTimer = Math.max(0, k.evadeTimer - dt);
+    const prevEvade = k.evadeTimer;
+    if (k.evadeTimer > 0) {
+      k.evadeTimer = Math.max(0, k.evadeTimer - dt);
+      if (prevEvade > 0 && k.evadeTimer <= 0) {
+        clampPostBurstVelocity(k, this.getMoveSpeed(k));
+      }
+    }
     if (k.staggerTimer > 0) k.staggerTimer = Math.max(0, k.staggerTimer - dt);
 
     const prevStun = k.stunTimer;
@@ -1347,6 +1565,12 @@ export class GameSimulation {
     if ((k.feedingFeedbackCooldown ?? 0) > 0) {
       k.feedingFeedbackCooldown = Math.max(0, (k.feedingFeedbackCooldown ?? 0) - dt);
     }
+    if ((k.shoreSplashCooldown ?? 0) > 0) {
+      k.shoreSplashCooldown = Math.max(0, (k.shoreSplashCooldown ?? 0) - dt);
+    }
+    if ((k.locomotionFxTimer ?? 0) > 0) {
+      k.locomotionFxTimer = Math.max(0, (k.locomotionFxTimer ?? 0) - dt);
+    }
 
     if (k.frenzyTimer > 0) k.frenzyTimer = Math.max(0, k.frenzyTimer - dt);
     if (k.surgeTimer > 0) k.surgeTimer = Math.max(0, k.surgeTimer - dt);
@@ -1367,7 +1591,13 @@ export class GameSimulation {
       if (k.stamina >= 32) k.fatigued = false;
     }
     if (k.veilTimer > 0) k.veilTimer = Math.max(0, k.veilTimer - dt);
-    if (k.dashTimer > 0) k.dashTimer = Math.max(0, k.dashTimer - dt);
+    const prevDash = k.dashTimer;
+    if (k.dashTimer > 0) {
+      k.dashTimer = Math.max(0, k.dashTimer - dt);
+      if (prevDash > 0 && k.dashTimer <= 0) {
+        clampPostBurstVelocity(k, this.getMoveSpeed(k));
+      }
+    }
     if (k.sonarTimer > 0) k.sonarTimer = Math.max(0, k.sonarTimer - dt);
     if (k.hitFlashTimer > 0) k.hitFlashTimer = Math.max(0, k.hitFlashTimer - dt);
     if ((k.emoteCooldown ?? 0) > 0) {
@@ -1406,9 +1636,10 @@ export class GameSimulation {
   }
 
   private applyPlayerControls(p: KeliEntity, dt: number) {
+    const profile = getLocomotionProfile(p.level, p.isOnShore);
+
     if (p.stunTimer > 0) {
-      p.vx *= Math.pow(0.08, dt);
-      p.vz *= Math.pow(0.08, dt);
+      applyLocomotionVelocity(p, 0, 0, 0, dt, profile);
       return;
     }
 
@@ -1426,6 +1657,7 @@ export class GameSimulation {
       p.vx = p.evadeDirX * speed * 2.4;
       p.vz = p.evadeDirZ * speed * 2.4;
       const evadeAngle = Math.atan2(p.evadeDirZ, p.evadeDirX);
+      p.moveAngle = evadeAngle;
       p.facingAngle = rotateAngleTowards(p.facingAngle, evadeAngle, 16 * dt);
       return;
     }
@@ -1433,6 +1665,11 @@ export class GameSimulation {
     if (p.dashTimer > 0) {
       p.vx = p.dashDirX * speed * 2.55;
       p.vz = p.dashDirZ * speed * 2.55;
+      const dashAngle = Math.atan2(p.dashDirZ, p.dashDirX);
+      p.moveAngle = dashAngle;
+      if (p.bitePhase === 'idle') {
+        p.facingAngle = rotateAngleTowards(p.facingAngle, dashAngle, 15 * dt);
+      }
     } else if (len > 0.05) {
       const nx = input.moveX / len;
       const nz = input.moveZ / len;
@@ -1465,23 +1702,32 @@ export class GameSimulation {
           : p.bitePhase === 'recovery'
           ? 0.68
           : 1.0;
-      p.vx = nx * effectiveSpeed * moveScale;
-      p.vz = nz * effectiveSpeed * moveScale;
+      const analogMag = Math.min(1, len);
+      const currentSpeed = applyLocomotionVelocity(
+        p,
+        nx * analogMag,
+        nz * analogMag,
+        effectiveSpeed * moveScale,
+        dt,
+        profile
+      );
       if (p.bitePhase === 'idle' && !p.feedingTargetId) {
         const desired = Math.atan2(nz, nx);
-        p.facingAngle = rotateAngleTowards(p.facingAngle, desired, 13.5 * dt);
+        const turnRate = computeTurnRate(profile, currentSpeed, effectiveSpeed);
+        p.facingAngle = rotateAngleTowards(p.facingAngle, desired, turnRate * dt);
       }
     } else {
       if (p.feedingCancelHoldTimer) p.feedingCancelHoldTimer = 0;
-      p.vx *= Math.pow(0.05, dt);
-      p.vz *= Math.pow(0.05, dt);
+      applyLocomotionVelocity(p, 0, 0, 0, dt, profile);
     }
 
-    // Smoothly align facing with locked bite direction during attack phases (no 360-degree snapping)
+    // Separate attack-facing from locomotion direction: during bite phases align smoothly with
+    // locked biteAimAngle; while stationary track mouse/aimAngle smoothly with zero 180-deg snapping.
     if (p.bitePhase !== 'idle') {
       p.facingAngle = rotateAngleTowards(p.facingAngle, p.biteAimAngle, 18 * dt);
     } else if (len <= 0.05 && !p.feedingTargetId) {
-      p.facingAngle = rotateAngleTowards(p.facingAngle, input.aimAngle, 14 * dt);
+      const idleTurnRate = Math.max(11, profile.lowSpeedTurnRate);
+      p.facingAngle = rotateAngleTowards(p.facingAngle, input.aimAngle, idleTurnRate * dt);
     }
 
     // Held bite/feed
@@ -1493,7 +1739,7 @@ export class GameSimulation {
   private getMoveSpeed(k: KeliEntity): number {
     let base = 158 + Math.min(48, k.level * 0.45);
     if (k.isOnShore) {
-      base *= k.level >= 80 ? 0.96 : 0.72; // Lv 40-79 drags on arms, Lv 80+ walks cleanly
+      base *= getLocomotionProfile(k.level, true).shoreSpeedMult;
     }
     if (k.activeHazard) {
       const mod = getHazardModifierForForm(k.activeHazard, getEvolutionForm(k.level));
@@ -1522,6 +1768,7 @@ export class GameSimulation {
     let curX = 0;
     let curZ = 0;
     const prevHazard = k.activeHazard;
+    const prevOnShore = k.isOnShore;
     const activeHazardTile = getHazardAt(k.x, k.z);
     if (!k.isOnShore) {
       const cur = getCurrentVectorAt(k.x, k.z);
@@ -1541,9 +1788,14 @@ export class GameSimulation {
     const radius = this.computeRadius(k.level);
     const canGoAshore = k.level >= 40;
 
-    const resolved = resolveArenaCollision(nextX, nextZ, radius, canGoAshore);
+    // Swept multi-pass collision prevents tunneling during Dash/Evade and projects velocity tangentially
+    const resolved = resolveSweptMovement(k.x, k.z, nextX, nextZ, radius, canGoAshore);
     k.x = resolved.x;
     k.z = resolved.z;
+
+    if (resolved.collided || resolved.blockedByShore) {
+      projectVelocityAlongCollisionNormal(k, resolved.normalX, resolved.normalZ);
+    }
 
     if (k.isPlayer && resolved.blockedByShore && Math.random() < 0.06) {
       this.spawnCallout(k.x, k.z, 'Shore requires Lv.40', '#d4a359');
@@ -1552,6 +1804,65 @@ export class GameSimulation {
     const terrain = getTerrainAt(k.x, k.z);
     k.isOnShore = terrain === 'shore';
     k.isSubmerged = terrain === 'deep';
+
+    // Restrained, pooled movement visual cues (culled near player & bounded for 100-Keli perf)
+    if (this.effects.length < 72) {
+      const primary = this.kelis[0];
+      const nearView =
+        k.isPlayer ||
+        !primary ||
+        Math.hypot(k.x - primary.x, k.z - primary.z) < 720;
+
+      if (nearView) {
+        if (prevOnShore !== k.isOnShore && (k.shoreSplashCooldown ?? 0) <= 0) {
+          k.shoreSplashCooldown = 0.45;
+          this.effects.push({
+            id: this.nextId('fx'),
+            type: 'shore_splash',
+            x: k.x,
+            z: k.z,
+            angle: k.moveAngle ?? k.facingAngle,
+            radius: 26 + radius * 0.75,
+            duration: 0.42,
+            elapsed: 0,
+            ownerId: k.id,
+            color: '#bae6fd',
+          });
+        } else if ((k.locomotionFxTimer ?? 0) <= 0 && k.dashTimer <= 0 && k.evadeTimer <= 0) {
+          const speed = Math.hypot(k.vx, k.vz);
+          if (!k.isOnShore && speed > 58) {
+            k.locomotionFxTimer = Math.max(0.24, 0.44 - speed * 0.0008);
+            this.effects.push({
+              id: this.nextId('fx'),
+              type: 'water_ripple',
+              x: k.x - Math.cos(k.moveAngle ?? k.facingAngle) * (radius * 0.45),
+              z: k.z - Math.sin(k.moveAngle ?? k.facingAngle) * (radius * 0.45),
+              angle: k.moveAngle ?? k.facingAngle,
+              radius: 18 + radius * 0.55 + Math.min(14, speed * 0.05),
+              duration: 0.48,
+              elapsed: 0,
+              ownerId: k.id,
+              color: '#7dd3fc',
+            });
+          } else if (k.isOnShore && speed > 36) {
+            const isForm2Drag = k.level >= 40 && k.level < 80;
+            k.locomotionFxTimer = isForm2Drag ? 0.36 : 0.3;
+            this.effects.push({
+              id: this.nextId('fx'),
+              type: 'land_dust',
+              x: k.x,
+              z: k.z,
+              angle: k.moveAngle ?? k.facingAngle,
+              radius: (isForm2Drag ? 22 : 18) + radius * 0.45,
+              duration: 0.42,
+              elapsed: 0,
+              ownerId: k.id,
+              color: isForm2Drag ? '#a68966' : '#c4a882',
+            });
+          }
+        }
+      }
+    }
 
     const newHazardTile = getHazardAt(k.x, k.z);
     k.activeHazard = newHazardTile?.kind ?? null;
@@ -1826,6 +2137,16 @@ export class GameSimulation {
     if (this.matchTime - prevTime < 2.2) return;
     this.lastFeedAlertTimeByCarcass.set(carc.id, this.matchTime);
 
+    // Record local feeding audio disturbance so nearby bots within FEED_SOUND_ALERT_RANGE can react
+    this.aiController.recordFeedingDisturbance(
+      carc.x,
+      carc.z,
+      carc.id,
+      feeder.id,
+      carc.mass,
+      this.matchTime
+    );
+
     for (const [pid, meta] of this.playerMetaById.entries()) {
       if (pid === feeder.id) continue;
       const listener = this.getPlayer(pid);
@@ -1873,9 +2194,11 @@ export class GameSimulation {
       this.cancelFeeding(k, activeCarc ? 'out_of_range' : 'depleted');
     }
 
-    // Only treat rivals in front hemisphere as immediate live combat interference for feeding
+    // Only treat rivals as immediate combat interference if they are in front AND not behind the carcass being contested
     const closestInFront = this.findClosestPreyInCone(k, strikeReach, baseAim, BITE_CONE_HALF_ANGLE);
-    const hasLiveTargetInFront = Boolean(closestInFront);
+    const closestInFrontDist = closestInFront
+      ? Math.hypot(closestInFront.x - k.x, closestInFront.z - k.z)
+      : Infinity;
 
     // Select nearest valid feedable carcass (checking range, LOS, shore Lv.40, and recovery)
     let nearestCarc: CarcassEntity | null = null;
@@ -1902,12 +2225,16 @@ export class GameSimulation {
       }
     }
 
-    // Deliberate feeding if valid carcass is in range, not mid-attack, and no immediate live clash in front
+    const rivalBlocksFeed =
+      Boolean(closestInFront) &&
+      (!nearestCarc || closestInFrontDist <= nearestCarcDist + 24);
+
+    // Deliberate feeding if valid carcass is in range, not mid-attack, and no rival is closer/clashing in front
     if (
       nearestCarc &&
       k.bitePhase === 'idle' &&
       k.staggerTimer <= 0 &&
-      !hasLiveTargetInFront
+      !rivalBlocksFeed
     ) {
       const carcAngle = Math.atan2(nearestCarc.z - k.z, nearestCarc.x - k.x);
       k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 0.45);
@@ -1934,7 +2261,7 @@ export class GameSimulation {
     if (
       k.isPlayer &&
       playPlayerAudio &&
-      !hasLiveTargetInFront &&
+      !closestInFront &&
       nearestBlockedReason &&
       (k.feedingFeedbackCooldown ?? 0) <= 0
     ) {
@@ -2059,7 +2386,34 @@ export class GameSimulation {
           // Smoothly face the carcass while feeding
           const carcAngle = Math.atan2(carc.z - k.z, carc.x - k.x);
           k.facingAngle = rotateAngleTowards(k.facingAngle, carcAngle, 10 * dt);
+          const prevFeedProgress = k.feedingProgress;
           k.feedingProgress += dt;
+
+          // Notify pacing director when 2+ Kelis genuinely contest this carcass (~2 Hz check)
+          if (
+            this.mode !== 'tutorial' &&
+            Math.floor(k.feedingProgress * 2) > Math.floor(prevFeedProgress * 2)
+          ) {
+            let activeFeeders = 0;
+            let allVeiled = true;
+            for (let fi = 0; fi < this.kelis.length; fi++) {
+              const fk = this.kelis[fi];
+              if (fk.alive && fk.feedingTargetId === carc.id) {
+                activeFeeders++;
+                if (fk.veilTimer <= 0) allVeiled = false;
+              }
+            }
+            if (activeFeeders >= 2) {
+              this.pacingDirector.recordContestedFeed(
+                carc.id,
+                carc.x,
+                carc.z,
+                carc.mass,
+                this.matchTime,
+                allVeiled
+              );
+            }
+          }
 
           if (Math.random() < 0.24) {
             this.effects.push({
@@ -2402,7 +2756,9 @@ export class GameSimulation {
 
       const kb = (opts?.knockbackDist ?? 0) * (mitigatedByEvade ? 0.35 : 1.0);
       if (kb > 0.5 && target.hp > 0) {
-        const pushed = resolveArenaCollision(
+        const pushed = resolveSweptMovement(
+          target.x,
+          target.z,
           target.x + dirX * kb,
           target.z + dirZ * kb,
           this.computeRadius(target.level),
@@ -2410,6 +2766,9 @@ export class GameSimulation {
         );
         target.x = pushed.x;
         target.z = pushed.z;
+        if (pushed.collided || pushed.blockedByShore) {
+          projectVelocityAlongCollisionNormal(target, pushed.normalX, pushed.normalZ);
+        }
       }
     }
 
@@ -2418,6 +2777,15 @@ export class GameSimulation {
       target.lastAttackerId = attacker.id;
       target.lastAttackerName = attacker.name;
       target.lastDamageCause = cause;
+      if (this.mode !== 'tutorial' && attacker.id !== target.id && finalAmount > 0) {
+        this.pacingDirector.recordCombatEvent(
+          target.x,
+          target.z,
+          this.matchTime,
+          target.veilTimer > 0 || attacker.veilTimer > 0,
+          target.id === this.primaryPlayerId || attacker.id === this.primaryPlayerId
+        );
+      }
     }
 
     // Impact water splash / crit burst / mitigated guard ring
@@ -2626,6 +2994,15 @@ export class GameSimulation {
       victim.name,
       droppedMass
     );
+    if (this.mode !== 'tutorial') {
+      this.pacingDirector.recordElimination(
+        victim.x,
+        victim.z,
+        droppedMass,
+        this.matchTime,
+        victim.veilTimer > 0
+      );
+    }
 
     // Non-fragment Bounty Claim: grants temporary movement speed + stamina surge,
     // non-fragment leaderboard/bounty points, and combat notification — NEVER extra fragments!
@@ -2845,6 +3222,39 @@ export class GameSimulation {
     this.transferCarcassFragments(eater, carcassId);
   }
 
+  private evolutionEventLog: Array<{
+    entityId: string;
+    kind: EvolutionEventKind;
+    form: EvolutionForm;
+    level: number;
+    time: number;
+    seq: number;
+  }> = [];
+
+  public getEvolutionEventLog() {
+    return this.evolutionEventLog.slice();
+  }
+
+  private recordEvolutionEvent(
+    entityId: string,
+    kind: EvolutionEventKind,
+    form: EvolutionForm,
+    level: number,
+    seq: number
+  ) {
+    this.evolutionEventLog.push({
+      entityId,
+      kind,
+      form,
+      level,
+      time: this.matchTime,
+      seq,
+    });
+    if (this.evolutionEventLog.length > 160) {
+      this.evolutionEventLog.splice(0, this.evolutionEventLog.length - 160);
+    }
+  }
+
   private grantFragments(eater: KeliEntity, amount: number, sourceLabel: string) {
     if (!eater.alive || this.matchConcluded || this.status !== 'playing') return;
     const intAmount = Math.trunc(amount);
@@ -2853,37 +3263,130 @@ export class GameSimulation {
     const prevLevel = Math.trunc(eater.level);
     const prevForm = getEvolutionForm(prevLevel);
     const nextLevel = Math.min(TOTAL_MATCH_FRAGMENTS, prevLevel + intAmount);
+    if (nextLevel <= prevLevel) return;
+
+    const prevHighestForm = eater.highestFormReached ?? prevForm;
+    const prevMask = eater.unlockedMilestoneMask ?? computeInitialMilestoneMask(prevLevel);
+    const transition = resolveEvolutionTransition(prevLevel, nextLevel, prevHighestForm, prevMask);
+
     eater.level = nextLevel;
+    eater.highestFormReached = transition.newHighestForm;
+    eater.unlockedMilestoneMask = transition.newMilestoneMask;
 
     const newMax = this.computeMaxHp(eater.level);
     const hpDelta = Math.max(0, newMax - eater.maxHp);
     eater.maxHp = newMax;
     eater.hp = Math.min(eater.maxHp, eater.hp + hpDelta);
+    if (this.mode !== 'tutorial') {
+      this.pacingDirector.recordEvolutionLevel(eater.level, this.matchTime);
+    }
 
-    // Unlock all crossed milestone notifications cleanly when large meals jump several thresholds
-    if (eater.isPlayer) {
-      const unlocked = EVOLUTION_MILESTONES.filter(
-        (m) => m.level > prevLevel && m.level <= eater.level
+    if (transition.majorFormTriggered) {
+      const form = transition.majorFormTriggered;
+      const spec = EVOLUTION_FORM_SPECS[form];
+      eater.evolutionSeq = (eater.evolutionSeq ?? 0) + 1;
+      eater.lastEvolutionForm = form;
+      eater.lastEvolutionTime = this.matchTime;
+      this.recordEvolutionEvent(
+        eater.id,
+        transition.kind ?? (form === 4 ? 'form_4' : form === 3 ? 'form_3' : 'form_2'),
+        form,
+        eater.level,
+        eater.evolutionSeq
       );
-      if (unlocked.length > 0) {
-        const latest = unlocked[unlocked.length - 1];
-        const names = unlocked.map((u) => `Lv.${u.level} ${u.title}`).join(' · ');
-        this.pushBannerFor(eater.id, `Evolution Unlocked: ${latest.title}`, names);
-        this.emitSfxFor(eater.id, 'evolution');
-      }
-      if (getEvolutionForm(eater.level) > prevForm) {
-        eater.evoBoostTimer = Math.max(eater.evoBoostTimer, 5.0);
+
+      // Authoritative world transformation VFX for BOTH players and AI bots (bounded for 100-Keli matches)
+      if (this.effects.length < 96) {
         this.effects.push({
           id: this.nextId('fx'),
           type: 'evolution_burst',
           x: eater.x,
           z: eater.z,
           angle: 0,
-          radius: 90,
-          duration: 0.7,
+          radius: form === 4 ? 155 : form === 3 ? 118 : 96,
+          duration: form === 4 ? 1.25 : 0.95,
           elapsed: 0,
           ownerId: eater.id,
-          color: '#e6b86e',
+          color: spec.burstHex,
+        });
+      }
+
+      if (eater.isPlayer) {
+        eater.evoBoostTimer = Math.max(eater.evoBoostTimer, 5.0);
+        const sfxKind: ClientSfxEvent['kind'] =
+          form === 4
+            ? 'evolution_king'
+            : form === 3
+              ? 'evolution_form_3'
+              : 'evolution_form_2';
+        this.emitSfxFor(eater.id, sfxKind);
+        if (form < 4) {
+          this.pushBannerFor(eater.id, spec.bannerTitle, spec.bannerSubtitle);
+        }
+      }
+    } else if (transition.unlockedMilestones.length > 0) {
+      const latest = transition.unlockedMilestones[transition.unlockedMilestones.length - 1];
+      this.recordEvolutionEvent(
+        eater.id,
+        'ability_unlock',
+        transition.newHighestForm,
+        eater.level,
+        eater.evolutionSeq ?? 0
+      );
+      if (this.effects.length < 72) {
+        this.effects.push({
+          id: this.nextId('fx'),
+          type: 'level_pulse',
+          x: eater.x,
+          z: eater.z,
+          angle: 0,
+          radius: 58,
+          duration: 0.45,
+          elapsed: 0,
+          ownerId: eater.id,
+          color: '#7dd3fc',
+        });
+      }
+      if (eater.isPlayer) {
+        const names = transition.unlockedMilestones
+          .map((u) => `Lv.${u.level} ${u.title}`)
+          .join(' · ');
+        this.pushBannerFor(eater.id, `Evolution Unlocked: ${latest.title}`, names);
+        this.emitSfxFor(eater.id, 'ability_unlock');
+      }
+    } else if (transition.minorLevelsGained > 0) {
+      const prevMinor = eater.lastMinorLevelTime ?? -10;
+      eater.lastMinorLevelTime = this.matchTime;
+      if (eater.isPlayer) {
+        if (this.matchTime - prevMinor >= 0.14) {
+          this.emitSfxFor(eater.id, 'level_up_minor');
+        }
+        if (this.effects.length < 72) {
+          this.effects.push({
+            id: this.nextId('fx'),
+            type: 'level_pulse',
+            x: eater.x,
+            z: eater.z,
+            angle: 0,
+            radius: 36 + eater.level * 0.28,
+            duration: 0.32,
+            elapsed: 0,
+            ownerId: eater.id,
+            color: '#bae6fd',
+          });
+        }
+      } else if (this.effects.length < 40 && this.matchTime - prevMinor >= 0.35) {
+        this.effects.push({
+          id: this.nextId('fx'),
+          type: 'level_pulse',
+          x: eater.x,
+          z: eater.z,
+          angle: 0,
+          radius: 32,
+          duration: 0.28,
+          elapsed: 0,
+          ownerId: eater.id,
+          color: '#bae6fd',
         });
       }
     }
@@ -2968,7 +3471,19 @@ export class GameSimulation {
   }
 
   private tryDash(k: KeliEntity) {
-    if (k.level < 10 || k.cooldowns.dash > 0 || k.stunTimer > 0 || k.evadeTimer > 0) return;
+    if (
+      !k.alive ||
+      this.status !== 'playing' ||
+      this.matchConcluded ||
+      k.level < 10 ||
+      k.cooldowns.dash > 0 ||
+      k.dashTimer > 0 ||
+      k.stunTimer > 0 ||
+      k.staggerTimer > 0 ||
+      k.evadeTimer > 0
+    ) {
+      return;
+    }
     if (k.stamina < DASH_STAMINA_COST) {
       if (k.isPlayer) {
         this.spawnCallout(k.x, k.z, 'LOW STAMINA', '#f59e0b');
@@ -2981,7 +3496,12 @@ export class GameSimulation {
     k.stamina = Math.max(0, k.stamina - DASH_STAMINA_COST);
     k.staminaRegenDelay = Math.max(k.staminaRegenDelay, STAMINA_REGEN_DELAY_SEC);
     if (k.stamina <= 15) k.fatigued = true;
-    const angle = k.facingAngle;
+
+    const input = k.isPlayer ? this.inputsById.get(k.id) : undefined;
+    let angle = k.facingAngle;
+    if (input && Math.hypot(input.moveX, input.moveZ) > 0.1) {
+      angle = Math.atan2(input.moveZ, input.moveX);
+    }
     k.dashDirX = Math.cos(angle);
     k.dashDirZ = Math.sin(angle);
     this.cancelFeeding(k, 'ability');
@@ -3160,24 +3680,6 @@ export class GameSimulation {
   }
 
   private updateAiBrain(bot: KeliEntity, dt: number) {
-    if (bot.stunTimer > 0) {
-      bot.vx *= Math.pow(0.08, dt);
-      bot.vz *= Math.pow(0.08, dt);
-      return;
-    }
-
-    if (bot.evadeTimer > 0) {
-      const spd = this.getMoveSpeed(bot);
-      bot.vx = bot.evadeDirX * spd * 2.4;
-      bot.vz = bot.evadeDirZ * spd * 2.4;
-      bot.facingAngle = rotateAngleTowards(
-        bot.facingAngle,
-        Math.atan2(bot.evadeDirZ, bot.evadeDirX),
-        15 * dt
-      );
-      return;
-    }
-
     // In tutorial early steps, keep far bots passive so player learns safely
     if (this.mode === 'tutorial' && this.tutorial && this.tutorial.step < 2 && bot.id !== 'bot-contested') {
       bot.vx *= 0.9;
@@ -3185,188 +3687,7 @@ export class GameSimulation {
       return;
     }
 
-    bot.aiGoalTimer -= dt;
-    const distFromZone = Math.hypot(bot.x - this.zone.centerX, bot.z - this.zone.centerZ);
-
-    // 1. Retreat if outside safe zone
-    if (distFromZone > this.zone.currentRadius - 80) {
-      const ang = Math.atan2(this.zone.centerZ - bot.z, this.zone.centerX - bot.x);
-      bot.facingAngle = ang;
-      const spd = this.getMoveSpeed(bot);
-      bot.vx = Math.cos(ang) * spd;
-      bot.vz = Math.sin(ang) * spd;
-      return;
-    }
-
-    // 1b. Steer out of stamina-draining hazards when fatigued or low stamina
-    if (bot.activeHazard && (bot.fatigued || bot.stamina < 38)) {
-      const mod = getHazardModifierForForm(bot.activeHazard, getEvolutionForm(bot.level));
-      if (mod.staminaRate < -8) {
-        const toSafeAng = Math.atan2(this.zone.centerZ - bot.z, this.zone.centerX - bot.x);
-        bot.facingAngle = toSafeAng;
-        const spd = this.getMoveSpeed(bot);
-        bot.vx = Math.cos(toSafeAng) * spd;
-        bot.vz = Math.sin(toSafeAng) * spd;
-        return;
-      }
-    }
-
-    // 2. Lv 40-79 retreat from shore before exposure kills them
-    if (bot.level >= 40 && bot.level < 80 && bot.isOnShore && bot.shoreReserve < 2.8) {
-      bot.aiRetreatingFromShore = true;
-    } else if (!bot.isOnShore) {
-      bot.aiRetreatingFromShore = false;
-    }
-
-    if (bot.aiRetreatingFromShore) {
-      const ang = Math.atan2(this.zone.centerZ - bot.z, this.zone.centerX - bot.x);
-      bot.facingAngle = ang;
-      const spd = this.getMoveSpeed(bot);
-      bot.vx = Math.cos(ang) * spd;
-      bot.vz = Math.sin(ang) * spd;
-      if (bot.level >= 10 && bot.cooldowns.dash <= 0) this.tryDash(bot);
-      return;
-    }
-
-    // 3. Scan surroundings (respecting Silt Veil disruption & weather visibility!)
-    const vis = this.weather.visibilityRange;
-    let nearestThreat: KeliEntity | null = null;
-    let nearestThreatDist = 420 * vis;
-    let nearestPrey: KeliEntity | null = null;
-    let nearestPreyDist = 480 * vis;
-
-    for (const other of this.kelis) {
-      if (!other.alive || other.id === bot.id) continue;
-      // Silt Veil disrupts bot targeting!
-      if (other.veilTimer > 0) continue;
-      if (other.isOnShore && bot.level < 40) continue;
-
-      const d = Math.hypot(other.x - bot.x, other.z - bot.z);
-      if (other.level > bot.level * 1.15 && d < nearestThreatDist) {
-        nearestThreat = other;
-        nearestThreatDist = d;
-      } else if (other.level <= bot.level * 1.1 && d < nearestPreyDist) {
-        nearestPrey = other;
-        nearestPreyDist = d;
-      }
-    }
-
-    // Nearest reachable carcass (search globally if no prey is close or during Final Feast)
-    let nearestCarc: CarcassEntity | null = null;
-    let nearestCarcDist = this.finalFeastActive || !nearestPrey ? WORLD_SIZE * 2 : 560 * vis;
-    for (const c of this.carcasses) {
-      if (c.consumed || c.mass <= 0) continue;
-      if (getTerrainAt(c.x, c.z) === 'shore' && bot.level < 40) continue;
-      const d = Math.hypot(c.x - bot.x, c.z - bot.z);
-      if (d < nearestCarcDist) {
-        nearestCarcDist = d;
-        nearestCarc = c;
-      }
-    }
-
-    // Nearest useful healing/power-up pickup (including rain-fed spawns)
-    let nearestPickup: PickupItem | null = null;
-    let nearestPickupDist = bot.hp < bot.maxHp * 0.65 ? 360 * vis : 240 * vis;
-    for (const pk of this.pickups) {
-      if (getTerrainAt(pk.x, pk.z) === 'shore' && bot.level < 40) continue;
-      const isHealDrop = pk.kind === 'kelp_salve' || pk.kind === 'monsoon_dew';
-      if (isHealDrop && bot.hp >= bot.maxHp * 0.85 && bot.venomTimer <= 0) continue;
-      const d = Math.hypot(pk.x - bot.x, pk.z - bot.z);
-      const maxSearch = (isHealDrop && bot.hp < bot.maxHp * 0.65 ? 360 : pk.rainFed ? 280 : 220) * vis;
-      if (d < maxSearch && d < nearestPickupDist) {
-        nearestPickupDist = d;
-        nearestPickup = pk;
-      }
-    }
-
-    const spd = this.getMoveSpeed(bot);
-
-    // Reactive defensive counterplay: evade telegraphed nearby bites when stamina/cooldown allows
-    if (bot.cooldowns.evade <= 0 && bot.stamina >= EVADE_STAMINA_COST + 10) {
-      const windingThreat =
-        nearestThreat && nearestThreatDist < 105 && nearestThreat.bitePhase === 'windup'
-          ? nearestThreat
-          : nearestPrey && nearestPreyDist < 95 && nearestPrey.bitePhase === 'windup' && bot.hp < bot.maxHp * 0.55
-          ? nearestPrey
-          : null;
-      if (windingThreat && Math.random() < dt * 3.5) {
-        const awayAng = Math.atan2(bot.z - windingThreat.z, bot.x - windingThreat.x) + (Math.random() < 0.5 ? 0.7 : -0.7);
-        bot.vx = Math.cos(awayAng) * spd;
-        bot.vz = Math.sin(awayAng) * spd;
-        if (this.tryEvade(bot)) return;
-      }
-    }
-
-    // Decision hierarchy
-    if (nearestThreat && nearestThreatDist < 230 && bot.hp < bot.maxHp * 0.75) {
-      // Flee threat
-      const fleeAng = Math.atan2(bot.z - nearestThreat.z, bot.x - nearestThreat.x);
-      bot.facingAngle = rotateAngleTowards(bot.facingAngle, fleeAng, 11 * dt);
-      bot.vx = Math.cos(fleeAng) * spd;
-      bot.vz = Math.sin(fleeAng) * spd;
-      if (bot.level >= 50 && bot.cooldowns.veil <= 0) this.tryVeil(bot);
-      else if (bot.level >= 10 && bot.cooldowns.dash <= 0) this.tryDash(bot);
-      return;
-    }
-
-    if (
-      nearestPickup &&
-      (((nearestPickup.kind === 'kelp_salve' || nearestPickup.kind === 'monsoon_dew') &&
-        bot.hp < bot.maxHp * 0.65) ||
-        nearestPickupDist < 185)
-    ) {
-      const ang = Math.atan2(nearestPickup.z - bot.z, nearestPickup.x - bot.x);
-      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 11 * dt);
-      bot.vx = Math.cos(ang) * spd;
-      bot.vz = Math.sin(ang) * spd;
-      return;
-    }
-
-    if (nearestCarc && (nearestCarcDist < 170 || !nearestPrey)) {
-      const ang = Math.atan2(nearestCarc.z - bot.z, nearestCarc.x - bot.x);
-      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 11 * dt);
-      if (nearestCarcDist > 42) {
-        bot.vx = Math.cos(ang) * spd;
-        bot.vz = Math.sin(ang) * spd;
-      } else {
-        bot.vx *= 0.5;
-        bot.vz *= 0.5;
-        this.tryBiteOrFeed(bot, false);
-      }
-      return;
-    }
-
-    if (nearestPrey && (bot.hp > bot.maxHp * 0.35 || nearestPreyDist < 120)) {
-      const ang = Math.atan2(nearestPrey.z - bot.z, nearestPrey.x - bot.x);
-      bot.facingAngle = rotateAngleTowards(bot.facingAngle, ang, 12 * dt);
-      bot.vx = Math.cos(ang) * spd;
-      bot.vz = Math.sin(ang) * spd;
-
-      if (nearestPreyDist < 72 + this.computeRadius(bot.level)) {
-        this.tryBiteOrFeed(bot, false);
-      } else if (bot.level >= 60 && nearestPreyDist < 130 && bot.cooldowns.electroshock <= 0) {
-        this.tryElectroshock(bot);
-      } else if (bot.level >= 90 && nearestPreyDist < 240 && bot.cooldowns.maelstrom <= 0) {
-        this.tryMaelstrom(bot);
-      } else if (bot.level >= 10 && nearestPreyDist < 220 && bot.cooldowns.dash <= 0 && bot.aiAggression > 0.55) {
-        this.tryDash(bot);
-      }
-      return;
-    }
-
-    // Patrol / wander toward Jantung Tasik
-    if (bot.aiGoalTimer <= 0) {
-      bot.aiGoalTimer = 1.6 + Math.random() * 2.2;
-      const toCenter = Math.atan2(this.zone.centerZ - bot.z, this.zone.centerX - bot.x);
-      bot.aiWanderAngle = toCenter + (Math.random() - 0.5) * 1.9;
-      if (bot.level >= 20 && bot.cooldowns.sonar <= 0 && Math.random() < 0.35) {
-        this.trySonar(bot);
-      }
-    }
-
-    bot.facingAngle = bot.aiWanderAngle;
-    bot.vx = Math.cos(bot.aiWanderAngle) * spd * 0.72;
-    bot.vz = Math.sin(bot.aiWanderAngle) * spd * 0.72;
+    this.aiController.updateBot(bot, dt, this.aiContext);
   }
 
   /**
@@ -3740,7 +4061,9 @@ export class GameSimulation {
           const d = Math.hypot(dx, dz);
           if (d < fx.radius && d > 22) {
             const pull = 175 * dt;
-            const resolved = resolveArenaCollision(
+            const resolved = resolveSweptMovement(
+              k.x,
+              k.z,
               k.x + (dx / d) * pull,
               k.z + (dz / d) * pull,
               this.computeRadius(k.level),
@@ -3757,7 +4080,9 @@ export class GameSimulation {
           const d = Math.hypot(dx, dz);
           if (d < fx.radius && d > 18) {
             const pull = 210 * dt;
-            const resolved = resolveArenaCollision(
+            const resolved = resolveSweptMovement(
+              c.x,
+              c.z,
               c.x + (dx / d) * pull,
               c.z + (dz / d) * pull,
               12,
@@ -3863,8 +4188,14 @@ export class GameSimulation {
     this.winnerId = king.id;
     this.winnerName = king.name;
     this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
+    this.pacingDirector.recordConclusion('level_100_king', this.matchTime);
     for (const k of this.kelis) {
       if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+      // Halt all locomotion & active bursts cleanly so the Keli King and survivors never drift post-victory
+      k.vx = 0;
+      k.vz = 0;
+      k.dashTimer = 0;
+      k.evadeTimer = 0;
     }
 
     const subtitle = sourceLabel
@@ -3930,6 +4261,7 @@ export class GameSimulation {
       this.matchConcluded = true;
       this.finalFeastActive = false;
       this.status = 'draw';
+      this.pacingDirector.recordConclusion('draw_mutual_elimination', this.matchTime);
       for (const k of this.kelis) {
         if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
       }
@@ -3950,6 +4282,18 @@ export class GameSimulation {
         this.playerSurvivalTime = this.matchTime;
       }
     }
+  }
+
+  public getMatchPhase(): MatchPhase {
+    return this.pacingDirector.getPhase();
+  }
+
+  public getActivityHotspots(): ActivityHotspot[] {
+    return this.pacingDirector.getActiveHotspots(this.matchTime);
+  }
+
+  public getPacingMetrics(): MatchPacingMetrics {
+    return this.pacingDirector.getMetrics();
   }
 
   public getHudSnapshot(playerId = this.primaryPlayerId): HudSnapshot {
@@ -4089,6 +4433,39 @@ export class GameSimulation {
           screenAngle: Math.atan2(dz, dx),
           distance: Math.round(dist),
           level: contact.level,
+        });
+      }
+    }
+
+    // Weather-respecting public activity hotspots (suppressed during Final Feast)
+    const maxHotspotVisRange =
+      (focus.sonarTimer > 0 ? 2600 : 1950) * this.weather.visibilityRange;
+    const activityHotspots: ActivityHotspot[] =
+      this.finalFeastActive || this.mode === 'tutorial'
+        ? []
+        : this.pacingDirector
+            .getActiveHotspots(this.matchTime)
+            .filter((h) => Math.hypot(h.x - focus.x, h.z - focus.z) <= maxHotspotVisRange)
+            .map((h) => ({ ...h }));
+
+    if (!finalFeast && offscreenIndicators.length < 2 && activityHotspots.length > 0) {
+      let nearestHs: ActivityHotspot | null = null;
+      let nearestHsDist = Infinity;
+      for (const hs of activityHotspots) {
+        const d = Math.hypot(hs.x - focus.x, hs.z - focus.z);
+        if (d > 360 && d < nearestHsDist) {
+          nearestHsDist = d;
+          nearestHs = hs;
+        }
+      }
+      if (nearestHs && !seenIndicatorIds.has(nearestHs.id)) {
+        seenIndicatorIds.add(nearestHs.id);
+        offscreenIndicators.push({
+          id: nearestHs.id,
+          kind: 'hotspot',
+          screenAngle: Math.atan2(nearestHs.z - focus.z, nearestHs.x - focus.x),
+          distance: Math.round(nearestHsDist),
+          level: Math.round(nearestHs.radius),
         });
       }
     }
@@ -4263,6 +4640,18 @@ export class GameSimulation {
       },
       zone: { ...this.zone },
       weather: { ...this.weather },
+      matchPhase: this.pacingDirector.getPhase(),
+      fragmentsToKing: Math.max(0, TOTAL_MATCH_FRAGMENTS - Math.trunc(p.level)),
+      nextMilestoneLevel:
+        p.level >= TOTAL_MATCH_FRAGMENTS
+          ? null
+          : EVOLUTION_MILESTONES.find((m) => m.level > p.level)?.level ?? TOTAL_MATCH_FRAGMENTS,
+      evolutionProgress: getEvolutionProgressInfo(
+        p.level,
+        p.evolutionSeq ?? 0,
+        p.lastEvolutionForm ?? getEvolutionForm(p.level)
+      ),
+      activityHotspots,
       sonarContacts,
       tacticalCarcasses,
       pickups: this.pickups.map((pk) => ({
@@ -4405,6 +4794,11 @@ export class GameSimulation {
         stormFinTimer: Math.round(k.stormFinTimer * 100) / 100,
         thunderRoeTimer: Math.round(k.thunderRoeTimer * 100) / 100,
         evoBoostTimer: Math.round(k.evoBoostTimer * 100) / 100,
+        highestFormReached: k.highestFormReached ?? getEvolutionForm(k.level),
+        evolutionSeq: k.evolutionSeq ?? 0,
+        lastEvolutionForm: k.lastEvolutionForm ?? getEvolutionForm(k.level),
+        lastEvolutionTime: k.lastEvolutionTime ?? -1,
+        lastMinorLevelTime: k.lastMinorLevelTime ?? -1,
         sonarTimer: Math.round(k.sonarTimer * 100) / 100,
         sonarIsHunter: k.sonarIsHunter,
         kills: k.kills,

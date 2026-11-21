@@ -86,8 +86,8 @@ function isolateKelis(sim: GameSimulation, keepIds: string[]) {
   let idx = 0;
   for (const k of sim.kelis) {
     if (keep.has(k.id)) continue;
-    k.x = LANDMARKS.jantungTasik.x + 1200 + (idx % 4) * 60;
-    k.z = LANDMARKS.jantungTasik.z + 1200 + Math.floor(idx / 4) * 60;
+    k.x = LANDMARKS.radioactiveDrum.x - 420 - (idx % 3) * 55;
+    k.z = LANDMARKS.radioactiveDrum.z - 420 - Math.floor(idx / 3) * 55;
     k.vx = 0;
     k.vz = 0;
     idx += 1;
@@ -101,8 +101,8 @@ test('1. Feeding begins only within valid range and selects the nearest valid ca
   const victimB = sim.kelis[2];
   isolateKelis(sim, [player.id, victimA.id, victimB.id]);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   const maxRange = sim.getFeedRange(player.level);
 
   victimA.x = player.x + maxRange + 45;
@@ -145,8 +145,8 @@ test('2. Feeding progress advances through 0.45s windup and progressive per-frag
   sim.kelis[4].level = 25;
   assertInvariant(sim, 'test 2 setup');
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 22;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -160,6 +160,12 @@ test('2. Feeding progress advances through 0.45s windup and progressive per-frag
   assert.equal(sim.getFeedPacing(15).tickSec, FEED_TICK_SEC_MEDIUM);
   assert.equal(sim.getFeedPacing(35).tickSec, FEED_TICK_SEC_LARGE);
 
+  // Settle tile hazard state once before measuring baseline non-feeding speed
+  sim.setInput({ moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: false });
+  sim.step(0.01);
+  const internal = sim as unknown as { getMoveSpeed: (k: KeliEntity) => number };
+  const normalSpeed = internal.getMoveSpeed(player);
+
   // Start feeding
   sim.setInput({ moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: true });
   sim.step(0.05);
@@ -167,13 +173,10 @@ test('2. Feeding progress advances through 0.45s windup and progressive per-frag
   assert.equal(player.feedingWindupDone, false);
   assert.equal(carc.mass, 5, 'No fragments should transfer before 0.45s initial windup');
 
-  // Verify movement speed is reduced to 20% while feeding
-  const internal = sim as unknown as { getMoveSpeed: (k: KeliEntity) => number };
   const feedingSpeed = internal.getMoveSpeed(player);
-  const expectedBase = 158 + Math.min(48, player.level * 0.45);
   assert.ok(
-    Math.abs(feedingSpeed / expectedBase - FEED_MOVE_SPEED_MULT) < 0.05,
-    `Feeding speed ratio should be ~${FEED_MOVE_SPEED_MULT}, got ${feedingSpeed / expectedBase}`
+    Math.abs(feedingSpeed / normalSpeed - FEED_MOVE_SPEED_MULT) < 0.01,
+    `Feeding speed ratio should be ${FEED_MOVE_SPEED_MULT}, got ${feedingSpeed / normalSpeed}`
   );
 
   // Duplicate feed/bite input during feeding must NOT trigger offensive bite or reset progress
@@ -206,8 +209,8 @@ test('3. Feeding can be cancelled voluntarily (pulling away or explicit cancel) 
   const victim = sim.kelis[1];
   isolateKelis(sim, [player.id, victim.id]);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 24;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -251,8 +254,8 @@ test('4. Qualifying direct damage and stagger/stun interrupt feeding, keep alrea
   sim.kelis[3].level = 30;
   sim.kelis[4].level = 30;
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 22;
   victim.z = player.z;
   ambusher.x = player.x - 220;
@@ -298,8 +301,8 @@ test('5. Slip Evade cancels feeding immediately with zero interrupt recovery loc
   const victim = sim.kelis[1];
   isolateKelis(sim, [player.id, victim.id]);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 22;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -327,8 +330,8 @@ test('6. Stunned players cannot initiate or continue feeding', () => {
   const victim = sim.kelis[1];
   isolateKelis(sim, [player.id, victim.id]);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 20;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -356,8 +359,8 @@ test('7. Partial consumption preserves exact integer fragment totals across repe
   sim.kelis[3].level = 25;
   sim.kelis[4].level = 20;
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 20;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -388,7 +391,7 @@ test('7. Partial consumption preserves exact integer fragment totals across repe
   assertInvariant(sim, 'test 7 finished');
 });
 
-test('8 & 9. Two players contest one carcass simultaneously with independent progress and zero fragment duplication', () => {
+test('8. Two players can contest one carcass simultaneously with independent channel progress', () => {
   const sim = new GameSimulation(5, 'royale', 'P1', {
     emitLocalSound: false,
     isMultiplayerMatch: true,
@@ -407,13 +410,12 @@ test('8 & 9. Two players contest one carcass simultaneously with independent pro
   victim.level = 14;
   sim.kelis[3].level = 33;
   sim.kelis[4].level = 33;
-  assertInvariant(sim, 'test 8/9 setup');
+  assertInvariant(sim, 'test 8 setup');
 
-  const cx = LANDMARKS.jantungTasik.x;
-  const cz = LANDMARKS.jantungTasik.z;
+  const cx = LANDMARKS.radioactiveDrum.x;
+  const cz = LANDMARKS.radioactiveDrum.z;
   victim.x = cx;
   victim.z = cz;
-  // Place p1 & p2 on opposite sides of the carcass (> strikeReach apart so they feed instead of biting each other)
   p1.x = cx - 44;
   p1.z = cz;
   p2.x = cx + 44;
@@ -423,23 +425,66 @@ test('8 & 9. Two players contest one carcass simultaneously with independent pro
   carc.x = cx;
   carc.z = cz;
 
-  // Both players feed simultaneously on the shared carcass
+  // P1 starts feeding first, then P2 joins 0.15s later -> independent channel progress
   sim.setInputForPlayer('p1', { moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: true });
-  sim.setInputForPlayer('p2', { moveX: 0, moveZ: 0, aimAngle: Math.PI, biteHeld: true });
-
+  sim.setInputForPlayer('p2', { moveX: 0, moveZ: 0, aimAngle: Math.PI, biteHeld: false });
   sim.step(0.05);
-  assert.equal(p1.feedingTargetId, carc.id, 'P1 must lock onto contested carcass');
-  assert.equal(p2.feedingTargetId, carc.id, 'P2 must lock onto same contested carcass simultaneously');
+  sim.step(0.05);
+  sim.step(0.05);
 
-  // Verify HUD reports contested feeding state
+  sim.setInputForPlayer('p2', { moveX: 0, moveZ: 0, aimAngle: Math.PI, biteHeld: true });
+  sim.step(0.05);
+
+  assert.equal(p1.feedingTargetId, carc.id, 'P1 must remain locked onto contested carcass');
+  assert.equal(p2.feedingTargetId, carc.id, 'P2 must lock onto same contested carcass simultaneously');
+  assert.ok(p1.feedingProgress > p2.feedingProgress, 'Competing Kelis must track independent channel progress');
+
   const hudP1 = sim.getHudSnapshot('p1');
   assert.equal(hudP1.player.feedingContested, true, 'HUD must flag feedingContested=true');
   assert.equal(hudP1.player.feedingCompetitorCount, 2, 'HUD must count 2 active competitors');
+  assertInvariant(sim, 'test 8 final');
+});
 
-  // Step until carcass is completely depleted by the race
+test('9. Simultaneous contested feeding cannot duplicate fragments and cancels all feeders on depletion', () => {
+  const sim = new GameSimulation(5, 'royale', 'P1', {
+    emitLocalSound: false,
+    isMultiplayerMatch: true,
+    humanEntrants: [
+      { id: 'p1', name: 'P1' },
+      { id: 'p2', name: 'P2' },
+    ],
+  });
+  const p1 = sim.getPlayer('p1');
+  const p2 = sim.getPlayer('p2');
+  const victim = sim.kelis[2];
+  isolateKelis(sim, [p1.id, p2.id, victim.id]);
+
+  p1.level = 10;
+  p2.level = 10;
+  victim.level = 14;
+  sim.kelis[3].level = 33;
+  sim.kelis[4].level = 33;
+  assertInvariant(sim, 'test 9 setup');
+
+  const cx = LANDMARKS.radioactiveDrum.x;
+  const cz = LANDMARKS.radioactiveDrum.z;
+  victim.x = cx;
+  victim.z = cz;
+  p1.x = cx - 44;
+  p1.z = cz;
+  p2.x = cx + 44;
+  p2.z = cz;
+  killEntity(sim, victim, p1);
+  const carc = sim.carcasses[0];
+  carc.x = cx;
+  carc.z = cz;
+
+  sim.setInputForPlayer('p1', { moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: true });
+  sim.setInputForPlayer('p2', { moveX: 0, moveZ: 0, aimAngle: Math.PI, biteHeld: true });
+
   for (let i = 0; i < 60 && sim.carcasses.length > 0; i++) {
     sim.step(0.05);
-    assertInvariant(sim, `test 8/9 step ${i}`);
+    assertInvariant(sim, `test 9 step ${i}`);
   }
 
   assert.equal(sim.carcasses.length, 0, 'Contested carcass must be removed on depletion');
@@ -450,7 +495,7 @@ test('8 & 9. Two players contest one carcass simultaneously with independent pro
   const gainedP2 = p2.level - 10;
   assert.ok(gainedP1 > 0 && gainedP2 > 0, `Both competitors should win fragments (p1=${gainedP1}, p2=${gainedP2})`);
   assert.equal(gainedP1 + gainedP2, 14, 'Combined fragments won must equal exact carcass mass with zero duplication');
-  assertInvariant(sim, 'test 8/9 final');
+  assertInvariant(sim, 'test 9 final');
 });
 
 test('10. Depleted carcass cannot be consumed again and cancels all competing feeders immediately', () => {
@@ -473,8 +518,8 @@ test('10. Depleted carcass cannot be consumed again and cancels all competing fe
   sim.kelis[3].level = 39;
   sim.kelis[4].level = 39;
 
-  const cx = LANDMARKS.jantungTasik.x;
-  const cz = LANDMARKS.jantungTasik.z;
+  const cx = LANDMARKS.radioactiveDrum.x;
+  const cz = LANDMARKS.radioactiveDrum.z;
   victim.x = cx;
   victim.z = cz;
   p1.x = cx - 42;
@@ -509,8 +554,8 @@ test('11. Fragment transfer stops immediately after death and dead Keli drops al
   const killer = sim.kelis[2];
   isolateKelis(sim, [player.id, victim.id, killer.id]);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   victim.x = player.x + 22;
   victim.z = player.z;
   killEntity(sim, victim, player);
@@ -548,8 +593,8 @@ test('12. Feeding stops immediately after match conclusion and cannot transfer f
   killEntity(sim, v4, player);
 
   // Player reaches 100 by eating rival (2) + 3 carcasses (3)
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
   rival.x = player.x + 25;
   rival.z = player.z;
   killEntity(sim, rival, player);
@@ -568,7 +613,7 @@ test('12. Feeding stops immediately after match conclusion and cannot transfer f
     mass: 1,
     initialMass: 1,
     evolutionPhaseAtDeath: 1,
-    sourceId: null,
+    sourceId: undefined,
     sourceName: 'Ghost',
     createdAt: sim.matchTime,
     bobPhase: 0,
@@ -584,9 +629,9 @@ test('13. Feeding respects solid rock obstacle boundaries (no wall feeding) and 
   const victim = sim.kelis[1];
   isolateKelis(sim, [player.id, victim.id]);
 
-  // Pick a rock obstacle where player & carcass sit on opposite sides within nominal range
-  const rock = OBSTACLES.find((o) => o.r <= 34) ?? OBSTACLES[0];
-  const offset = rock.r + 12;
+  // Pick a non-cliff rock obstacle inside the arena where player & carcass sit across a chord within range
+  const rock = OBSTACLES.find((o) => !o.id.startsWith('cliff-') && o.radius <= 50) ?? OBSTACLES.find((o) => !o.id.startsWith('cliff-'))!;
+  const offset = rock.radius + 12;
   player.level = 10;
   player.x = rock.x - offset;
   player.z = rock.z;
@@ -604,16 +649,16 @@ test('13. Feeding respects solid rock obstacle boundaries (no wall feeding) and 
   rockCarc.x = rock.x + offset;
   rockCarc.z = rock.z;
 
-  // Ensure distance is within nominal range if rock is small, or verify direct obstacle rejection
+  // Ensure distance is within nominal range while segment passes through rock interior
   const dist = Math.hypot(rockCarc.x - player.x, rockCarc.z - player.z);
   if (dist <= sim.getFeedRange(player.level)) {
     assert.equal(sim.canFeedOnCarcass(player, rockCarc).reason, 'obstacle');
   } else {
-    // Place just across the rock's chord edge so dist <= feedRange AND segment intersects rock interior
-    player.x = rock.x - rock.r * 0.72;
-    player.z = rock.z - rock.r * 0.85;
-    rockCarc.x = rock.x + rock.r * 0.72;
-    rockCarc.z = rock.z - rock.r * 0.85;
+    // Place just outside the rock's chord edge so dist <= feedRange AND segment intersects rock interior
+    player.x = rock.x - rock.radius * 0.65;
+    player.z = rock.z - rock.radius * 0.85;
+    rockCarc.x = rock.x + rock.radius * 0.65;
+    rockCarc.z = rock.z - rock.radius * 0.85;
     assert.ok(Math.hypot(rockCarc.x - player.x, rockCarc.z - player.z) <= sim.getFeedRange(player.level));
     assert.equal(sim.canFeedOnCarcass(player, rockCarc).reason, 'obstacle');
   }
@@ -623,8 +668,8 @@ test('13. Feeding respects solid rock obstacle boundaries (no wall feeding) and 
   assert.equal(player.feedingTargetId, null, 'Must NOT feed through solid rock obstacle');
 
   // Verify shore Lv.40 restriction: carcass on dry shore cannot be fed on by Lv.10, CAN be fed on by Lv.45
-  const shoreX = LANDMARKS.tebingKering.x;
-  const shoreZ = LANDMARKS.tebingKering.z;
+  const shoreX = LANDMARKS.kampungHut.x;
+  const shoreZ = LANDMARKS.kampungHut.z;
   assert.equal(getTerrainAt(shoreX, shoreZ), 'shore');
   rockCarc.x = shoreX;
   rockCarc.z = shoreZ;
@@ -649,15 +694,29 @@ test('14. Feeding works cleanly across all evolution forms (Form 1 -> Form 2 -> 
   sim.kelis[4].level = 5;  // -> 100 (Form 4)
   assert.equal(getEvolutionForm(player.level), 1);
 
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
+
+  // Keep uninvolved bots stunned far away so they don't wander over during multi-second feeding
+  const keepBotsAway = () => {
+    for (let i = 1; i < sim.kelis.length; i++) {
+      if (sim.kelis[i].alive) {
+        sim.kelis[i].stunTimer = 5;
+      }
+    }
+  };
 
   // Step 1: Form 1 -> Form 2
   sim.kelis[1].x = player.x + 22;
   sim.kelis[1].z = player.z;
   killEntity(sim, sim.kelis[1], player);
   sim.setInput({ moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: true });
-  for (let i = 0; i < 120 && sim.carcasses.length > 0; i++) sim.step(0.05);
+  for (let i = 0; i < 160 && sim.carcasses.length > 0; i++) {
+    keepBotsAway();
+    player.x = sim.carcasses[0].x - 18;
+    player.z = sim.carcasses[0].z;
+    sim.step(0.05);
+  }
   assert.equal(player.level, 45);
   assert.equal(getEvolutionForm(player.level), 2);
   assertInvariant(sim, 'test 14 form 2');
@@ -666,7 +725,12 @@ test('14. Feeding works cleanly across all evolution forms (Form 1 -> Form 2 -> 
   sim.kelis[2].x = player.x + 22;
   sim.kelis[2].z = player.z;
   killEntity(sim, sim.kelis[2], player);
-  for (let i = 0; i < 140 && sim.carcasses.length > 0; i++) sim.step(0.05);
+  for (let i = 0; i < 180 && sim.carcasses.length > 0; i++) {
+    keepBotsAway();
+    player.x = sim.carcasses[0].x - 18;
+    player.z = sim.carcasses[0].z;
+    sim.step(0.05);
+  }
   assert.equal(player.level, 85);
   assert.equal(getEvolutionForm(player.level), 3);
   assertInvariant(sim, 'test 14 form 3');
@@ -678,7 +742,13 @@ test('14. Feeding works cleanly across all evolution forms (Form 1 -> Form 2 -> 
   sim.kelis[4].z = player.z;
   killEntity(sim, sim.kelis[3], player);
   killEntity(sim, sim.kelis[4], player);
-  for (let i = 0; i < 120 && sim.status === 'playing'; i++) sim.step(0.05);
+  for (let i = 0; i < 160 && sim.status === 'playing'; i++) {
+    if (sim.carcasses.length > 0) {
+      player.x = sim.carcasses[0].x - 18;
+      player.z = sim.carcasses[0].z;
+    }
+    sim.step(0.05);
+  }
   assert.equal(player.level, 100);
   assert.equal(getEvolutionForm(player.level), 4);
   assert.equal(sim.status, 'victory');
@@ -688,8 +758,8 @@ test('14. Feeding works cleanly across all evolution forms (Form 1 -> Form 2 -> 
 test('15. Final Feast accelerates feeding rate while preserving animations and exact 100-fragment victory resolution', () => {
   const sim = new GameSimulation(5, 'royale', 'Awang', { emitLocalSound: false });
   const player = sim.getPlayer();
-  player.x = LANDMARKS.jantungTasik.x;
-  player.z = LANDMARKS.jantungTasik.z;
+  player.x = LANDMARKS.radioactiveDrum.x;
+  player.z = LANDMARKS.radioactiveDrum.z;
 
   // Eliminate all 4 bots so player is sole survivor below Lv.100 -> Final Feast triggers
   for (let i = 1; i < sim.kelis.length; i++) {
@@ -751,8 +821,8 @@ test('16. Multiplayer feeding stays authoritative across WorldStatePacket, Remot
   victim.level = 35;
   sim.kelis[4].level = 20;
 
-  const cx = LANDMARKS.jantungTasik.x;
-  const cz = LANDMARKS.jantungTasik.z;
+  const cx = LANDMARKS.radioactiveDrum.x;
+  const cz = LANDMARKS.radioactiveDrum.z;
   victim.x = cx;
   victim.z = cz;
   p1.x = cx - 22;

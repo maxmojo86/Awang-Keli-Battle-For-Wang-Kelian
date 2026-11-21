@@ -1,6 +1,8 @@
 import type { EmoteId } from '../data/emotes';
+import { resolveArenaCollision } from './arena';
 import { soundEngine } from './audio';
 import { getMultiplayerWsUrl } from './backendConfig';
+import { EvolutionPresentationGuard } from './evolutionExperience';
 import {
   ClientMessage,
   ClientSfxEvent,
@@ -11,7 +13,7 @@ import {
   VoiceSignalPayload,
   WorldStatePacket,
 } from './multiplayerTypes';
-import { RenderableSimulation } from './scene3d';
+import type { RenderableSimulation } from './scene3d';
 import {
   AbilityId,
   CarcassEntity,
@@ -87,6 +89,11 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     stormFinTimer: r?.stormFinTimer ?? 0,
     thunderRoeTimer: r?.thunderRoeTimer ?? 0,
     evoBoostTimer: r?.evoBoostTimer ?? 0,
+    highestFormReached: r?.highestFormReached,
+    evolutionSeq: r?.evolutionSeq ?? 0,
+    lastEvolutionForm: r?.lastEvolutionForm,
+    lastEvolutionTime: r?.lastEvolutionTime ?? -1,
+    lastMinorLevelTime: r?.lastMinorLevelTime ?? -1,
     sonarTimer: r?.sonarTimer ?? 0,
     sonarIsHunter: r?.sonarIsHunter ?? false,
     feedingTargetId: r?.feedingTargetId ?? null,
@@ -166,6 +173,7 @@ export class RemoteSimulationView implements RenderableSimulation {
   private lastPacketTime = 0;
   private speakingPeers = new Set<string>();
   private seenDamageHitIds = new Set<string>();
+  private evolutionGuard = new EvolutionPresentationGuard();
 
   constructor(localPlayerId: string) {
     this.localPlayerId = localPlayerId;
@@ -176,6 +184,12 @@ export class RemoteSimulationView implements RenderableSimulation {
   }
 
   public applyServerState(packet: WorldStatePacket) {
+    // Discard stale out-of-order packets so levels, forms, sprites & audio can never regress or double-fire
+    if (this.evolutionGuard.isPacketStale(packet.tick)) {
+      return;
+    }
+
+    const wasAlreadyConcluded = this.status !== 'playing';
     this.latestHud = packet.hud;
     this.status = packet.status;
     this.winnerId = packet.hud.matchResult.winnerId ?? null;
@@ -211,31 +225,57 @@ export class RemoteSimulationView implements RenderableSimulation {
     const activeIds = new Set<string>();
     const nextList: KeliEntity[] = [];
 
+    const matchFrozen = packet.status !== 'playing';
     for (const remote of packet.kelis) {
       activeIds.add(remote.id);
-      this.targetsById.set(remote.id, remote);
+      const evoCheck = this.evolutionGuard.reconcileEntity(
+        remote.id,
+        remote.level,
+        remote.highestFormReached,
+        remote.evolutionSeq,
+        remote.alive,
+        packet.status
+      );
+      const effectiveRemote = matchFrozen
+        ? {
+            ...remote,
+            level: evoCheck.effectiveLevel,
+            highestFormReached: evoCheck.effectiveForm,
+            evolutionSeq: evoCheck.effectiveEvoSeq,
+            vx: 0,
+            vz: 0,
+            dashTimer: 0,
+            evadeTimer: 0,
+          }
+        : {
+            ...remote,
+            level: evoCheck.effectiveLevel,
+            highestFormReached: evoCheck.effectiveForm,
+            evolutionSeq: evoCheck.effectiveEvoSeq,
+          };
+      this.targetsById.set(remote.id, effectiveRemote);
       let ent = this.entityById.get(remote.id);
       if (!ent) {
-        ent = makeDefaultEntity(remote);
+        ent = makeDefaultEntity(effectiveRemote);
         this.entityById.set(remote.id, ent);
       } else {
-        // Snap if teleported/large jump, otherwise interpolate smoothly in advance()
-        const jumpDist = Math.hypot(remote.x - ent.x, remote.z - ent.z);
-        if (jumpDist > 260) {
-          ent.x = remote.x;
-          ent.z = remote.z;
-          ent.facingAngle = remote.facingAngle;
+        // Snap if teleported/large jump, otherwise reconcile smoothly in advance()
+        const jumpDist = Math.hypot(effectiveRemote.x - ent.x, effectiveRemote.z - ent.z);
+        if (jumpDist > 220) {
+          ent.x = effectiveRemote.x;
+          ent.z = effectiveRemote.z;
+          ent.facingAngle = effectiveRemote.facingAngle;
         }
-        ent.name = remote.name;
-        ent.isPlayer = remote.id === this.localPlayerId;
-        ent.vx = remote.vx;
-        ent.vz = remote.vz;
-        ent.level = remote.level;
-        ent.hp = remote.hp;
-        ent.maxHp = remote.maxHp;
-        ent.alive = remote.alive;
-        ent.isOnShore = remote.isOnShore;
-        ent.isSubmerged = remote.isSubmerged;
+        ent.name = effectiveRemote.name;
+        ent.isPlayer = effectiveRemote.id === this.localPlayerId;
+        ent.vx = effectiveRemote.vx;
+        ent.vz = effectiveRemote.vz;
+        ent.level = effectiveRemote.level;
+        ent.hp = effectiveRemote.hp;
+        ent.maxHp = effectiveRemote.maxHp;
+        ent.alive = effectiveRemote.alive;
+        ent.isOnShore = effectiveRemote.isOnShore;
+        ent.isSubmerged = effectiveRemote.isSubmerged;
         ent.shoreReserve = remote.shoreReserve;
         ent.maxShoreReserve = remote.maxShoreReserve;
         ent.stamina = remote.stamina;
@@ -265,6 +305,11 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.stormFinTimer = remote.stormFinTimer;
         ent.thunderRoeTimer = remote.thunderRoeTimer;
         ent.evoBoostTimer = remote.evoBoostTimer ?? 0;
+        ent.highestFormReached = effectiveRemote.highestFormReached;
+        ent.evolutionSeq = effectiveRemote.evolutionSeq;
+        ent.lastEvolutionForm = remote.lastEvolutionForm ?? effectiveRemote.highestFormReached;
+        ent.lastEvolutionTime = remote.lastEvolutionTime ?? ent.lastEvolutionTime;
+        ent.lastMinorLevelTime = remote.lastMinorLevelTime ?? ent.lastMinorLevelTime;
         ent.sonarTimer = remote.sonarTimer;
         ent.sonarIsHunter = remote.sonarIsHunter;
         ent.kills = remote.kills;
@@ -289,10 +334,13 @@ export class RemoteSimulationView implements RenderableSimulation {
         this.targetsById.delete(id);
       }
     }
+    this.evolutionGuard.pruneMissing(activeIds);
     this.kelis = nextList;
 
-    for (const sfx of packet.sfx) {
-      this.playSfx(sfx);
+    if (!wasAlreadyConcluded) {
+      for (const sfx of packet.sfx) {
+        this.playSfx(sfx);
+      }
     }
   }
 
@@ -342,6 +390,21 @@ export class RemoteSimulationView implements RenderableSimulation {
         break;
       case 'evolution':
         soundEngine.playEvolution();
+        break;
+      case 'level_up_minor':
+        soundEngine.playMinorLevelUp(this.latestHud?.player.level ?? 1);
+        break;
+      case 'ability_unlock':
+        soundEngine.playAbilityUnlock();
+        break;
+      case 'evolution_form_2':
+        soundEngine.playForm2Transformation();
+        break;
+      case 'evolution_form_3':
+        soundEngine.playForm3Transformation();
+        break;
+      case 'evolution_king':
+        soundEngine.playKeliKingAscension();
         break;
       case 'dash':
         soundEngine.playDash();
@@ -405,16 +468,42 @@ export class RemoteSimulationView implements RenderableSimulation {
       this.cameraShake = Math.max(0, this.cameraShake - dt * 2.5);
     }
     const deathCamActive = Boolean(this.getDeathCam()?.active);
-    const blend = 1 - Math.exp((deathCamActive ? -11 : -18) * dt);
-    const deadReckonDt = Math.min(0.06, (performance.now() - this.lastPacketTime) / 1000) * 0.45;
+    const matchPlaying = this.status === 'playing';
+    const baseBlend = 1 - Math.exp((deathCamActive ? -11 : -16) * dt);
+    const burstBlend = 1 - Math.exp(-24 * dt);
+    const deadReckonDt = matchPlaying
+      ? Math.min(0.055, Math.max(0, (performance.now() - this.lastPacketTime) / 1000)) * 0.4
+      : 0;
     const fxDt = dt * (deathCamActive ? 0.3 : 1);
 
     for (const ent of this.kelis) {
       ent.isSpeaking = this.speakingPeers.has(ent.id);
       const target = this.targetsById.get(ent.id);
       if (!target) continue;
-      const goalX = target.x + target.vx * deadReckonDt;
-      const goalZ = target.z + target.vz * deadReckonDt;
+
+      // Halt extrapolation cleanly once match concludes, entity is eliminated, or Keli King is crowned
+      if (!matchPlaying || !ent.alive || ent.level >= 100) {
+        ent.vx = 0;
+        ent.vz = 0;
+        ent.x += (target.x - ent.x) * baseBlend;
+        ent.z += (target.z - ent.z) * baseBlend;
+        ent.facingAngle = lerpAngle(ent.facingAngle, target.facingAngle, baseBlend);
+        continue;
+      }
+
+      const isBursting = target.dashTimer > 0 || (target.evadeTimer ?? 0) > 0;
+      const blend = isBursting ? burstBlend : baseBlend;
+      let goalX = target.x + target.vx * deadReckonDt;
+      let goalZ = target.z + target.vz * deadReckonDt;
+
+      // Keep client-side dead reckoning strictly inside walkable arena & shoreline bounds
+      if (deadReckonDt > 0.0005 && (Math.abs(target.vx) > 2 || Math.abs(target.vz) > 2)) {
+        const radius = 14 + ent.level * 0.28 + (ent.level >= 80 ? 8 : ent.level >= 40 ? 4 : 0);
+        const safe = resolveArenaCollision(goalX, goalZ, radius, ent.level >= 40);
+        goalX = safe.x;
+        goalZ = safe.z;
+      }
+
       ent.x += (goalX - ent.x) * blend;
       ent.z += (goalZ - ent.z) * blend;
       ent.facingAngle = lerpAngle(ent.facingAngle, target.facingAngle, blend);
@@ -462,6 +551,10 @@ export class RemoteSimulationView implements RenderableSimulation {
     const dc = this.latestHud?.deathCam;
     if (!dc || !dc.active || dc.remaining <= 0) return null;
     return dc;
+  }
+
+  public getLatestHud(): HudSnapshot | null {
+    return this.latestHud;
   }
 }
 

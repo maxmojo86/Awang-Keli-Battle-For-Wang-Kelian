@@ -96,6 +96,9 @@ export interface KeliEntity {
   alive: boolean;
 
   // Shoreline, stamina & terrain
+  moveAngle?: number;
+  shoreSplashCooldown?: number;
+  locomotionFxTimer?: number;
   isOnShore: boolean;
   isSubmerged: boolean;
   shoreReserve: number; // max 10s for Lv 40-79
@@ -148,6 +151,12 @@ export interface KeliEntity {
   stormFinTimer: number;
   thunderRoeTimer: number;
   evoBoostTimer: number;
+  highestFormReached?: EvolutionForm;
+  unlockedMilestoneMask?: number;
+  evolutionSeq?: number;
+  lastEvolutionForm?: EvolutionForm;
+  lastEvolutionTime?: number;
+  lastMinorLevelTime?: number;
 
   // Sonar
   sonarTimer: number;
@@ -176,12 +185,17 @@ export interface KeliEntity {
   lastAttackerName: string | null;
   lastDamageCause: string | null;
 
-  // AI brain
+  // AI brain (server/local simulation only — never serialized into multiplayer packets)
   aiWanderAngle: number;
   aiGoalTimer: number;
   aiTargetId: string | null;
   aiAggression: number;
   aiRetreatingFromShore: boolean;
+  aiPersonality?: AiPersonality;
+  aiState?: AiState;
+  aiStateScore?: number;
+  aiIntentAngle?: number;
+  aiTargetLabel?: string | null;
 
   activeEmote?: EmoteId | null;
   emoteTimer?: number;
@@ -217,7 +231,11 @@ export type EffectType =
   | 'stun_burst'
   | 'mitigated_ring'
   | 'evolution_burst'
-  | 'feed_splash';
+  | 'level_pulse'
+  | 'feed_splash'
+  | 'shore_splash'
+  | 'land_dust'
+  | 'water_ripple';
 
 export interface WorldEffect {
   id: string;
@@ -268,6 +286,43 @@ export interface SonarContact {
   isOnShore: boolean;
 }
 
+export type MatchPhase = 'early' | 'mid' | 'endgame';
+
+export type ActivityHotspotKind =
+  | 'combat'
+  | 'contested_feed'
+  | 'convergence'
+  | 'large_carcass';
+
+export interface ActivityHotspot {
+  id: string;
+  kind: ActivityHotspotKind;
+  x: number;
+  z: number;
+  radius: number;
+  intensity: number; // 0..1 visual emphasis
+  createdAt: number;
+  expiresAt: number;
+  label: string;
+}
+
+export interface MatchPacingMetrics {
+  lobbySize: LobbySize;
+  matchSeed: number;
+  matchPhase: MatchPhase;
+  totalMatchDurationSec: number;
+  timeToFirstEncounterSec: number | null;
+  timeToFirstEliminationSec: number | null;
+  encounterCount: number;
+  avgEncounterIntervalSec: number | null;
+  deadTimeSec: number;
+  contestedCarcassCount: number;
+  hotspotsCreated: number;
+  evolutionMilestonesSec: Partial<Record<20 | 40 | 60 | 80 | 100, number>>;
+  phaseTransitionTimesSec: Partial<Record<MatchPhase, number>>;
+  conclusionCause: string | null;
+}
+
 export interface ZoneState {
   centerX: number;
   centerZ: number;
@@ -276,6 +331,8 @@ export interface ZoneState {
   phase: number;
   warningTimer: number;
   isShrinking: boolean;
+  /** True during the pre-contraction alert window before the zone begins moving. */
+  warningActive?: boolean;
 }
 
 export interface TutorialStepState {
@@ -344,6 +401,23 @@ export interface FinalFeastState {
   active: boolean;
   remainingFragments: number;
   remainingCarcasses: FinalFeastCarcassMarker[];
+}
+
+export interface HudEvolutionProgress {
+  currentLevel: number;
+  currentForm: EvolutionForm;
+  currentFormName: string;
+  currentFormShortName: string;
+  formLabel: string;
+  nextEvolutionLevel: number | null;
+  fragmentsToNextEvolution: number;
+  evolutionStageProgress: number;
+  overallProgress: number;
+  nextAbilityLevel: number | null;
+  nextAbilityTitle: string | null;
+  isMaxLevel: boolean;
+  evolutionSeq: number;
+  lastMajorForm: EvolutionForm;
 }
 
 export interface HudSnapshot {
@@ -417,6 +491,11 @@ export interface HudSnapshot {
 
   zone: ZoneState;
   weather: WeatherState;
+  matchPhase?: MatchPhase;
+  fragmentsToKing?: number;
+  nextMilestoneLevel?: number | null;
+  evolutionProgress?: HudEvolutionProgress;
+  activityHotspots?: ActivityHotspot[];
   pickups: Array<{ id: string; kind: PickupKind; x: number; z: number; rainFed?: boolean }>;
   sonarContacts: SonarContact[];
   tacticalCarcasses?: Array<{
@@ -431,7 +510,7 @@ export interface HudSnapshot {
   finalFeast?: FinalFeastState | null;
   offscreenIndicators: Array<{
     id: string;
-    kind: 'prey' | 'danger' | 'carcass';
+    kind: 'prey' | 'danger' | 'carcass' | 'hotspot';
     screenAngle: number;
     distance: number;
     level: number;
@@ -530,3 +609,42 @@ export interface AccessibilitySettings {
   voiceMode?: 'open' | 'ptt';
   evadeKey?: string;
 }
+
+export type AiDifficulty = 'easy' | 'normal' | 'hard';
+
+export type AiPersonality =
+  | 'aggressive_hunter'
+  | 'cautious_survivor'
+  | 'opportunistic_scavenger'
+  | 'patient_ambusher';
+
+export type AiState =
+  | 'EXPLORE'
+  | 'HUNT'
+  | 'CHASE'
+  | 'ATTACK'
+  | 'EVADE'
+  | 'RETREAT'
+  | 'AMBUSH'
+  | 'SCAVENGE'
+  | 'FEED'
+  | 'CONTEST_CARCASS'
+  | 'RECOVER'
+  | 'ESCAPE_ZONE';
+
+export interface AiDebugEntry {
+  botId: string;
+  name: string;
+  level: number;
+  personality: AiPersonality;
+  state: AiState;
+  targetId: string | null;
+  targetLabel: string | null;
+  hpPct: number;
+  staminaPct: number;
+  score: number;
+  intentAngle: number;
+  x: number;
+  z: number;
+}
+

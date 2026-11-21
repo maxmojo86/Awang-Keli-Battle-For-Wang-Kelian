@@ -27,9 +27,9 @@ function getFormVisualSpec(form: EvolutionForm, level: number): FormVisualSpec {
   switch (form) {
     case 2:
       return {
-        kicker: `First Reformation · Lv.${level}`,
-        title: 'Arms & Tail Awakened',
-        detail: 'Muscular forelimbs formed · Bite now stuns · 10s shore raids unlocked',
+        kicker: `Evolution · Lv.${level} / 100`,
+        title: 'FIRST REFORMATION — SHORE ACCESS UNLOCKED',
+        detail: 'Muscular forelimbs formed (no legs) · Bite stuns · 10s shore raids unlocked',
         colors: ['#f3d285', '#e69f45', '#5eead4', '#4ade80'],
         coreColor: '#fde68a',
         ringColor: '#f59e0b',
@@ -37,9 +37,9 @@ function getFormVisualSpec(form: EvolutionForm, level: number): FormVisualSpec {
       };
     case 3:
       return {
-        kicker: `Amphibious Metamorphosis · Lv.${level}`,
-        title: 'Full Land & Water Mastery',
-        detail: 'Hind legs grown · Permanent land access · Hunter Sonar unlocked',
+        kicker: `Evolution · Lv.${level} / 100`,
+        title: 'AMPHIBIOUS ASCENSION — LAND & WATER DOMINION',
+        detail: 'Full amphibious anatomy · Permanent land access · Hunter Sonar unlocked',
         colors: ['#38bdf8', '#4ade80', '#fbbf24', '#bae6fd'],
         coreColor: '#a5f3fc',
         ringColor: '#38bdf8',
@@ -48,9 +48,9 @@ function getFormVisualSpec(form: EvolutionForm, level: number): FormVisualSpec {
     case 4:
     default:
       return {
-        kicker: `All 100 Fragments Reunited · Lv.${level}`,
-        title: 'Raja Keli, King of Wang Kelian',
-        detail: 'Supreme amphibious apex colossus · Match Victory',
+        kicker: 'ALL 100 FRAGMENTS REUNITED · LV.100',
+        title: 'KELI KING',
+        detail: 'Raja Keli, Supreme Amphibious Colossus of Wang Kelian · Match Victory',
         colors: ['#fde68a', '#f59e0b', '#4ade80', '#fffbeb'],
         coreColor: '#fffbeb',
         ringColor: '#fbbf24',

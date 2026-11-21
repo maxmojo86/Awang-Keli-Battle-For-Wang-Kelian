@@ -171,7 +171,10 @@ export type AnimatableKeliState = Pick<
   | 'biteAttackSeq'
   | 'evadeTimer'
   | 'dashTimer'
->;
+> & {
+  staggerTimer?: number;
+  moveAngle?: number;
+};
 
 export interface ActorAnimState {
   phase: EvolutionPhase;
@@ -290,14 +293,31 @@ export function resolveActorAnimIntent(
   }
 
   if (speed > SPRITE_ANIM_CONFIG.moveSpeedThreshold) {
-    // Subtle speed-responsive pacing while staying near the phase's target FPS.
-    // Phase 2 underwater swims slightly brisker than heavy land dragging.
-    const speedFactor = Math.max(0.85, Math.min(1.18, 0.8 + speed / 260));
-    const mediumFactor = phase === 2 && !k.isOnShore ? 1.08 : 1.0;
+    // Staggered locomotion visibly slows down to match heavy hit-stun recovery
+    if ((k.staggerTimer ?? 0) > 0) {
+      return { action: 'move', paused: false, speedMult: 0.52 };
+    }
+
+    const speedRatio = Math.max(0, Math.min(1.25, speed / 195));
+    let speedMult: number;
+    if (phase === 1) {
+      // Form 1 (Lv.1–39): agile aquatic swimming proportional to speed (accelerating -> cruising)
+      speedMult = Math.max(0.74, Math.min(1.24, 0.74 + speedRatio * 0.42));
+    } else if (phase === 2) {
+      // Form 2 (Lv.40–79): brisk water swim vs noticeably heavier, slower two-arm land dragging
+      speedMult = k.isOnShore
+        ? Math.max(0.64, Math.min(0.92, 0.64 + speedRatio * 0.28))
+        : Math.max(0.84, Math.min(1.18, 0.84 + speedRatio * 0.34));
+    } else {
+      // Form 3 (Lv.80–99): commanding amphibious land stride vs powerful aquatic swim
+      speedMult = k.isOnShore
+        ? Math.max(0.78, Math.min(1.12, 0.78 + speedRatio * 0.34))
+        : Math.max(0.82, Math.min(1.15, 0.82 + speedRatio * 0.32));
+    }
     return {
       action: 'move',
       paused: false,
-      speedMult: speedFactor * mediumFactor,
+      speedMult,
     };
   }
 

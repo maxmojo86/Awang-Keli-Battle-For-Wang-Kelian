@@ -376,6 +376,10 @@ class SoundEngine {
   private muted = false;
   private volume = 0.65;
   private musicVolume = 0.35;
+  private lastMinorLevelSfxAt = -10;
+  private lastAbilityUnlockSfxAt = -10;
+  private lastMajorEvoSfxAt = -10;
+  private lastKingAscensionSfxAt = -10;
 
   // Menu soundtrack state (single instance across renders, resize & orientation changes)
   private rawAudioBytes: ArrayBuffer | null = null;
@@ -2359,6 +2363,8 @@ class SoundEngine {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
     const now = ctx.currentTime;
+    if (now - this.lastAbilityUnlockSfxAt < 0.16) return;
+    this.lastAbilityUnlockSfxAt = now;
 
     [220, 277.18, 329.63, 440].forEach((f, idx) => {
       const osc = ctx.createOscillator();
@@ -2375,6 +2381,229 @@ class SoundEngine {
   }
 
   /**
+   * Subtle rising aquatic droplet chime for minor fragment/level gains (rate-limited).
+   */
+  public playMinorLevelUp(level = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    if (now - this.lastMinorLevelSfxAt < 0.14) return;
+    this.lastMinorLevelSfxAt = now;
+
+    const pitchScale = 1 + Math.min(1, Math.max(0, level / 100)) * 0.22;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(420 * pitchScale, now);
+    osc.frequency.exponentialRampToValueAtTime(640 * pitchScale, now + 0.12);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.075, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.18);
+  }
+
+  /**
+   * Crisp harmonic unlock flourish for Lv.10/20/30/50/60/70/90 ability milestones.
+   */
+  public playAbilityUnlock() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    if (now - this.lastAbilityUnlockSfxAt < 0.2) return;
+    this.lastAbilityUnlockSfxAt = now;
+
+    const notes = [293.66, 369.99, 440.0, 587.33];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+      osc.type = idx === notes.length - 1 ? 'sine' : 'triangle';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.055);
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(2200, now + idx * 0.055);
+      gain.gain.setValueAtTime(0.001, now + idx * 0.055);
+      gain.gain.linearRampToValueAtTime(0.11, now + idx * 0.055 + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.055 + 0.34);
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.055);
+      osc.stop(now + idx * 0.055 + 0.36);
+    });
+  }
+
+  /**
+   * Level 40 First Reformation: muscular surge + water displacement rush + guttural catfish flex.
+   */
+  public playForm2Transformation() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    if (now - this.lastMajorEvoSfxAt < 0.35) return;
+    this.lastMajorEvoSfxAt = now;
+
+    // 1. Sub-bass muscular thump
+    const thump = ctx.createOscillator();
+    const thumpGain = ctx.createGain();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(145, now);
+    thump.frequency.exponentialRampToValueAtTime(48, now + 0.32);
+    thumpGain.gain.setValueAtTime(0.24, now);
+    thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+    thump.connect(thumpGain);
+    thumpGain.connect(this.masterGain);
+    thump.start(now);
+    thump.stop(now + 0.38);
+
+    // 2. Water displacement surge (bandpassed noise swell)
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const nFilter = ctx.createBiquadFilter();
+    const nGain = ctx.createGain();
+    nFilter.type = 'bandpass';
+    nFilter.frequency.setValueAtTime(280, now);
+    nFilter.frequency.exponentialRampToValueAtTime(920, now + 0.28);
+    nFilter.frequency.exponentialRampToValueAtTime(340, now + 0.72);
+    nFilter.Q.value = 1.6;
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.16, now + 0.16);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.76);
+    noise.connect(nFilter);
+    nFilter.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+    noise.stop(now + 0.78);
+
+    // 3. Emerging amphibious vocal growl + golden triad accent
+    const vocal = ctx.createOscillator();
+    const vFilter = ctx.createBiquadFilter();
+    const vGain = ctx.createGain();
+    vocal.type = 'sawtooth';
+    vocal.frequency.setValueAtTime(124, now + 0.18);
+    vocal.frequency.linearRampToValueAtTime(152, now + 0.32);
+    vocal.frequency.exponentialRampToValueAtTime(78, now + 0.72);
+    vFilter.type = 'bandpass';
+    vFilter.frequency.setValueAtTime(420, now + 0.18);
+    vFilter.Q.value = 2.6;
+    vGain.gain.setValueAtTime(0.001, now + 0.18);
+    vGain.gain.linearRampToValueAtTime(0.14, now + 0.28);
+    vGain.gain.exponentialRampToValueAtTime(0.001, now + 0.76);
+    vocal.connect(vFilter);
+    vFilter.connect(vGain);
+    vGain.connect(this.masterGain);
+    vocal.start(now + 0.18);
+    vocal.stop(now + 0.78);
+
+    [220, 277.18, 329.63, 440].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + 0.12 + i * 0.065);
+      gain.gain.setValueAtTime(0.001, now + 0.12 + i * 0.065);
+      gain.gain.linearRampToValueAtTime(0.11, now + 0.16 + i * 0.065);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.88);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + 0.12 + i * 0.065);
+      osc.stop(now + 0.92);
+    });
+  }
+
+  /**
+   * Level 80 Amphibious Ascension: heavier resonant bass drop + surging water rush + deep apex roar.
+   */
+  public playForm3Transformation() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    if (now - this.lastMajorEvoSfxAt < 0.35) return;
+    this.lastMajorEvoSfxAt = now;
+
+    // 1. Heavy resonant sub-bass drop
+    const impact = ctx.createOscillator();
+    const impactGain = ctx.createGain();
+    impact.type = 'sine';
+    impact.frequency.setValueAtTime(132, now);
+    impact.frequency.exponentialRampToValueAtTime(38, now + 0.42);
+    impactGain.gain.setValueAtTime(0.3, now);
+    impactGain.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+    impact.connect(impactGain);
+    impactGain.connect(this.masterGain);
+    impact.start(now);
+    impact.stop(now + 0.5);
+
+    // 2. Dual-layer water rush
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const nFilter = ctx.createBiquadFilter();
+    const nGain = ctx.createGain();
+    nFilter.type = 'bandpass';
+    nFilter.frequency.setValueAtTime(240, now);
+    nFilter.frequency.exponentialRampToValueAtTime(1150, now + 0.36);
+    nFilter.frequency.exponentialRampToValueAtTime(280, now + 0.94);
+    nFilter.Q.value = 1.4;
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.2, now + 0.18);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.96);
+    noise.connect(nFilter);
+    nFilter.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+    noise.stop(now + 1.0);
+
+    // 3. Deeper amphibious predator roar
+    const core = ctx.createOscillator();
+    const sub = ctx.createOscillator();
+    const formant = ctx.createBiquadFilter();
+    const roarGain = ctx.createGain();
+    core.type = 'sawtooth';
+    core.frequency.setValueAtTime(106, now + 0.22);
+    core.frequency.linearRampToValueAtTime(134, now + 0.38);
+    core.frequency.exponentialRampToValueAtTime(58, now + 0.98);
+    sub.type = 'triangle';
+    sub.frequency.setValueAtTime(62, now + 0.22);
+    sub.frequency.exponentialRampToValueAtTime(38, now + 0.98);
+    formant.type = 'bandpass';
+    formant.frequency.setValueAtTime(380, now + 0.22);
+    formant.frequency.linearRampToValueAtTime(560, now + 0.42);
+    formant.frequency.exponentialRampToValueAtTime(220, now + 0.98);
+    formant.Q.value = 2.4;
+    roarGain.gain.setValueAtTime(0.001, now + 0.22);
+    roarGain.gain.linearRampToValueAtTime(0.22, now + 0.34);
+    roarGain.gain.exponentialRampToValueAtTime(0.001, now + 1.02);
+    core.connect(formant);
+    sub.connect(formant);
+    formant.connect(roarGain);
+    roarGain.connect(this.masterGain);
+    core.start(now + 0.22);
+    sub.start(now + 0.22);
+    core.stop(now + 1.04);
+    sub.stop(now + 1.04);
+
+    // 4. Cerulean-gold heroic chord lift
+    [196.0, 293.66, 392.0, 493.88, 587.33].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+      osc.type = i < 2 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq, now + 0.1 + i * 0.06);
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1850, now + 0.1);
+      gain.gain.setValueAtTime(0.001, now + 0.1 + i * 0.06);
+      gain.gain.linearRampToValueAtTime(0.11, now + 0.18 + i * 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.15);
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + 0.1 + i * 0.06);
+      osc.stop(now + 1.18);
+    });
+  }
+
+  /**
    * Low-frequency impact + restrained triumphant royal harmonic accent when
    * a living Keli reaches all 100 evolution fragments and transforms into Keli King.
    */
@@ -2382,6 +2611,8 @@ class SoundEngine {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
     const now = ctx.currentTime;
+    if (now - this.lastKingAscensionSfxAt < 1.5) return;
+    this.lastKingAscensionSfxAt = now;
 
     // 1. Deep sub-bass weight impact
     const impact = ctx.createOscillator();

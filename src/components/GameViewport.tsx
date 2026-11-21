@@ -49,6 +49,7 @@ import {
   subscribeAppLifecycle,
 } from '../game/androidNative';
 import { soundEngine } from '../game/audio';
+import { getEvolutionProgressInfo } from '../game/evolutionExperience';
 import { multiplayerClient, RemoteSimulationView } from '../game/multiplayerClient';
 import { MatchReplayData, MatchReplayRecorder } from '../game/replay';
 import { ArenaScene3D } from '../game/scene3d';
@@ -59,10 +60,13 @@ import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import {
   AccessibilitySettings,
   AbilityId,
+  AiDebugEntry,
+  AiDifficulty,
   HudSnapshot,
   LobbySize,
   MatchMode,
 } from '../game/types';
+import { AiDebugOverlay } from './AiDebugOverlay';
 import { DamageHitOverlay } from './DamageHitOverlay';
 import { EmoteWheel, pickEmoteIndexFromDelta } from './EmoteWheel';
 import { EvolutionFormToast, EvolutionToastEvent } from './EvolutionFormToast';
@@ -261,9 +265,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const emoteLastUsedAtRef = useRef(0);
 
   const joyOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const joySmoothRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const joyPointerIdRef = useRef<number | null>(null);
   const bitePointerIdRef = useRef<number | null>(null);
   const hudJoltRef = useRef<HTMLDivElement | null>(null);
+  const [showAiDebug, setShowAiDebug] = useState(false);
+  const showAiDebugRef = useRef(false);
+  showAiDebugRef.current = showAiDebug;
+  const [aiDebugEntries, setAiDebugEntries] = useState<AiDebugEntry[]>([]);
+  const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>('normal');
 
   const handleDamageJolt = (jolt: { x: number; y: number }) => {
     const el = hudJoltRef.current;
@@ -494,20 +504,30 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           replayRecorder.record(snap, remoteView.getPlayer());
           setHud(snap);
 
-          if (snap.player.alive && snap.player.form > prevPlayerFormRef.current) {
-            prevPlayerFormRef.current = snap.player.form;
+          const authoritativeForm = snap.evolutionProgress?.currentForm ?? snap.player.form;
+          const authoritativeLevel = snap.evolutionProgress?.currentLevel ?? Math.min(100, snap.player.level);
+          const allowEvolutionTrigger =
+            snap.player.alive &&
+            authoritativeForm > prevPlayerFormRef.current &&
+            (snap.matchResult.status === 'playing' || authoritativeForm === 4);
+          if (allowEvolutionTrigger) {
+            prevPlayerFormRef.current = authoritativeForm;
             evoSeqRef.current += 1;
             setEvolutionEvent({
-              form: snap.player.form,
-              level: snap.player.level,
+              form: authoritativeForm,
+              level: authoritativeLevel,
               key: evoSeqRef.current,
             });
-            setEvolutionToast({
-              form: snap.player.form,
-              level: snap.player.level,
-              key: evoSeqRef.current,
-              durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
-            });
+            setEvolutionToast(
+              authoritativeForm < 4
+                ? {
+                    form: authoritativeForm,
+                    level: authoritativeLevel,
+                    key: evoSeqRef.current,
+                    durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
+                  }
+                : null
+            );
           } else if (!snap.player.alive) {
             setEvolutionToast(null);
           }
@@ -533,7 +553,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       if (keysDown.has('KeyD') || keysDown.has('ArrowRight')) mx += 1;
       if (keysDown.has('KeyW') || keysDown.has('ArrowUp')) mz -= 1;
       if (keysDown.has('KeyS') || keysDown.has('ArrowDown')) mz += 1;
+      // Normalize diagonal keyboard input cleanly so diagonal speed matches cardinal speed
+      if (mx !== 0 && mz !== 0) {
+        mx *= Math.SQRT1_2;
+        mz *= Math.SQRT1_2;
+      }
       pushPlayerInput({ moveX: mx, moveZ: mz, biteHeld }, true);
+    };
+
+    const onWindowBlur = () => {
+      keysDown.clear();
+      biteHeld = false;
+      pushPlayerInput({ moveX: 0, moveZ: 0, biteHeld: false }, true);
     };
 
     const updateMouseAim = () => {
@@ -571,6 +602,18 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         if (e.code === 'KeyV') {
           spatialVoice.setPttActive(true);
         }
+      }
+      if (!isMultiplayer && e.ctrlKey && e.shiftKey && e.code === 'KeyD' && !e.repeat) {
+        e.preventDefault();
+        setShowAiDebug((prev) => {
+          const next = !prev;
+          if (next && sim) {
+            setAiDebugEntries(sim.getAiDebugSnapshot());
+            setAiDifficulty(sim.getAiDifficulty());
+          }
+          return next;
+        });
+        return;
       }
       if (pausedRef.current) return;
 
@@ -751,6 +794,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
@@ -836,21 +880,34 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           const snap = sim.getHudSnapshot();
           replayRecorder.record(snap, sim.getPlayer());
           setHud(snap);
+          if (showAiDebugRef.current) {
+            setAiDebugEntries(sim.getAiDebugSnapshot());
+          }
 
-          if (snap.player.alive && snap.player.form > prevPlayerFormRef.current) {
-            prevPlayerFormRef.current = snap.player.form;
+          const authoritativeForm = snap.evolutionProgress?.currentForm ?? snap.player.form;
+          const authoritativeLevel = snap.evolutionProgress?.currentLevel ?? Math.min(100, snap.player.level);
+          const allowEvolutionTrigger =
+            snap.player.alive &&
+            authoritativeForm > prevPlayerFormRef.current &&
+            (snap.matchResult.status === 'playing' || authoritativeForm === 4);
+          if (allowEvolutionTrigger) {
+            prevPlayerFormRef.current = authoritativeForm;
             evoSeqRef.current += 1;
             setEvolutionEvent({
-              form: snap.player.form,
-              level: snap.player.level,
+              form: authoritativeForm,
+              level: authoritativeLevel,
               key: evoSeqRef.current,
             });
-            setEvolutionToast({
-              form: snap.player.form,
-              level: snap.player.level,
-              key: evoSeqRef.current,
-              durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
-            });
+            setEvolutionToast(
+              authoritativeForm < 4
+                ? {
+                    form: authoritativeForm,
+                    level: authoritativeLevel,
+                    key: evoSeqRef.current,
+                    durationSec: Math.max(5.0, snap.player.evoBoostTimeLeft || 5.0),
+                  }
+                : null
+            );
           } else if (!snap.player.alive) {
             setEvolutionToast(null);
           }
@@ -882,6 +939,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       soundEngine.stopAmbient();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
@@ -907,6 +965,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       // Ignore synthetic pointer capture errors
     }
     joyOriginRef.current = { x: e.clientX, y: e.clientY };
+    joySmoothRef.current = { x: 0, y: 0 };
     setJoyOffset({ x: 0, y: 0 });
     soundEngine.startAmbient();
   };
@@ -921,6 +980,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       (viewportSize.height < 520 && (isTouchDevice || viewportSize.width < 960))
         ? 28
         : 42;
+    const deadzone = maxR * 0.16;
     const dist = Math.hypot(dx, dy);
     const clamped = Math.min(dist, maxR);
     const ang = Math.atan2(dy, dx);
@@ -928,13 +988,23 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const oy = Math.sin(ang) * clamped;
     setJoyOffset({ x: ox, y: oy });
 
-    if (dist > 6) {
+    if (dist > deadzone) {
+      // Smooth radial remapping from deadzone edge (0..1) + low-latency touch jitter filter
+      const normMag = Math.min(1, (clamped - deadzone) / Math.max(1, maxR - deadzone));
+      const targetX = Math.cos(ang) * normMag;
+      const targetZ = Math.sin(ang) * normMag;
+      const smoothAlpha = 0.68;
+      const sx = joySmoothRef.current.x + (targetX - joySmoothRef.current.x) * smoothAlpha;
+      const sz = joySmoothRef.current.y + (targetZ - joySmoothRef.current.y) * smoothAlpha;
+      joySmoothRef.current = { x: sx, y: sz };
+      const smoothAng = Math.hypot(sx, sz) > 0.05 ? Math.atan2(sz, sx) : ang;
       pushPlayerInput({
-        moveX: ox / maxR,
-        moveZ: oy / maxR,
-        aimAngle: ang,
+        moveX: sx,
+        moveZ: sz,
+        aimAngle: smoothAng,
       });
     } else {
+      joySmoothRef.current = { x: 0, y: 0 };
       pushPlayerInput({ moveX: 0, moveZ: 0 });
     }
   };
@@ -944,6 +1014,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     e.stopPropagation();
     joyPointerIdRef.current = null;
     joyOriginRef.current = null;
+    joySmoothRef.current = { x: 0, y: 0 };
     setJoyOffset({ x: 0, y: 0 });
     pushPlayerInput({ moveX: 0, moveZ: 0 }, true);
   };
@@ -1009,6 +1080,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const displayKills = isSpectating && spec ? spec.targetKills : p?.kills ?? 0;
 
   const nextMilestone = getNextMilestone(displayLevel);
+  const evoProgress =
+    !isSpectating && hud?.evolutionProgress
+      ? hud.evolutionProgress
+      : getEvolutionProgressInfo(displayLevel);
+  const evoStagePct = Math.round(evoProgress.evolutionStageProgress * 100);
   const hpPct = Math.max(0, Math.min(100, (displayHp / Math.max(1, displayMaxHp)) * 100));
   const stamPct = Math.max(0, Math.min(100, (displayStamina / Math.max(1, displayMaxStamina)) * 100));
   const reservePct = p ? Math.max(0, Math.min(100, (p.shoreReserve / p.maxShoreReserve) * 100)) : 100;
@@ -1180,25 +1256,45 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     </span>
                   </div>
 
-                  {/* Condensed Cerulean Fragments Bar */}
+                  {/* Condensed Evolution Progress Bar (compact mobile) */}
                   {hudVis.evolutionProgress && (
                     <div
                       data-hud-element="evolutionProgress"
                       className="flex items-center gap-1"
-                      title={`Fragments ${displayLevel} / 100`}
+                      title={
+                        evoProgress.isMaxLevel
+                          ? 'KELI KING · All 100 Fragments Reunited'
+                          : `${evoProgress.currentFormShortName} · Lv.${evoProgress.currentLevel} (${evoProgress.fragmentsToNextEvolution} to Lv.${evoProgress.nextEvolutionLevel})`
+                      }
                     >
-                      <Sparkles className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" />
+                      <Sparkles
+                        className={`w-2.5 h-2.5 shrink-0 ${
+                          evoProgress.isMaxLevel ? 'text-[#fde68a]' : 'text-[#7dd3fc]'
+                        }`}
+                      />
                       <div className="compendium-track relative flex-1 h-2 rounded-[2px] overflow-hidden">
                         <div
                           className="h-full transition-all duration-150"
                           style={{
-                            width: `${displayLevel}%`,
-                            background: 'linear-gradient(180deg, #38bdf8 0%, #075985 100%)',
+                            width: `${evoProgress.isMaxLevel ? 100 : evoStagePct}%`,
+                            background: evoProgress.isMaxLevel
+                              ? 'linear-gradient(180deg, #fde68a 0%, #d97706 100%)'
+                              : displayForm === 3
+                                ? 'linear-gradient(180deg, #38bdf8 0%, #059669 100%)'
+                                : displayForm === 2
+                                  ? 'linear-gradient(180deg, #f3d285 0%, #b45309 100%)'
+                                  : 'linear-gradient(180deg, #38bdf8 0%, #075985 100%)',
                           }}
                         />
                       </div>
-                      <span className="w-7 text-right text-[8.5px] font-mono-num font-semibold text-[#bae6fd] shrink-0">
-                        {displayLevel}%
+                      <span
+                        className={`w-9 text-right text-[8px] font-mono-num font-semibold shrink-0 ${
+                          evoProgress.isMaxLevel ? 'text-[#fde68a]' : 'text-[#bae6fd]'
+                        }`}
+                      >
+                        {evoProgress.isMaxLevel
+                          ? 'KING'
+                          : `${evoProgress.currentLevel}/${evoProgress.nextEvolutionLevel}`}
                       </span>
                     </div>
                   )}
@@ -1428,24 +1524,54 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                     </div>
                   </div>
 
-                  {/* Metallic Beveled Cerulean Fragments / EXP Gauge */}
+                  {/* Compact Evolution Progress Gauge (form, level, next threshold & fragments needed) */}
                   {hudVis.evolutionProgress && (
-                    <div data-hud-element="evolutionProgress" className="flex items-center gap-1.5">
-                      <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
-                        EXP
-                      </span>
-                      <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
-                        <div
-                          className="h-full transition-all duration-150"
-                          style={{
-                            width: `${displayLevel}%`,
-                            background: 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
-                          }}
-                        />
-                        <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
-                        <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
-                          FRAGMENTS {displayLevel} / 100
+                    <div data-hud-element="evolutionProgress" className="space-y-0.5">
+                      <div className="flex items-center justify-between text-[9px] font-mono-num leading-none">
+                        <span
+                          className={`font-semibold truncate ${
+                            evoProgress.isMaxLevel
+                              ? 'text-[#fde68a]'
+                              : displayForm === 3
+                                ? 'text-[#7dd3fc]'
+                                : displayForm === 2
+                                  ? 'text-[#f3d285]'
+                                  : 'text-[#93c5fd]'
+                          }`}
+                        >
+                          {evoProgress.currentFormShortName} · Lv.{evoProgress.currentLevel}
                         </span>
+                        <span className="text-[#cbd5e1] shrink-0">
+                          {evoProgress.isMaxLevel
+                            ? '100 / 100 REUNITED'
+                            : `-${evoProgress.fragmentsToNextEvolution} to Lv.${evoProgress.nextEvolutionLevel}`}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-7 text-[9.5px] font-mono-num font-bold text-[#7dd3fc] shrink-0">
+                          {evoProgress.isMaxLevel ? 'MAX' : 'EVO'}
+                        </span>
+                        <div className="compendium-track relative flex-1 h-3.5 rounded-[2px] overflow-hidden">
+                          <div
+                            className="h-full transition-all duration-150"
+                            style={{
+                              width: `${evoProgress.isMaxLevel ? 100 : evoStagePct}%`,
+                              background: evoProgress.isMaxLevel
+                                ? 'linear-gradient(180deg, #fde68a 0%, #f59e0b 60%, #92400e 100%)'
+                                : displayForm === 3
+                                  ? 'linear-gradient(180deg, #38bdf8 0%, #0ea5e9 55%, #065f46 100%)'
+                                  : displayForm === 2
+                                    ? 'linear-gradient(180deg, #f3d285 0%, #d97706 65%, #78350f 100%)'
+                                    : 'linear-gradient(180deg, #38bdf8 0%, #0284c7 65%, #075985 100%)',
+                            }}
+                          />
+                          <div className="compendium-bar-gloss pointer-events-none absolute inset-0" />
+                          <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono-num font-semibold text-[#f1f5f9] drop-shadow">
+                            {evoProgress.isMaxLevel
+                              ? 'KELI KING · VICTORY'
+                              : `FRAGMENTS ${evoProgress.currentLevel} / ${evoProgress.nextEvolutionLevel} (${evoProgress.currentLevel}/100)`}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1508,9 +1634,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   {/* Unboxed Compendium Metadata Footer */}
                   <div className="pt-1 border-t border-[#2a3844] flex items-center justify-between gap-2 text-[10px] text-[#a9b9c2]">
                     <span className="truncate">
-                      {hudVis.evolutionProgress && nextMilestone
-                        ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}`
-                        : getFormLabel(displayForm)}
+                      {evoProgress.isMaxLevel
+                        ? 'Supreme Colossus of Wang Kelian'
+                        : hudVis.evolutionProgress && nextMilestone
+                          ? `Next: Lv.${nextMilestone.level} ${nextMilestone.title}`
+                          : getFormLabel(displayForm)}
                     </span>
                     <span className="font-mono-num text-[#f3d285] shrink-0">
                       {displayKills} Kills
@@ -1946,13 +2074,32 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               <div
                 data-hud-element="matchTelemetry"
                 style={{ width: 102 }}
-                className="compendium-plaque-subtle flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-[2px] text-[9px] font-mono-num text-[#d6d3c9] whitespace-nowrap"
+                className={`compendium-plaque-subtle flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-[2px] text-[9px] font-mono-num text-[#d6d3c9] whitespace-nowrap ${
+                  hud.zone.warningActive ? 'border-[#fbbf24]/80' : ''
+                }`}
               >
                 <span className="inline-flex items-center gap-0.5 text-white font-semibold" title="Remaining Kelis">
                   <Users className="w-2.5 h-2.5 text-[#c99c4a]" />
                   {hud.aliveCount}
                 </span>
-                <span className="text-[#f3d285]">{formatClock(hud.matchTime)}</span>
+                <span
+                  className={
+                    hud.zone.isShrinking
+                      ? 'text-[#fca5a5] font-semibold'
+                      : hud.zone.warningActive
+                        ? 'text-[#fbbf24] font-semibold'
+                        : 'text-[#f3d285]'
+                  }
+                  title={
+                    hud.zone.warningActive
+                      ? `Zone closing in ${Math.ceil(hud.zone.warningTimer)}s`
+                      : `Match Phase: ${hud.matchPhase ?? 'early'}`
+                  }
+                >
+                  {hud.zone.warningActive
+                    ? `!${Math.ceil(hud.zone.warningTimer)}s`
+                    : formatClock(hud.matchTime)}
+                </span>
                 {hud.weather.kind === 'light_rain' ? (
                   <CloudRain className="w-2.5 h-2.5 text-[#7dd3fc] shrink-0" aria-label={hud.weather.label} />
                 ) : hud.weather.kind === 'basin_fog' ? (
@@ -2078,9 +2225,28 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               data-hud-element="matchTelemetry"
               className={`compendium-plaque pointer-events-auto hidden md:block absolute bottom-3 right-3 w-60 rounded-sm overflow-hidden origin-bottom-right ${scaleClass}`}
             >
-              <div className="compendium-ribbon flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-display font-semibold text-[#f3d285]">
-                <Swords className="w-3.5 h-3.5 text-[#c99c4a]" />
-                <span>Battle for Wang Kelian</span>
+              <div className="compendium-ribbon flex items-center justify-between gap-1.5 px-2.5 py-1.5 text-[11px] font-display font-semibold text-[#f3d285]">
+                <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
+                  <Swords className="w-3.5 h-3.5 text-[#c99c4a] shrink-0" />
+                  <span className="truncate">Wang Kelian</span>
+                </span>
+                {hud.matchPhase && (
+                  <span
+                    className={`shrink-0 font-mono-num text-[9.5px] uppercase tracking-wider px-1 py-0.2 rounded-[2px] border ${
+                      hud.matchPhase === 'endgame'
+                        ? 'text-[#fca5a5] border-[#ef4444]/60 bg-[#2b0f12]/80'
+                        : hud.matchPhase === 'mid'
+                          ? 'text-[#fde68a] border-[#c99c4a]/60 bg-[#231a09]/80'
+                          : 'text-[#99f6e4] border-[#2dd4bf]/40 bg-[#0b1f22]/80'
+                    }`}
+                  >
+                    {hud.matchPhase === 'endgame'
+                      ? 'Endgame'
+                      : hud.matchPhase === 'mid'
+                        ? 'Mid-Game'
+                        : 'Early'}
+                  </span>
+                )}
               </div>
               <div className="p-2.5 space-y-1.5 font-mono-num">
                 <div className="flex items-center justify-between text-xs text-[#d6d3c9]">
@@ -2100,11 +2266,29 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 </div>
                 <div className="pt-1 border-t border-[#22313d] flex items-center justify-between text-[10.5px] text-[#9cb0ba]">
                   <span>
-                    Mass {hud.livingMassSum}+{hud.carcassMassSum}=
-                    {hud.livingMassSum + hud.carcassMassSum}
+                    {typeof hud.fragmentsToKing === 'number' && hud.fragmentsToKing > 0
+                      ? `${hud.fragmentsToKing} to King${
+                          hud.nextMilestoneLevel && hud.nextMilestoneLevel < 100
+                            ? ` · Lv.${hud.nextMilestoneLevel}`
+                            : ''
+                        }`
+                      : `Mass ${hud.livingMassSum}+${hud.carcassMassSum}=${hud.livingMassSum + hud.carcassMassSum}`}
                   </span>
-                  <span className={hud.zone.isShrinking ? 'text-[#fca5a5] font-semibold' : 'text-[#6ee7b7]'}>
-                    P{hud.zone.phase} · {hud.zone.isShrinking ? 'Closing' : `${Math.ceil(hud.zone.warningTimer)}s`}
+                  <span
+                    className={
+                      hud.zone.isShrinking
+                        ? 'text-[#fca5a5] font-semibold'
+                        : hud.zone.warningActive
+                          ? 'text-[#fbbf24] font-semibold animate-pulse'
+                          : 'text-[#6ee7b7]'
+                    }
+                  >
+                    P{hud.zone.phase} ·{' '}
+                    {hud.zone.isShrinking
+                      ? 'Closing'
+                      : hud.zone.warningActive
+                        ? `Soon ${Math.ceil(hud.zone.warningTimer)}s`
+                        : `${Math.ceil(hud.zone.warningTimer)}s`}
                   </span>
                 </div>
                 <div className="pt-1 border-t border-[#22313d] flex items-center justify-between gap-2 text-[10.5px]">
@@ -2144,8 +2328,17 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                 ? '#f87171'
                 : ind.kind === 'prey'
                 ? '#34d399'
+                : ind.kind === 'hotspot'
+                ? '#fb923c'
                 : '#f3d285';
-            const shape = ind.kind === 'danger' ? '▲' : ind.kind === 'prey' ? '●' : '◆';
+            const shape =
+              ind.kind === 'danger'
+                ? '▲'
+                : ind.kind === 'prey'
+                ? '●'
+                : ind.kind === 'hotspot'
+                ? '◎'
+                : '◆';
             return (
               <div
                 key={ind.id}
@@ -2154,6 +2347,8 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               >
                 {ind.kind === 'carcass'
                   ? `${shape} +${ind.level} Frag`
+                  : ind.kind === 'hotspot'
+                  ? `${shape} Activity ${ind.distance}u`
                   : `${shape} Lv.${ind.level}`}
               </div>
             );
@@ -2924,6 +3119,22 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {/* Optional Dev-Only Local AI Debug Overlay (disabled by default; Ctrl+Shift+D) */}
+      {showAiDebug && !isMultiplayer && simRef.current && (
+        <AiDebugOverlay
+          entries={aiDebugEntries}
+          difficulty={aiDifficulty}
+          matchSeed={simRef.current.getMatchSeed()}
+          playerX={simRef.current.getPlayer().x}
+          playerZ={simRef.current.getPlayer().z}
+          pacingMetrics={simRef.current.getPacingMetrics()}
+          onChangeDifficulty={(d) => {
+            simRef.current?.setAiDifficulty(d);
+            setAiDifficulty(d);
+          }}
+          onClose={() => setShowAiDebug(false)}
+        />
       )}
     </div>
   );

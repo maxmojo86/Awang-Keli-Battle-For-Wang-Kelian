@@ -190,10 +190,16 @@ export const Minimap: React.FC<MinimapProps> = ({
     ctx.fillStyle = 'rgba(127, 29, 29, 0.28)';
     ctx.fill();
 
-    ctx.strokeStyle = hud.zone.isShrinking ? 'rgba(248, 113, 113, 0.92)' : 'rgba(74, 222, 128, 0.88)';
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = hud.zone.isShrinking
+      ? 'rgba(248, 113, 113, 0.92)'
+      : hud.zone.warningActive
+        ? 'rgba(251, 191, 36, 0.92)'
+        : 'rgba(74, 222, 128, 0.88)';
+    ctx.lineWidth = hud.zone.warningActive ? 1.85 : 1.6;
     if (hud.zone.isShrinking) {
       ctx.setLineDash([4, 3]);
+    } else if (hud.zone.warningActive) {
+      ctx.setLineDash([6, 2.5]);
     }
     ctx.beginPath();
     ctx.arc(zoneCx, zoneCy, Math.max(1, zoneR), 0, Math.PI * 2);
@@ -463,6 +469,42 @@ export const Minimap: React.FC<MinimapProps> = ({
         ctx.fill();
       }
       ctx.restore();
+    }
+
+    // 7a. Approximate Activity Hotspots (combat, contested feeding, convergence, large carcasses)
+    if (hud.activityHotspots && hud.activityHotspots.length > 0 && !hud.finalFeast?.active) {
+      for (const hs of hud.activityHotspots) {
+        const remaining = hs.expiresAt - hud.matchTime;
+        if (remaining <= 0) continue;
+        const fade = Math.min(1, remaining / 2.2);
+        const hx = toPxX(hs.x);
+        const hy = toPxY(hs.z);
+        const baseR = Math.max(compact ? 6 : 8, scaleLen(hs.radius));
+        const pulse = 0.88 + Math.sin(hud.matchTime * 4.5 + hx * 0.1) * 0.14;
+        const colorRgb =
+          hs.kind === 'contested_feed'
+            ? '251, 146, 60'
+            : hs.kind === 'large_carcass'
+              ? '250, 204, 21'
+              : hs.kind === 'convergence'
+                ? '56, 189, 248'
+                : '248, 113, 113';
+
+        ctx.save();
+        ctx.fillStyle = `rgba(${colorRgb}, ${(0.12 * fade).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(hx, hy, baseR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = `rgba(${colorRgb}, ${(0.68 * fade).toFixed(3)})`;
+        ctx.lineWidth = 1.15;
+        ctx.setLineDash([3, 2.5]);
+        ctx.beginPath();
+        ctx.arc(hx, hy, baseR * pulse, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
     }
 
     // Tactical large (30+ fragment) carcasses within ambush range, pulsing when actively fed on
