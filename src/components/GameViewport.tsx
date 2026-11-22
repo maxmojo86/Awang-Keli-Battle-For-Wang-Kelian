@@ -1807,6 +1807,75 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </div>
             )}
 
+            {hudVis.banners &&
+              !evolutionEvent &&
+              !hud.finalFeast?.active &&
+              hud.activeWorldEvent &&
+              hud.activeWorldEvent.phase !== 'dormant' &&
+              hud.activeWorldEvent.phase !== 'complete' && (
+                <div
+                  data-hud-element="world-event"
+                  className={`compendium-plaque rounded-sm text-center ${
+                    isCompactMode ? 'px-2.5 py-0.5' : 'px-3.5 py-1'
+                  } ${
+                    hud.activeWorldEvent.kind === 'flash_flood'
+                      ? 'border-[#38bdf8]/70'
+                      : hud.activeWorldEvent.kind === 'silt_bloom'
+                        ? 'border-[#d97706]/70'
+                        : hud.activeWorldEvent.kind === 'whirlpool'
+                          ? 'border-[#2dd4bf]/70'
+                          : 'border-[#fb923c]/70'
+                  }`}
+                >
+                  <div className="flex items-center justify-center gap-2 font-mono-num">
+                    <span
+                      className={`font-display font-semibold tracking-wide ${
+                        isCompactMode ? 'text-[10px]' : 'text-[11px]'
+                      } ${
+                        hud.activeWorldEvent.kind === 'flash_flood'
+                          ? 'text-[#7dd3fc]'
+                          : hud.activeWorldEvent.kind === 'silt_bloom'
+                            ? 'text-[#fbbf24]'
+                            : hud.activeWorldEvent.kind === 'whirlpool'
+                              ? 'text-[#5eead4]'
+                              : 'text-[#fdba74]'
+                      }`}
+                    >
+                      {hud.activeWorldEvent.label}
+                    </span>
+                    <span className="text-[9.5px] uppercase tracking-wider text-[#e2e8f0]">
+                      {hud.activeWorldEvent.phase === 'warning'
+                        ? 'Incoming'
+                        : hud.activeWorldEvent.phase === 'dissipating'
+                          ? 'Subsiding'
+                          : 'Active'}{' '}
+                      {Math.max(1, Math.ceil(hud.activeWorldEvent.remainingSec))}s
+                    </span>
+                    {!isCompactMode && (
+                      <span className="text-[10px] text-[#cbd5e1]">
+                        · {hud.activeWorldEvent.subtitle}
+                      </span>
+                    )}
+                    {hud.playerThreatenedByEvent && p.alive && !isSpectating && (
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-semibold text-[#fde047]">
+                        <ArrowUpRight
+                          className="w-3.5 h-3.5 text-[#fde047]"
+                          style={{
+                            transform: `rotate(${(hud.playerThreatenedByEvent.escapeAngle * 180) / Math.PI + 45}deg)`,
+                          }}
+                        />
+                        {isCompactMode ? 'Clear' : 'Escape'}
+                      </span>
+                    )}
+                    {p.netEntangled && p.alive && !isSpectating && (
+                      <span className="text-[9.5px] font-semibold text-[#fb923c]">
+                        · Snagged
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
             {hudVis.banners && !evolutionEvent && hud.recentBanner && (
               <div
                 data-hud-element="banners"

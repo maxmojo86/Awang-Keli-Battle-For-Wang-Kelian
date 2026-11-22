@@ -53,8 +53,20 @@ import {
   getEvolutionProgressInfo,
   resolveEvolutionTransition,
 } from './evolutionExperience.ts';
+import {
+  checkDriftingNetContact,
+  computePlayerEventThreat,
+  EnvironmentalEventDirector,
+  evaluateSiltVisibilityMultiplier,
+  evaluateWorldEventForce,
+  NET_ENTANGLE_DURATION,
+  NET_ENTANGLE_SPEED_MULT,
+  NET_IMMUNITY_DURATION,
+  WORLD_EVENT_METADATA,
+} from './environmentalEvents.ts';
 import type {
   AbilityId,
+  ActiveWorldEventState,
   ActivityHotspot,
   AiDebugEntry,
   AiDifficulty,
@@ -83,6 +95,7 @@ import type {
   WeatherKind,
   WeatherState,
   WorldEffect,
+  WorldEventKind,
   ZoneState,
 } from './types.ts';
 
@@ -283,6 +296,8 @@ export class GameSimulation {
   private botRegisterSeq = 0;
   private aiContext!: AiSimulationContext;
   private pacingDirector: MatchPacingDirector;
+  public eventDirector: EnvironmentalEventDirector;
+  public activeWorldEvent: ActiveWorldEventState | null = null;
   private zonePaceMultiplier = 1.0;
 
   constructor(
@@ -346,6 +361,11 @@ export class GameSimulation {
       Math.max(lobbySize, entrants.length),
       this.matchSeed
     );
+    this.eventDirector = new EnvironmentalEventDirector({
+      lobbySize,
+      matchSeed: this.matchSeed,
+      enabled: mode !== 'tutorial',
+    });
     const pacingProfile = this.pacingDirector.profile;
     const initialZoneRadius =
       mode === 'tutorial' ? scaleArenaDist(960) : pacingProfile.initialZoneRadius;
@@ -374,6 +394,7 @@ export class GameSimulation {
       finalFeastActive: false,
       zone: this.zone,
       weather: this.weather,
+      activeWorldEvent: null,
       kelis: this.kelis,
       carcasses: this.carcasses,
       pickups: this.pickups,
@@ -928,6 +949,50 @@ export class GameSimulation {
     this.triggerAbilityForPlayer(this.primaryPlayerId, ability);
   }
 
+  /**
+   * Authoritative helper to trigger a specific dynamic world event (e.g., for testing or scenarios).
+   */
+  public triggerWorldEvent(
+    kind: WorldEventKind,
+    options?: {
+      startPhase?: 'warning' | 'active';
+      overridePos?: { x: number; z: number; angle?: number; endX?: number; endZ?: number };
+    }
+  ): ActiveWorldEventState | null {
+    if (this.status !== 'playing' || this.matchConcluded || this.finalFeastActive) {
+      return null;
+    }
+    const created = this.eventDirector.triggerEventNow(kind, this.matchTime, this.zone, options);
+    this.activeWorldEvent = created;
+    this.aiContext.activeWorldEvent = created;
+    return created;
+  }
+
+  /**
+   * Computes localized effective visual perception range accounting for both global weather
+   * and localized Air Keruh (Silt Bloom) turbidity while preserving close-range combat readability.
+   */
+  public getEffectiveVisualRange(
+    observerX: number,
+    observerZ: number,
+    targetX?: number,
+    targetZ?: number,
+    baseRange = 490
+  ): number {
+    const siltMult = evaluateSiltVisibilityMultiplier(
+      this.activeWorldEvent,
+      observerX,
+      observerZ,
+      targetX,
+      targetZ
+    );
+    const weatherRange = baseRange * this.weather.visibilityRange;
+    if (siltMult < 0.99) {
+      return Math.max(210, weatherRange * siltMult);
+    }
+    return weatherRange;
+  }
+
   public triggerEmoteForPlayer(playerId: string, emoteId: EmoteId): boolean {
     if (this.status !== 'playing' || !VALID_EMOTE_IDS.has(emoteId)) return false;
     const k = this.kelis.find((e) => e.id === playerId);
@@ -1163,6 +1228,21 @@ export class GameSimulation {
       case 'damage_hit':
         soundEngine.playDamageHit(false);
         break;
+      case 'event_warning':
+        soundEngine.playWorldEventWarning();
+        break;
+      case 'event_flood':
+        soundEngine.playFlashFloodCue();
+        break;
+      case 'event_silt':
+        soundEngine.playSiltBloomCue();
+        break;
+      case 'event_whirlpool':
+        soundEngine.playWhirlpoolCue();
+        break;
+      case 'event_net_snag':
+        soundEngine.playNetSnag();
+        break;
       case 'damage_hit_heavy':
         soundEngine.playDamageHit(true);
         break;
@@ -1327,12 +1407,56 @@ export class GameSimulation {
           );
         }
       }
+
+      // 1a-2. Authoritative Dynamic World Events Director (strictly max 1 active event, Final Feast safe)
+      let aliveCountNow = 0;
+      for (let i = 0; i < this.kelis.length; i++) {
+        if (this.kelis[i].alive) aliveCountNow++;
+      }
+      const evStep = this.eventDirector.step(
+        dt,
+        this.matchTime,
+        this.zone,
+        dirRes.phase,
+        aliveCountNow,
+        this.finalFeastActive,
+        this.matchConcluded
+      );
+      this.activeWorldEvent = evStep.activeEvent;
+      this.aiContext.activeWorldEvent = evStep.activeEvent;
+
+      if (evStep.eventJustStartedWarning && evStep.activeEvent) {
+        const meta = WORLD_EVENT_METADATA[evStep.activeEvent.kind];
+        this.addSoundCue(
+          `${meta.label} incoming · ${meta.warningText}`,
+          { x: evStep.activeEvent.x, z: evStep.activeEvent.z },
+          'warning'
+        );
+        this.emitSfxGlobal('event_warning');
+      } else if (evStep.eventJustActivated && evStep.activeEvent) {
+        const meta = WORLD_EVENT_METADATA[evStep.activeEvent.kind];
+        this.addSoundCue(
+          `${meta.label} active · ${meta.activeText}`,
+          { x: evStep.activeEvent.x, z: evStep.activeEvent.z },
+          evStep.activeEvent.kind === 'silt_bloom' ? 'info' : 'warning'
+        );
+        const sfxKind =
+          evStep.activeEvent.kind === 'flash_flood'
+            ? 'event_flood'
+            : evStep.activeEvent.kind === 'silt_bloom'
+              ? 'event_silt'
+              : evStep.activeEvent.kind === 'whirlpool'
+                ? 'event_whirlpool'
+                : 'event_warning';
+        this.emitSfxGlobal(sfxKind);
+      }
     }
 
     // 1b. Rebuild lightweight AI spatial grid once per step (O(N) for 100-Keli matches)
     this.aiController.beginStep(this.kelis, this.carcasses, this.pickups, this.matchTime);
     this.aiContext.matchTime = this.matchTime;
     this.aiContext.finalFeastActive = this.finalFeastActive;
+    this.aiContext.activeWorldEvent = this.activeWorldEvent;
 
     // 2. Update each living Keli (timers, player input / AI brain, movement, combat)
     for (let i = 0; i < this.kelis.length; i++) {
@@ -1559,6 +1683,12 @@ export class GameSimulation {
         k.recoilStrength = 0;
       }
     }
+    if ((k.netEntangleTimer ?? 0) > 0) {
+      k.netEntangleTimer = Math.max(0, (k.netEntangleTimer ?? 0) - dt);
+    }
+    if ((k.netImmunityTimer ?? 0) > 0) {
+      k.netImmunityTimer = Math.max(0, (k.netImmunityTimer ?? 0) - dt);
+    }
     if ((k.feedingRecoveryTimer ?? 0) > 0) {
       k.feedingRecoveryTimer = Math.max(0, (k.feedingRecoveryTimer ?? 0) - dt);
     }
@@ -1751,6 +1881,7 @@ export class GameSimulation {
       base *= effectiveMult;
     }
     if (k.staggerTimer > 0) base *= 0.46;
+    if ((k.netEntangleTimer ?? 0) > 0) base *= NET_ENTANGLE_SPEED_MULT; // 42% movement reduction while snagged
     if (k.fatigued) base *= 0.84;
     if (k.frenzyTimer > 0) base *= 1.18;
     if (k.surgeTimer > 0) base *= 1.28;
@@ -1770,6 +1901,9 @@ export class GameSimulation {
     const prevHazard = k.activeHazard;
     const prevOnShore = k.isOnShore;
     const activeHazardTile = getHazardAt(k.x, k.z);
+    const radius = this.computeRadius(k.level);
+    const canGoAshore = k.level >= 40;
+
     if (!k.isOnShore) {
       const cur = getCurrentVectorAt(k.x, k.z);
       curX = cur.vx;
@@ -1781,12 +1915,41 @@ export class GameSimulation {
         curX += activeHazardTile.flowVx * flowScale;
         curZ += activeHazardTile.flowVz * flowScale;
       }
+
+      // Dynamic World Event forces (Kepala Air Flash Flood & Pusaran Dalam Whirlpool)
+      // Integrated directly before swept collision so rocks, cliffs & Lv.1-39 shore rules hold strictly
+      if (this.activeWorldEvent) {
+        const evForce = evaluateWorldEventForce(
+          this.activeWorldEvent,
+          k.x,
+          k.z,
+          k.isOnShore,
+          getEvolutionForm(k.level)
+        );
+        curX += evForce.vx;
+        curZ += evForce.vz;
+
+        // Jaring Hanyut (Drifting Fishing Net): bounded movement impairment, zero HP damage, separate from stun
+        if (
+          this.activeWorldEvent.kind === 'drifting_net' &&
+          (k.netEntangleTimer ?? 0) <= 0 &&
+          (k.netImmunityTimer ?? 0) <= 0 &&
+          k.dashTimer <= 0 &&
+          k.evadeTimer <= 0 &&
+          checkDriftingNetContact(this.activeWorldEvent, k.x, k.z, radius, k.isOnShore)
+        ) {
+          k.netEntangleTimer = NET_ENTANGLE_DURATION;
+          k.netImmunityTimer = NET_ENTANGLE_DURATION + NET_IMMUNITY_DURATION;
+          if (k.isPlayer) {
+            this.spawnCallout(k.x, k.z, 'SNAGGED IN NET!', '#fb923c');
+            this.emitSfxFor(k.id, 'event_net_snag');
+          }
+        }
+      }
     }
 
     const nextX = k.x + (k.vx + curX) * dt;
     const nextZ = k.z + (k.vz + curZ) * dt;
-    const radius = this.computeRadius(k.level);
-    const canGoAshore = k.level >= 40;
 
     // Swept multi-pass collision prevents tunneling during Dash/Evade and projects velocity tangentially
     const resolved = resolveSweptMovement(k.x, k.z, nextX, nextZ, radius, canGoAshore);
@@ -3422,6 +3585,11 @@ export class GameSimulation {
     if (k.stamina <= 15) k.fatigued = true;
     k.cooldowns.evade = EVADE_COOLDOWN_SEC;
     k.evadeTimer = EVADE_DURATION_SEC;
+    // Slip Evade cleanly breaks drifting-net entanglement
+    if ((k.netEntangleTimer ?? 0) > 0) {
+      k.netEntangleTimer = 0;
+      k.netImmunityTimer = Math.max(k.netImmunityTimer ?? 0, 1.4);
+    }
 
     // Cancel feeding cleanly (zero recovery penalty) or bite windup so the player can reactively dodge
     this.cancelFeeding(k, 'ability');
@@ -3493,6 +3661,11 @@ export class GameSimulation {
     }
     k.cooldowns.dash = 3.5;
     k.dashTimer = k.fatigued ? 0.17 : 0.24;
+    // Dash cleanly tears free from drifting-net entanglement
+    if ((k.netEntangleTimer ?? 0) > 0) {
+      k.netEntangleTimer = 0;
+      k.netImmunityTimer = Math.max(k.netImmunityTimer ?? 0, 1.4);
+    }
     k.stamina = Math.max(0, k.stamina - DASH_STAMINA_COST);
     k.staminaRegenDelay = Math.max(k.staminaRegenDelay, STAMINA_REGEN_DELAY_SEC);
     if (k.stamina <= 15) k.fatigued = true;
@@ -3800,11 +3973,16 @@ export class GameSimulation {
       if (c.consumed || c.mass <= 0) continue;
       c.bobPhase += dt * 2.4;
 
-      // Water current drift
+      // Water current drift (plus gentle damped drift under Flash Flood / Whirlpool, always obstacle-safe)
       if (getTerrainAt(c.x, c.z) !== 'shore') {
         const cur = getCurrentVectorAt(c.x, c.z);
         c.x += cur.vx * 0.35 * dt;
         c.z += cur.vz * 0.35 * dt;
+        if (this.activeWorldEvent && !this.finalFeastActive) {
+          const evForce = evaluateWorldEventForce(this.activeWorldEvent, c.x, c.z, false, 1);
+          c.x += evForce.vx * 0.22 * dt;
+          c.z += evForce.vz * 0.22 * dt;
+        }
       }
 
       // Radioactive zone current pulls out-of-zone carcasses back inside safe zone!
@@ -4185,6 +4363,9 @@ export class GameSimulation {
     this.matchConcluded = true;
     this.victoryRecordCount += 1;
     this.finalFeastActive = false;
+    this.eventDirector.clearForConclusion();
+    this.activeWorldEvent = null;
+    this.aiContext.activeWorldEvent = null;
     this.winnerId = king.id;
     this.winnerName = king.name;
     this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
@@ -4196,6 +4377,7 @@ export class GameSimulation {
       k.vz = 0;
       k.dashTimer = 0;
       k.evadeTimer = 0;
+      k.netEntangleTimer = 0;
     }
 
     const subtitle = sourceLabel
@@ -4260,10 +4442,14 @@ export class GameSimulation {
     if (aliveKelis.length === 0) {
       this.matchConcluded = true;
       this.finalFeastActive = false;
+      this.eventDirector.clearForConclusion();
+      this.activeWorldEvent = null;
+      this.aiContext.activeWorldEvent = null;
       this.status = 'draw';
       this.pacingDirector.recordConclusion('draw_mutual_elimination', this.matchTime);
       for (const k of this.kelis) {
         if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+        k.netEntangleTimer = 0;
       }
       for (const [pid, meta] of this.playerMetaById.entries()) {
         const entity = this.getPlayer(pid);
@@ -4601,6 +4787,7 @@ export class GameSimulation {
         stunned: p.stunTimer > 0,
         staggered: p.staggerTimer > 0,
         stunResistTimeLeft: Math.round(p.stunResistTimer * 100) / 100,
+        netEntangled: (p.netEntangleTimer ?? 0) > 0,
         evading: p.evadeTimer > 0,
         bitePhase: p.bitePhase,
         biteCooldown: Math.round(p.biteCooldown * 100) / 100,
@@ -4640,6 +4827,10 @@ export class GameSimulation {
       },
       zone: { ...this.zone },
       weather: { ...this.weather },
+      activeWorldEvent: this.activeWorldEvent ? { ...this.activeWorldEvent } : null,
+      playerThreatenedByEvent: p.alive
+        ? computePlayerEventThreat(this.activeWorldEvent, p.x, p.z, this.computeRadius(p.level))
+        : null,
       matchPhase: this.pacingDirector.getPhase(),
       fragmentsToKing: Math.max(0, TOTAL_MATCH_FRAGMENTS - Math.trunc(p.level)),
       nextMilestoneLevel:
@@ -4782,6 +4973,8 @@ export class GameSimulation {
         recoilDirZ: Math.round(k.recoilDirZ * 100) / 100,
         recoilStrength: Math.round(k.recoilStrength * 100) / 100,
         lastHitKind: k.lastHitKind ?? null,
+        netEntangleTimer: Math.round((k.netEntangleTimer ?? 0) * 100) / 100,
+        netImmunityTimer: Math.round((k.netImmunityTimer ?? 0) * 100) / 100,
         venomTimer: Math.round(k.venomTimer * 100) / 100,
         frenzyTimer: Math.round(k.frenzyTimer * 100) / 100,
         veilTimer: Math.round(k.veilTimer * 100) / 100,
@@ -4824,6 +5017,7 @@ export class GameSimulation {
       hitStop: hitStop ? { ...hitStop } : null,
       zone: { ...this.zone },
       weather: { ...this.weather },
+      worldEvent: this.activeWorldEvent ? { ...this.activeWorldEvent } : null,
       kelis,
       carcasses: this.carcasses.map((c) => ({
         ...c,

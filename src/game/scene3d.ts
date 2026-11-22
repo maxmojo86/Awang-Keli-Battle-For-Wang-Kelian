@@ -60,7 +60,9 @@ import {
   StatusIndicatorSpec,
 } from './statusIcons';
 import { BITE_CONE_HALF_ANGLE } from './simulation';
+import { WorldEventVfxPool } from './worldEventVfx';
 import {
+  ActiveWorldEventState,
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
@@ -84,6 +86,7 @@ export interface RenderableSimulation {
   hitStop?: HitStopEvent | null;
   zone: ZoneState;
   weather: WeatherState;
+  activeWorldEvent?: ActiveWorldEventState | null;
   cameraShake: number;
   damageImpulse?: DamageImpulse | null;
   status?: 'playing' | 'victory' | 'defeat' | 'draw';
@@ -303,6 +306,7 @@ export class ArenaScene3D {
   private activeLocalTransformZoomDelta = 0;
   private activeLocalTransformLightBoost = 0;
   private activeLocalTransformShake = 0;
+  private worldEventVfx!: WorldEventVfxPool;
 
   constructor(
     container: HTMLElement,
@@ -370,6 +374,7 @@ export class ArenaScene3D {
     this.initWeatherVisuals();
     this.initFloatingStatusIcons();
     this.initKeliKingVictoryFx();
+    this.worldEventVfx = new WorldEventVfxPool(this.scene);
     this.ambientParticles = new AmbientHazardParticles(
       this.scene,
       this.renderer.getPixelRatio()
@@ -2731,6 +2736,13 @@ export class ArenaScene3D {
     this.keyLight.target.position.copy(this.currentCamLook);
 
     this.updateWeatherVisuals(sim.weather, visualDt, elapsed);
+    this.worldEventVfx.update(
+      sim.activeWorldEvent ?? null,
+      elapsed,
+      this.currentCamFocus.x,
+      this.currentCamFocus.z,
+      this.reducedMotion
+    );
     this.ambientParticles.update(
       visualDt,
       this.reducedMotion,
@@ -3692,6 +3704,7 @@ export class ArenaScene3D {
 
     this.rainLines?.geometry?.dispose();
     (this.rainLines?.material as THREE.Material | undefined)?.dispose();
+    this.worldEventVfx?.dispose();
     this.ambientParticles?.dispose();
 
     this.scene.traverse((obj) => {

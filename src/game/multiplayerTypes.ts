@@ -2,6 +2,7 @@ import type { EmoteId } from '../data/emotes.ts';
 import type {
   AbilityCooldowns,
   AbilityId,
+  ActiveWorldEventState,
   BitePhase,
   CarcassEntity,
   EvolutionForm,
@@ -108,6 +109,8 @@ export interface RemoteKeliState {
   recoilDirZ?: number;
   recoilStrength?: number;
   lastHitKind?: HitReactKind | null;
+  netEntangleTimer?: number;
+  netImmunityTimer?: number;
   venomTimer: number;
   frenzyTimer: number;
   veilTimer: number;
@@ -180,7 +183,12 @@ export interface ClientSfxEvent {
     | 'damage_hit_heavy'
     | 'bounty_marked'
     | 'bounty_claimed'
-    | 'whistle';
+    | 'whistle'
+    | 'event_warning'
+    | 'event_flood'
+    | 'event_silt'
+    | 'event_whirlpool'
+    | 'event_net_snag';
 }
 
 export interface WorldStatePacket {
@@ -192,6 +200,7 @@ export interface WorldStatePacket {
   hitStop?: HitStopEvent | null;
   zone: ZoneState;
   weather: WeatherState;
+  worldEvent?: ActiveWorldEventState | null;
   kelis: RemoteKeliState[];
   carcasses: CarcassEntity[];
   pickups: PickupItem[];

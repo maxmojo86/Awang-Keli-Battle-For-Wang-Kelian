@@ -16,6 +16,7 @@ import {
 import type { RenderableSimulation } from './scene3d';
 import {
   AbilityId,
+  ActiveWorldEventState,
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
@@ -73,6 +74,8 @@ function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
     recoilDirZ: r?.recoilDirZ ?? 0,
     recoilStrength: r?.recoilStrength ?? 0,
     lastHitKind: r?.lastHitKind ?? null,
+    netEntangleTimer: r?.netEntangleTimer ?? 0,
+    netImmunityTimer: r?.netImmunityTimer ?? 0,
     venomTimer: r?.venomTimer ?? 0,
     venomDps: 0,
     venomSourceId: null,
@@ -160,6 +163,7 @@ export class RemoteSimulationView implements RenderableSimulation {
     remainingSec: 20,
     visibilityRange: 1.0,
   };
+  public activeWorldEvent: ActiveWorldEventState | null = null;
   public cameraShake = 0;
   public damageImpulse: DamageImpulse | null = null;
   public hitStop: HitStopEvent | null = null;
@@ -195,6 +199,10 @@ export class RemoteSimulationView implements RenderableSimulation {
     this.winnerId = packet.hud.matchResult.winnerId ?? null;
     this.zone = packet.zone;
     this.weather = packet.weather;
+    this.activeWorldEvent =
+      packet.status === 'playing'
+        ? (packet.worldEvent ?? packet.hud.activeWorldEvent ?? null)
+        : null;
     this.cameraShake = Math.max(this.cameraShake, packet.cameraShake);
     this.hitStop = packet.hitStop ?? this.hitStop;
     this.carcasses = packet.carcasses;
@@ -293,6 +301,8 @@ export class RemoteSimulationView implements RenderableSimulation {
         ent.recoilDirZ = remote.recoilDirZ ?? 0;
         ent.recoilStrength = remote.recoilStrength ?? 0;
         ent.lastHitKind = remote.lastHitKind ?? null;
+        ent.netEntangleTimer = remote.netEntangleTimer ?? 0;
+        ent.netImmunityTimer = remote.netImmunityTimer ?? 0;
         ent.venomTimer = remote.venomTimer;
         ent.frenzyTimer = remote.frenzyTimer;
         ent.veilTimer = remote.veilTimer;
@@ -459,6 +469,21 @@ export class RemoteSimulationView implements RenderableSimulation {
         break;
       case 'whistle':
         soundEngine.playShiftWhistle();
+        break;
+      case 'event_warning':
+        soundEngine.playWorldEventWarning();
+        break;
+      case 'event_flood':
+        soundEngine.playFlashFloodCue();
+        break;
+      case 'event_silt':
+        soundEngine.playSiltBloomCue();
+        break;
+      case 'event_whirlpool':
+        soundEngine.playWhirlpoolCue();
+        break;
+      case 'event_net_snag':
+        soundEngine.playNetSnag();
         break;
     }
   }

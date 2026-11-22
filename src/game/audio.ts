@@ -3101,6 +3101,146 @@ class SoundEngine {
       osc.stop(now + idx * 0.07 + 0.36);
     });
   }
+
+  private lastWorldEventCueMs = 0;
+
+  private canPlayWorldEventCue(minGapMs = 650): boolean {
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (nowMs - this.lastWorldEventCueMs < minGapMs) return false;
+    this.lastWorldEventCueMs = nowMs;
+    return true;
+  }
+
+  public playWorldEventWarning() {
+    if (!this.canPlayWorldEventCue(900)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Two-pulse low aquatic sonar warning swell (readable, non-jarring)
+    [220, 293.66].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.14);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.06, now + idx * 0.14 + 0.28);
+
+      gain.gain.setValueAtTime(0.001, now + idx * 0.14);
+      gain.gain.linearRampToValueAtTime(0.095, now + idx * 0.14 + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.14 + 0.34);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.14);
+      osc.stop(now + idx * 0.14 + 0.36);
+    });
+  }
+
+  public playFlashFloodCue() {
+    if (!this.canPlayWorldEventCue(700)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoiseBuffer(ctx);
+    src.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(240, now);
+    filter.frequency.exponentialRampToValueAtTime(920, now + 0.45);
+    filter.frequency.exponentialRampToValueAtTime(340, now + 1.05);
+    filter.Q.value = 1.4;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.25);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.1);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 1.12);
+  }
+
+  public playSiltBloomCue() {
+    if (!this.canPlayWorldEventCue(700)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoiseBuffer(ctx);
+    src.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(480, now);
+    filter.frequency.exponentialRampToValueAtTime(160, now + 0.9);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.09, now + 0.2);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.95);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.98);
+  }
+
+  public playWhirlpoolCue() {
+    if (!this.canPlayWorldEventCue(700)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(175, now);
+    osc.frequency.exponentialRampToValueAtTime(92, now + 0.45);
+    osc.frequency.exponentialRampToValueAtTime(148, now + 0.85);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.16);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.92);
+  }
+
+  public playNetSnag() {
+    if (!this.canPlayWorldEventCue(280)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(210, now);
+    osc.frequency.exponentialRampToValueAtTime(115, now + 0.18);
+
+    filter.type = 'lowpass';
+    filter.frequency.value = 640;
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.24);
+  }
 }
 
 export const soundEngine = new SoundEngine();

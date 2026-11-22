@@ -285,6 +285,108 @@ export const Minimap: React.FC<MinimapProps> = ({
       ctx.restore();
     }
 
+    // 4b. Active Dynamic World Event Overlay (drawn below sonar/carcasses/Final Feast for clarity)
+    const worldEv = hud.activeWorldEvent;
+    if (
+      worldEv &&
+      worldEv.phase !== 'dormant' &&
+      worldEv.phase !== 'complete' &&
+      !hud.finalFeast?.active
+    ) {
+      const isWarn = worldEv.phase === 'warning';
+      const pulse = 0.72 + 0.28 * Math.sin(hud.matchTime * 6.5);
+      const ex = toPxX(worldEv.x);
+      const ey = toPxY(worldEv.z);
+
+      ctx.save();
+      if (worldEv.kind === 'flash_flood') {
+        ctx.translate(ex, ey);
+        ctx.rotate(worldEv.flowAngle);
+        const w = Math.max(10, scaleLen(worldEv.corridorHalfLength * 2));
+        const h = Math.max(6, scaleLen(worldEv.corridorHalfWidth * 2));
+        ctx.fillStyle = isWarn
+          ? `rgba(56, 189, 248, ${(0.14 * pulse).toFixed(3)})`
+          : 'rgba(56, 189, 248, 0.24)';
+        ctx.strokeStyle = isWarn ? 'rgba(186, 230, 253, 0.85)' : '#38bdf8';
+        ctx.lineWidth = isWarn ? 1.2 : 1.5;
+        if (isWarn) ctx.setLineDash([4, 3]);
+        ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+        ctx.strokeRect(-w * 0.5, -h * 0.5, w, h);
+        ctx.setLineDash([]);
+
+        // Directional current chevrons
+        ctx.strokeStyle = '#e0f2fe';
+        ctx.lineWidth = 1.1;
+        for (let c = -1; c <= 1; c++) {
+          const cx = c * (w * 0.24);
+          const s = Math.min(3.5, h * 0.28);
+          ctx.beginPath();
+          ctx.moveTo(cx - s * 0.6, -s);
+          ctx.lineTo(cx + s * 0.7, 0);
+          ctx.lineTo(cx - s * 0.6, s);
+          ctx.stroke();
+        }
+      } else if (worldEv.kind === 'silt_bloom') {
+        const r = Math.max(7, scaleLen(worldEv.radius));
+        ctx.fillStyle = isWarn
+          ? `rgba(217, 119, 6, ${(0.14 * pulse).toFixed(3)})`
+          : 'rgba(180, 108, 38, 0.28)';
+        ctx.strokeStyle = isWarn ? 'rgba(251, 191, 36, 0.85)' : '#d97706';
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([3, 2.5]);
+        ctx.beginPath();
+        ctx.arc(ex, ey, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (worldEv.kind === 'whirlpool') {
+        const r = Math.max(7, scaleLen(worldEv.radius));
+        ctx.fillStyle = isWarn
+          ? `rgba(45, 212, 191, ${(0.12 * pulse).toFixed(3)})`
+          : 'rgba(20, 184, 166, 0.24)';
+        ctx.strokeStyle = isWarn ? 'rgba(153, 246, 228, 0.85)' : '#2dd4bf';
+        ctx.lineWidth = 1.4;
+        if (isWarn) ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.arc(ex, ey, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Inner swirling arc indicator
+        const rot = hud.matchTime * 3.2;
+        ctx.strokeStyle = '#99f6e4';
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.arc(ex, ey, r * 0.52, rot, rot + Math.PI * 1.35);
+        ctx.stroke();
+      } else if (worldEv.kind === 'drifting_net') {
+        // Drift path trajectory line
+        ctx.strokeStyle = 'rgba(253, 186, 116, 0.45)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(toPxX(worldEv.startX), toPxY(worldEv.startZ));
+        ctx.lineTo(toPxX(worldEv.endX), toPxY(worldEv.endZ));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Moving net bar perpendicular to travel heading
+        ctx.translate(ex, ey);
+        ctx.rotate(worldEv.flowAngle + Math.PI * 0.5);
+        const span = Math.max(7, scaleLen(worldEv.corridorHalfLength * 2));
+        const thick = Math.max(3, scaleLen(worldEv.corridorHalfWidth * 2));
+        ctx.fillStyle = isWarn
+          ? `rgba(251, 146, 60, ${(0.35 * pulse).toFixed(3)})`
+          : 'rgba(251, 146, 60, 0.72)';
+        ctx.strokeStyle = '#ffedd5';
+        ctx.lineWidth = 1.1;
+        ctx.fillRect(-span * 0.5, -thick * 0.5, span, thick);
+        ctx.strokeRect(-span * 0.5, -thick * 0.5, span, thick);
+      }
+      ctx.restore();
+    }
+
     // 5. Jantung Tasik Convergence Marker (radioactive drum landmark)
     const jx = toPxX(LANDMARKS.radioactiveDrum.x);
     const jy = toPxY(LANDMARKS.radioactiveDrum.z);

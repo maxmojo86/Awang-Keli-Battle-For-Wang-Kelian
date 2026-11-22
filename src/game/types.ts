@@ -59,6 +59,52 @@ export interface WeatherState {
   visibilityRange: number; // 1.0 clear, 0.84 light_rain, 0.58 basin_fog
 }
 
+export type WorldEventKind =
+  | 'flash_flood'
+  | 'silt_bloom'
+  | 'whirlpool'
+  | 'drifting_net';
+
+export type WorldEventPhase =
+  | 'dormant'
+  | 'warning'
+  | 'active'
+  | 'dissipating'
+  | 'complete';
+
+export interface ActiveWorldEventState {
+  id: string;
+  seq: number;
+  kind: WorldEventKind;
+  label: string;
+  subtitle: string;
+  phase: WorldEventPhase;
+  phaseElapsed: number;
+  phaseDuration: number;
+  remainingSec: number;
+  intensity: number; // 0..1 smooth ramp
+  x: number;
+  z: number;
+  radius: number;
+  corridorHalfLength: number;
+  corridorHalfWidth: number;
+  flowAngle: number;
+  flowSpeed: number;
+  startX: number;
+  startZ: number;
+  endX: number;
+  endZ: number;
+  driftProgress: number; // 0..1 for drifting_net
+  createdAt: number;
+}
+
+export interface PlayerEventThreat {
+  kind: WorldEventKind;
+  label: string;
+  escapeAngle: number;
+  severity: 'warning' | 'active';
+}
+
 export type BitePhase = 'idle' | 'windup' | 'strike' | 'recovery';
 
 export type HitReactKind = 'normal' | 'crit' | 'stun' | 'mitigated';
@@ -134,6 +180,9 @@ export interface KeliEntity {
   recoilDirZ: number;
   recoilStrength: number;
   lastHitKind?: HitReactKind | null;
+  // Separate bounded movement-impairment state for Jaring Hanyut (never alters stunTimer / stunResistTimer)
+  netEntangleTimer?: number;
+  netImmunityTimer?: number;
 
   venomTimer: number;
   venomDps: number;
@@ -451,6 +500,7 @@ export interface HudSnapshot {
     stunned: boolean;
     staggered?: boolean;
     stunResistTimeLeft?: number;
+    netEntangled?: boolean;
     evading?: boolean;
     bitePhase?: BitePhase;
     biteCooldown?: number;
@@ -491,6 +541,8 @@ export interface HudSnapshot {
 
   zone: ZoneState;
   weather: WeatherState;
+  activeWorldEvent?: ActiveWorldEventState | null;
+  playerThreatenedByEvent?: PlayerEventThreat | null;
   matchPhase?: MatchPhase;
   fragmentsToKing?: number;
   nextMilestoneLevel?: number | null;

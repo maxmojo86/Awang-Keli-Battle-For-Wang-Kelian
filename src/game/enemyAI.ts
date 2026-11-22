@@ -14,7 +14,13 @@ import {
   computeTurnRate,
   getLocomotionProfile,
 } from './movement.ts';
+import {
+  evaluateEventAvoidance,
+  evaluateSiltVisibilityMultiplier,
+  SILT_BLOOM_MIN_READABLE_RANGE,
+} from './environmentalEvents.ts';
 import type {
+  ActiveWorldEventState,
   AiDebugEntry,
   AiDifficulty,
   AiPersonality,
@@ -193,6 +199,7 @@ export interface AiSimulationContext {
   finalFeastActive: boolean;
   zone: ZoneState;
   weather: WeatherState;
+  activeWorldEvent?: ActiveWorldEventState | null;
   kelis: KeliEntity[];
   carcasses: CarcassEntity[];
   pickups: PickupItem[];
@@ -378,7 +385,8 @@ function evaluatePointSafetyPenalty(
   avoidShore: boolean,
   alreadyOutsideZone: boolean,
   currentZoneDist: number,
-  ignoreSoftHazards = false
+  ignoreSoftHazards = false,
+  activeWorldEvent: ActiveWorldEventState | null = null
 ): number {
   let penalty = 0;
 
@@ -441,6 +449,18 @@ function evaluatePointSafetyPenalty(
         penalty += 28;
       }
     }
+    if (activeWorldEvent && !bot.isOnShore) {
+      const evAvoid = evaluateEventAvoidance(activeWorldEvent, x, z, botRadius);
+      if (evAvoid.dangerScore > 0) {
+        if (activeWorldEvent.kind === 'whirlpool') {
+          penalty += evAvoid.dangerScore * 0.85;
+        } else if (activeWorldEvent.kind === 'drifting_net') {
+          penalty += evAvoid.dangerScore * 0.9;
+        } else if (activeWorldEvent.kind === 'flash_flood') {
+          penalty += evAvoid.dangerScore * 0.35;
+        }
+      }
+    }
   }
 
   return penalty;
@@ -460,7 +480,8 @@ export function computeSteeredAngle(
   flankSign: 1 | -1 = 1,
   avoidShore = false,
   probeDist = 84,
-  ignoreSoftHazards = false
+  ignoreSoftHazards = false,
+  activeWorldEvent: ActiveWorldEventState | null = null
 ): number {
   const currentZoneDist = Math.hypot(bot.x - zone.centerX, bot.z - zone.centerZ);
   const alreadyOutsideZone = currentZoneDist > zone.currentRadius - 60;
@@ -485,7 +506,8 @@ export function computeSteeredAngle(
       avoidShore,
       alreadyOutsideZone,
       currentZoneDist,
-      ignoreSoftHazards
+      ignoreSoftHazards,
+      activeWorldEvent
     );
     const p2 = evaluatePointSafetyPenalty(
       bot.x + cosA * probeDist,
@@ -496,7 +518,8 @@ export function computeSteeredAngle(
       avoidShore,
       alreadyOutsideZone,
       currentZoneDist,
-      ignoreSoftHazards
+      ignoreSoftHazards,
+      activeWorldEvent
     );
 
     // Slight angle deviation cost so direct path wins when clear
@@ -1097,6 +1120,93 @@ export class AiController {
       return;
     }
 
+    // 1b-2. Dynamic World Event response (fair, personality-driven repositioning & escape)
+    if (ctx.activeWorldEvent && !bot.isOnShore) {
+      // Break out of drifting fishing net entanglement with Dash or Slip Evade when stamina allows
+      if ((bot.netEntangleTimer ?? 0) > 0.12 && !bot.fatigued) {
+        if (
+          bot.level >= 10 &&
+          bot.cooldowns.dash <= 0 &&
+          bot.stamina >= AI_DASH_STAMINA_COST + 12 &&
+          mem.rng() < diff.evadeReliability * 0.85
+        ) {
+          ctx.tryDash(bot);
+        } else if (
+          bot.cooldowns.evade <= 0 &&
+          bot.stamina >= AI_EVADE_STAMINA_COST + 10 &&
+          mem.rng() < diff.evadeReliability * 0.75
+        ) {
+          ctx.tryEvade(bot);
+        }
+      }
+
+      const evAvoid = evaluateEventAvoidance(ctx.activeWorldEvent, bot.x, bot.z, botRadius);
+      const isDirectHazard =
+        ctx.activeWorldEvent.kind === 'whirlpool' ||
+        ctx.activeWorldEvent.kind === 'drifting_net' ||
+        (ctx.activeWorldEvent.kind === 'flash_flood' && mem.personality === 'cautious_survivor');
+
+      const avoidThreshold =
+        mem.personality === 'cautious_survivor'
+          ? 34
+          : mem.personality === 'opportunistic_scavenger'
+            ? 52
+            : mem.personality === 'patient_ambusher'
+              ? 48
+              : 64; // aggressive_hunter pushes deeper before disengaging
+
+      if (isDirectHazard && evAvoid.dangerScore >= avoidThreshold) {
+        if (bot.feedingTargetId && evAvoid.dangerScore >= avoidThreshold + 8) {
+          ctx.cancelFeeding(bot, 'voluntary');
+        }
+        this.commitState(
+          bot,
+          mem,
+          'RETREAT',
+          86 + evAvoid.dangerScore * 0.35,
+          null,
+          null,
+          null,
+          `Evade ${ctx.activeWorldEvent.label}`,
+          0.42
+        );
+        const steered = computeSteeredAngle(
+          bot,
+          evAvoid.escapeAngle,
+          botRadius,
+          ctx.zone,
+          mem.flankSign,
+          bot.level < 40,
+          88,
+          false,
+          ctx.activeWorldEvent
+        );
+        this.steerAndMove(bot, mem, steered, spd, dt, 13);
+
+        // Escape deep whirlpool core or imminent net snag using Dash or Slip Evade
+        if (
+          ctx.activeWorldEvent.phase === 'active' &&
+          evAvoid.dangerScore >= 68 &&
+          !bot.fatigued
+        ) {
+          if (
+            bot.level >= 10 &&
+            bot.cooldowns.dash <= 0 &&
+            bot.stamina >= AI_DASH_STAMINA_COST + 16
+          ) {
+            ctx.tryDash(bot);
+          } else if (
+            bot.cooldowns.evade <= 0 &&
+            bot.stamina >= AI_EVADE_STAMINA_COST + 12 &&
+            mem.rng() < diff.evadeReliability
+          ) {
+            ctx.tryEvade(bot);
+          }
+        }
+        return;
+      }
+    }
+
     // 1c. Reactive Slip Evade against telegraphed nearby enemy bite windups (with natural reaction delay!)
     if (this.handleTelegraphedWindupReaction(bot, mem, diff, profile, botRadius, spd, dt, ctx)) {
       return;
@@ -1463,6 +1573,21 @@ export class AiController {
       }
     }
 
+    // Abort risky feeding if a Whirlpool or Drifting Net bears down directly on the carcass
+    if (ctx.activeWorldEvent && !bot.isOnShore) {
+      if (
+        ctx.activeWorldEvent.kind === 'whirlpool' ||
+        ctx.activeWorldEvent.kind === 'drifting_net'
+      ) {
+        const evRisk = evaluateEventAvoidance(ctx.activeWorldEvent, bot.x, bot.z, botRadius);
+        const cancelThreshold = mem.personality === 'cautious_survivor' ? 42 : 62;
+        if (evRisk.dangerScore >= cancelThreshold) {
+          ctx.cancelFeeding(bot, 'voluntary');
+          return false;
+        }
+      }
+    }
+
     return true;
   }
 
@@ -1502,6 +1627,22 @@ export class AiController {
       if (other.isOnShore && bot.level < 40) continue;
 
       const d = Math.hypot(other.x - bot.x, other.z - bot.z);
+
+      // Localized Air Keruh (Silt Bloom) restricts AI visual sight identically to players,
+      // while preserving close-range combat readability and legitimate Echo/Hunter Sonar detection
+      if (bot.sonarTimer <= 0 && ctx.activeWorldEvent?.kind === 'silt_bloom') {
+        const siltMult = evaluateSiltVisibilityMultiplier(
+          ctx.activeWorldEvent,
+          bot.x,
+          bot.z,
+          other.x,
+          other.z
+        );
+        if (siltMult < 0.99) {
+          const effectiveSight = Math.max(SILT_BLOOM_MIN_READABLE_RANGE, basePerception * siltMult);
+          if (d > effectiveSight) continue;
+        }
+      }
 
       // Count stronger third-parties near `other`
       let thirdPartyStrong = 0;
@@ -1808,9 +1949,15 @@ export class AiController {
         bestPreyDist > strikeReach + 48 &&
         bestPreyDist < 290 &&
         !bestPrey.feedingTargetId &&
-        this.findNearbyCoverAnchor(bot.x, bot.z, bestPrey.x, bestPrey.z) !== null
+        (this.findNearbyCoverAnchor(bot.x, bot.z, bestPrey.x, bestPrey.z) !== null ||
+          (ctx.activeWorldEvent?.kind === 'silt_bloom' &&
+            ctx.activeWorldEvent.phase === 'active' &&
+            Math.hypot(bot.x - ctx.activeWorldEvent.x, bot.z - ctx.activeWorldEvent.z) <
+              ctx.activeWorldEvent.radius * 1.15))
       ) {
-        const anchor = this.findNearbyCoverAnchor(bot.x, bot.z, bestPrey.x, bestPrey.z)!;
+        const anchor =
+          this.findNearbyCoverAnchor(bot.x, bot.z, bestPrey.x, bestPrey.z) ??
+          { x: ctx.activeWorldEvent!.x, z: ctx.activeWorldEvent!.z };
         consider({
           state: 'AMBUSH',
           score: (bestPreyScore + 12) * profile.ambushWeight,
@@ -2233,7 +2380,10 @@ export class AiController {
           botRadius,
           ctx.zone,
           mem.flankSign,
-          avoidShore
+          avoidShore,
+          84,
+          false,
+          ctx.activeWorldEvent ?? null
         );
         this.steerAndMove(bot, mem, steered, spd * 0.84, dt, 9);
       }
