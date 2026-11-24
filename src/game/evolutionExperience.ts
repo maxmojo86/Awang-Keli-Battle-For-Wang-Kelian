@@ -1,4 +1,4 @@
-import { EVOLUTION_MILESTONES, EvolutionMilestone, getEvolutionForm, getFormLabel } from '../data/abilities.ts';
+import { EVOLUTION_MILESTONES, type EvolutionMilestone, getEvolutionForm, getFormLabel } from '../data/abilities.ts';
 import type { EvolutionForm, HudEvolutionProgress } from './types.ts';
 
 export type EvolutionEventKind =
