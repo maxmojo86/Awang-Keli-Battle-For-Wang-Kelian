@@ -317,8 +317,11 @@ export function getAmbientProfile(
   return profile;
 }
 
+// Stored as `.dat` binary payload (MPEG Layer III bytes decoded via Web Audio `decodeAudioData`
+// or an in-memory `audio/mpeg` Blob URL) so localhost servers and browser download managers
+// (e.g. IDM/FDM) never intercept and auto-download the soundtrack instead of playing it.
 export const MENU_SOUNDTRACK_URL = resolveAssetUrl(
-  'assets/aistudio/Panggilan_Lubuk_Hitam_8b130ca5.mp3'
+  'assets/aistudio/Panggilan_Lubuk_Hitam_8b130ca5.dat'
 );
 
 export type MenuMusicStatus =
@@ -387,6 +390,7 @@ class SoundEngine {
   private menuMusicBuffer: AudioBuffer | null = null;
   private decodePromise: Promise<AudioBuffer | null> | null = null;
   private fallbackAudioEl: HTMLAudioElement | null = null;
+  private fallbackBlobUrl: string | null = null;
   private fallbackFadeValue = 0;
   private fallbackFadeRafId: number | null = null;
   private useFallbackElement = false;
@@ -602,24 +606,42 @@ class SoundEngine {
     this.fallbackFadeRafId = window.requestAnimationFrame(tick);
   }
 
-  private ensureFallbackAudioElement(): HTMLAudioElement | null {
+  private revokeFallbackBlobUrl() {
+    if (this.fallbackBlobUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try {
+        URL.revokeObjectURL(this.fallbackBlobUrl);
+      } catch {
+        // Ignore revoke error
+      }
+      this.fallbackBlobUrl = null;
+    }
+  }
+
+  private ensureFallbackAudioElement(rawBytes?: ArrayBuffer | null): HTMLAudioElement | null {
     if (typeof window === 'undefined' || typeof Audio === 'undefined') return null;
+    const bytes = rawBytes ?? this.rawAudioBytes;
     if (!this.fallbackAudioEl) {
       const el = new Audio();
-      el.src = MENU_SOUNDTRACK_URL;
       el.loop = true;
       el.preload = 'auto';
       el.volume = 0;
       el.muted = this.muted;
       this.fallbackAudioEl = el;
     }
+    if (bytes && !this.fallbackBlobUrl && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
+      const blob = new Blob([bytes], { type: 'audio/mpeg' });
+      this.fallbackBlobUrl = URL.createObjectURL(blob);
+      this.fallbackAudioEl.src = this.fallbackBlobUrl;
+    }
     return this.fallbackAudioEl;
   }
 
   private async startOrResumeFallbackElement(fadeInDurationSec: number): Promise<boolean> {
     if (this.menuMusicPlaying || this.startLoopInFlight) return this.menuMusicPlaying;
-    const el = this.ensureFallbackAudioElement();
-    if (!el) return false;
+    const rawBytes = this.rawAudioBytes ?? (await this.preloadMenuMusic());
+    if (!rawBytes) return false;
+    const el = this.ensureFallbackAudioElement(rawBytes);
+    if (!el || !el.src) return false;
     if (
       !this.menuMusicWanted ||
       this.muted ||
@@ -725,11 +747,28 @@ class SoundEngine {
       !this.appBackgrounded &&
       !(typeof document !== 'undefined' && document.hidden)
     ) {
-      if (this.ctx && (this.ctx.state as string) === 'running') {
+      const ctx = this.ensureAudioContextRaw();
+      if (ctx && (ctx.state as string) === 'running') {
         this.gestureUnlocked = true;
         void this.startOrResumeMenuMusic(1.0);
       } else {
         this.armGestureListeners();
+        if (ctx) {
+          void this.resumeContextWithTimeout(ctx, 220).then((running) => {
+            if (
+              running &&
+              this.menuMusicWanted &&
+              !this.muted &&
+              !this.appBackgrounded &&
+              !(typeof document !== 'undefined' && document.hidden) &&
+              !this.menuMusicPlaying &&
+              !this.startLoopInFlight
+            ) {
+              this.gestureUnlocked = true;
+              void this.startOrResumeMenuMusic(1.0);
+            }
+          });
+        }
       }
     }
 
@@ -809,6 +848,21 @@ class SoundEngine {
           throw new Error('Empty audio payload');
         }
         this.rawAudioBytes = buf;
+        // If menu music is already wanted and unmuted, probe autoplay immediately once bytes arrive
+        if (
+          this.menuMusicWanted &&
+          !this.muted &&
+          !this.appBackgrounded &&
+          !(typeof document !== 'undefined' && document.hidden) &&
+          !this.menuMusicPlaying &&
+          !this.startLoopInFlight
+        ) {
+          const ctx = this.ensureAudioContextRaw();
+          if (ctx && (ctx.state as string) === 'running') {
+            this.gestureUnlocked = true;
+            void this.startOrResumeMenuMusic(1.5);
+          }
+        }
         return buf;
       })
       .catch(() => {
@@ -829,6 +883,11 @@ class SoundEngine {
     this.rawAudioPromise = null;
     this.menuMusicBuffer = null;
     this.decodePromise = null;
+    this.revokeFallbackBlobUrl();
+    if (this.fallbackAudioEl) {
+      this.fallbackAudioEl.removeAttribute('src');
+      this.fallbackAudioEl = null;
+    }
     this.useFallbackElement = false;
     this.menuMusicError = null;
     this.menuMusicStatus = this.gestureUnlocked ? 'loading' : 'awaiting_gesture';
@@ -1493,6 +1552,11 @@ class SoundEngine {
       this.fadeOutStopTimerId = null;
     }
     this.pauseActiveMusicSources(false);
+    this.revokeFallbackBlobUrl();
+    if (this.fallbackAudioEl) {
+      this.fallbackAudioEl.removeAttribute('src');
+      this.fallbackAudioEl = null;
+    }
     this.menuMusicWanted = false;
     this.wasPlayingBeforeHide = false;
     this.menuMusicStatus = this.menuMusicError ? 'error' : 'idle';

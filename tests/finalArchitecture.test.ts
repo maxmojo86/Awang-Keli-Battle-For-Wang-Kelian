@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { getTerrainAt } from '../src/game/arena.ts';
+import { MENU_SOUNDTRACK_URL } from '../src/game/audio.ts';
 import { getBackendConfig } from '../src/game/backendConfig.ts';
 import {
   createDefaultSavePayload,
@@ -908,3 +909,50 @@ test('30. YouTube Playables build auditor script validates dist-youtube/ structu
     assert.equal(missingReport.ok, false);
   }
 });
+
+// 31. Standalone Web defaults to same-origin API and WS so full-stack multiplayer is online by default
+test('31. backendConfig defaults to same-origin API and WS in Standalone Web and honors explicit opt-out', () => {
+  const prevWindow = (globalThis as Record<string, unknown>).window;
+  try {
+    (globalThis as Record<string, unknown>).window = {
+      location: { origin: 'https://awang-keli.example.app', protocol: 'https:', host: 'awang-keli.example.app' },
+    };
+    resetPlatformCapabilitiesCache();
+    const cfg = getBackendConfig();
+    assert.equal(cfg.isApiConfigured, true);
+    assert.equal(cfg.isWsConfigured, true);
+    assert.equal(cfg.apiBaseUrl, '');
+    assert.equal(cfg.wsUrl, 'wss://awang-keli.example.app/ws');
+
+    // Explicit opt-out (`none`) still disables online endpoints cleanly
+    (globalThis as Record<string, unknown>).window = {
+      location: { origin: 'https://static-host.example', protocol: 'https:', host: 'static-host.example' },
+      __AWANG_KELI_CONFIG__: { apiBaseUrl: 'none', wsUrl: 'none' },
+    };
+    const disabledCfg = getBackendConfig();
+    assert.equal(disabledCfg.isApiConfigured, false);
+    assert.equal(disabledCfg.isWsConfigured, false);
+    assert.equal(disabledCfg.apiBaseUrl, null);
+    assert.equal(disabledCfg.wsUrl, null);
+  } finally {
+    if (prevWindow === undefined) delete (globalThis as Record<string, unknown>).window;
+    else (globalThis as Record<string, unknown>).window = prevWindow;
+    resetPlatformCapabilitiesCache();
+  }
+});
+
+// 32. Menu soundtrack uses non-media .dat asset payload so localhost servers/download managers never autodownload it
+test('32. Menu soundtrack resolves to .dat binary asset with valid MPEG/ID3 payload on disk', () => {
+  assert.ok(
+    MENU_SOUNDTRACK_URL.endsWith('.dat'),
+    `Expected MENU_SOUNDTRACK_URL to end with .dat to avoid browser/IDM .mp3 autodownload, got ${MENU_SOUNDTRACK_URL}`
+  );
+  assert.ok(!MENU_SOUNDTRACK_URL.endsWith('.mp3'));
+
+  const relPath = MENU_SOUNDTRACK_URL.replace(/^\.?\//, '');
+  const fullPath = path.join(process.cwd(), 'public', relPath);
+  assert.ok(fs.existsSync(fullPath), `Expected soundtrack file at ${fullPath}`);
+  const header = fs.readFileSync(fullPath).subarray(0, 3).toString('ascii');
+  assert.equal(header, 'ID3', 'Soundtrack .dat payload must contain valid ID3/MP3 bytes');
+});
+

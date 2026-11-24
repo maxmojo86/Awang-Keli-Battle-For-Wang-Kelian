@@ -654,6 +654,7 @@ export class MultiplayerClient {
   private reconnectTimer: number | null = null;
   private pingTimer: number | null = null;
   private reconnectAttempts = 0;
+  private hasEverConnected = false;
   private shouldStayConnected = false;
 
   private lastInputSentAt = 0;
@@ -836,6 +837,7 @@ export class MultiplayerClient {
 
     ws.onopen = () => {
       this.reconnectAttempts = 0;
+      this.hasEverConnected = true;
       this.state.status = 'connected';
       this.state.error = null;
       this.emitState();
@@ -958,6 +960,16 @@ export class MultiplayerClient {
         this.state.latencyMs = null;
         this.state.error =
           'Device is offline. Solo Royale and Guide Mode remain playable offline.';
+        this.emitState();
+        return;
+      }
+
+      if (!this.hasEverConnected && this.reconnectAttempts >= 3) {
+        this.shouldStayConnected = false;
+        this.state.status = 'unavailable';
+        this.state.latencyMs = null;
+        this.state.error =
+          'Multiplayer server unreachable on this host. Solo Royale and Guide Mode remain playable.';
         this.emitState();
         return;
       }

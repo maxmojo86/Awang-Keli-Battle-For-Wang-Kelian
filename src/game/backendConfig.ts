@@ -32,9 +32,14 @@ function readRuntimeOverride(): BackendRuntimeConfig {
   return window.__AWANG_KELI_CONFIG__ ?? {};
 }
 
+function isExplicitlyDisabled(raw: string): boolean {
+  const lower = raw.trim().toLowerCase();
+  return lower === 'none' || lower === 'off' || lower === 'false' || lower === 'disabled';
+}
+
 function normalizeHttpBase(raw: string): string | null {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (!trimmed || isExplicitlyDisabled(trimmed)) return null;
   if (trimmed.toLowerCase() === 'same-origin') return '';
   if (trimmed.startsWith('/')) return trimmed.replace(/\/+$/, '');
   if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, '');
@@ -43,7 +48,7 @@ function normalizeHttpBase(raw: string): string | null {
 
 function normalizeWsUrl(raw: string): string | null {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (!trimmed || isExplicitlyDisabled(trimmed)) return null;
   if (trimmed.toLowerCase() === 'same-origin') {
     if (typeof window === 'undefined') return null;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -87,11 +92,21 @@ export function getBackendConfig(): ResolvedBackendConfig {
       ? runtime.wsUrl.trim()
       : readEnvString('VITE_WS_URL');
 
-  // Backend environment variables are strictly optional.
-  // When empty/unset, keep solo gameplay fully functional and mark online
-  // multiplayer and global leaderboards as unavailable.
-  const apiBaseUrl = normalizeHttpBase(rawApi);
-  const wsUrl = normalizeWsUrl(rawWs);
+  // Standalone Web served by `server.ts` (AI Studio, Cloud Run, localhost) hosts `/api/*` and `/ws`
+  // on the same origin. Default to same-origin when env vars are unset on http(s) web origins.
+  // Android Capacitor WebViews (`https://localhost`) have no bundled Node server and require
+  // explicit `VITE_API_BASE_URL` / `VITE_WS_URL` (or runtime override).
+  const canDefaultSameOrigin =
+    caps.platform === 'STANDALONE_WEB' &&
+    typeof window !== 'undefined' &&
+    Boolean(window.location?.host) &&
+    /^https?:$/i.test(window.location.protocol ?? '');
+
+  const effectiveApiRaw = rawApi || (canDefaultSameOrigin ? 'same-origin' : '');
+  const effectiveWsRaw = rawWs || (canDefaultSameOrigin ? 'same-origin' : '');
+
+  const apiBaseUrl = normalizeHttpBase(effectiveApiRaw);
+  const wsUrl = normalizeWsUrl(effectiveWsRaw);
 
   return {
     apiBaseUrl,
