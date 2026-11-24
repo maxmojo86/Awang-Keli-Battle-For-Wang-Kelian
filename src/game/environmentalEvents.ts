@@ -726,6 +726,20 @@ export class EnvironmentalEventDirector {
   }
 
   /**
+   * Immediately cancels/clears any active or pending environmental hazard during Final Feast
+   * so the sole survivor can cleanly recover the remaining fragments without interference.
+   */
+  public suppressForFinalFeast(): void {
+    if (!this.activeEvent) return;
+    if (this.activeEvent.phase === 'warning' || this.activeEvent.phase === 'active') {
+      this.activeEvent = null;
+    } else if (this.activeEvent.phase === 'dissipating') {
+      this.activeEvent.phaseDuration = Math.min(this.activeEvent.phaseDuration, 0.8);
+      this.activeEvent.remainingSec = Math.min(this.activeEvent.remainingSec, 0.8);
+    }
+  }
+
+  /**
    * Picks a balanced next event kind without immediately repeating the prior event.
    */
   private pickNextKind(matchPhase: MatchPhase): WorldEventKind {
@@ -1084,7 +1098,8 @@ export class EnvironmentalEventDirector {
     matchPhase: MatchPhase,
     aliveCount: number,
     finalFeastActive: boolean,
-    matchConcluded: boolean
+    matchConcluded: boolean,
+    suppressForFinalHunt = false
   ): EnvironmentalEventStepOutput {
     const out: EnvironmentalEventStepOutput = {
       activeEvent: this.activeEvent,
@@ -1116,11 +1131,28 @@ export class EnvironmentalEventDirector {
         if (this.activeEvent.phase === 'active') {
           this.activeEvent.phase = 'dissipating';
           this.activeEvent.phaseElapsed = 0;
-          this.activeEvent.phaseDuration = Math.min(1.6, this.profile.dissipateDurationSec);
+          this.activeEvent.phaseDuration = Math.min(1.4, this.profile.dissipateDurationSec);
           this.activeEvent.remainingSec = this.activeEvent.phaseDuration;
           out.phaseJustChanged = true;
           out.newPhase = 'dissipating';
         }
+      }
+    } else if (suppressForFinalHunt && this.activeEvent) {
+      // During FINAL HUNT (2-3 survivors), cancel pending warnings and smoothly wind down active hazards
+      // so the final confrontation is decided by predator skill rather than random environmental chaos
+      if (this.activeEvent.phase === 'warning') {
+        this.activeEvent = null;
+        out.activeEvent = null;
+        out.eventJustCompleted = true;
+        return out;
+      }
+      if (this.activeEvent.phase === 'active') {
+        this.activeEvent.phase = 'dissipating';
+        this.activeEvent.phaseElapsed = 0;
+        this.activeEvent.phaseDuration = Math.min(2.2, this.profile.dissipateDurationSec);
+        this.activeEvent.remainingSec = this.activeEvent.phaseDuration;
+        out.phaseJustChanged = true;
+        out.newPhase = 'dissipating';
       }
     }
 
@@ -1187,7 +1219,7 @@ export class EnvironmentalEventDirector {
     }
 
     // DORMANT state: check if time to trigger a single new event
-    if (finalFeastActive) return out;
+    if (finalFeastActive || suppressForFinalHunt) return out;
     // Do not start a brand-new event when only 2 Kelis remain in a very tiny endgame zone
     if (aliveCount <= 2 && zone.currentRadius < 420) return out;
     // Pause new scheduling briefly if the safe zone is actively shrinking with very tight radius

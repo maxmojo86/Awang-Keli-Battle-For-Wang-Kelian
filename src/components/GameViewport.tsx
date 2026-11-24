@@ -51,6 +51,7 @@ import {
 import { soundEngine } from '../game/audio';
 import { getEvolutionProgressInfo } from '../game/evolutionExperience';
 import { multiplayerClient, RemoteSimulationView } from '../game/multiplayerClient';
+import { getPlatformCapabilities } from '../game/platform';
 import { MatchReplayData, MatchReplayRecorder } from '../game/replay';
 import { ArenaScene3D } from '../game/scene3d';
 import { GameSimulation, PlayerInputState } from '../game/simulation';
@@ -62,10 +63,12 @@ import {
   AbilityId,
   AiDebugEntry,
   AiDifficulty,
+  GraphicsQuality,
   HudSnapshot,
   LobbySize,
   MatchMode,
 } from '../game/types';
+import { youtubePlayablesBridge } from '../game/youtubePlayables';
 import { AiDebugOverlay } from './AiDebugOverlay';
 import { DamageHitOverlay } from './DamageHitOverlay';
 import { EmoteWheel, pickEmoteIndexFromDelta } from './EmoteWheel';
@@ -272,8 +275,12 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const [showAiDebug, setShowAiDebug] = useState(false);
   const showAiDebugRef = useRef(false);
   showAiDebugRef.current = showAiDebug;
+  const platformCaps = getPlatformCapabilities();
   const [aiDebugEntries, setAiDebugEntries] = useState<AiDebugEntry[]>([]);
-  const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>('normal');
+  const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>(
+    settings.aiDifficulty ?? 'normal'
+  );
+  const lastTickRef = useRef<number>(performance.now());
 
   const handleDamageJolt = (jolt: { x: number; y: number }) => {
     const el = hudJoltRef.current;
@@ -365,20 +372,34 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   }, []);
 
   useEffect(() => {
-    return subscribeAppLifecycle(({ active }) => {
-      if (!active) {
-        joyPointerIdRef.current = null;
-        bitePointerIdRef.current = null;
-        joyOriginRef.current = null;
-        setJoyOffset({ x: 0, y: 0 });
-        setBitePressed(false);
-        pushPlayerInput({ moveX: 0, moveZ: 0, biteHeld: false }, true);
-        if (!isMultiplayer && !pausedRef.current) {
-          setPaused(true);
-        }
+    const pauseFromHost = () => {
+      joyPointerIdRef.current = null;
+      bitePointerIdRef.current = null;
+      joyOriginRef.current = null;
+      setJoyOffset({ x: 0, y: 0 });
+      setBitePressed(false);
+      pushPlayerInput({ moveX: 0, moveZ: 0, biteHeld: false }, true);
+      if (!isMultiplayer && !pausedRef.current) {
+        setPaused(true);
       }
+    };
+    const resumeFromHost = () => {
+      lastTickRef.current = performance.now();
+    };
+
+    const unsubApp = subscribeAppLifecycle(({ active }) => {
+      if (!active) pauseFromHost();
+      else resumeFromHost();
     });
-  }, [isMultiplayer]);
+    const unsubYt = platformCaps.youtubeSdkEnabled
+      ? youtubePlayablesBridge.subscribeLifecycle(pauseFromHost, resumeFromHost)
+      : () => {};
+
+    return () => {
+      unsubApp();
+      unsubYt();
+    };
+  }, [isMultiplayer, platformCaps.youtubeSdkEnabled]);
 
   useEffect(() => {
     return registerAndroidBackHandler(() => {
@@ -395,6 +416,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const spectatingActive = Boolean(hud?.spectating?.active);
   useEffect(() => {
     pausedRef.current = paused;
+    if (!paused) {
+      lastTickRef.current = performance.now();
+    }
     if (paused || spectatingActive) {
       joyPointerIdRef.current = null;
       bitePointerIdRef.current = null;
@@ -410,9 +434,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     soundEngine.setVolume(settings.volume);
     soundEngine.setMusicVolume(settings.musicVolume ?? 0.35);
     sceneRef.current?.setReducedMotion(settings.reducedMotion);
+    sceneRef.current?.setGraphicsQuality(settings.graphicsQuality ?? 'auto');
     sceneRef.current?.setShowStatusIcons(
       (settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY).statusEffects
     );
+    if (settings.aiDifficulty && simRef.current) {
+      simRef.current.setAiDifficulty(settings.aiDifficulty);
+      setAiDifficulty(settings.aiDifficulty);
+    }
   }, [settings]);
 
   // Update portrait medallion whenever active (player or spectated) milestone sprite tier changes
@@ -435,6 +464,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     if (!container) return;
 
     const sim = isMultiplayer ? null : new GameSimulation(lobbySize, mode, playerName);
+    if (sim && settingsRef.current.aiDifficulty) {
+      sim.setAiDifficulty(settingsRef.current.aiDifficulty);
+      setAiDifficulty(settingsRef.current.aiDifficulty);
+    }
     const remoteView = isMultiplayer
       ? new RemoteSimulationView(multiplayerPlayerId || 'player')
       : null;
@@ -446,6 +479,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const arena = new ArenaScene3D(container, settingsRef.current.reducedMotion, () =>
       setContextLost(true)
     );
+    arena.setGraphicsQuality(settingsRef.current.graphicsQuality ?? 'auto');
     arena.setShowStatusIcons(
       (settingsRef.current.hudVisibility ?? DEFAULT_HUD_VISIBILITY).statusEffects
     );
@@ -791,6 +825,11 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     };
 
     const onResize = () => arena.resize();
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => arena.resize())
+        : null;
+    resizeObserver?.observe(container);
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -800,13 +839,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('resize', onResize);
 
-    let lastTick = performance.now();
+    lastTickRef.current = performance.now();
     let hudTimer = 0;
 
     arena.startLoop(() => {
       const now = performance.now();
-      const dt = Math.min(0.05, (now - lastTick) / 1000);
-      lastTick = now;
+      const rawDt = Math.max(0, (now - lastTickRef.current) / 1000);
+      lastTickRef.current = now;
+      // Guard against huge delta-time jumps after backgrounding or host pause
+      const dt = rawDt > 0.25 ? 1 / 60 : Math.min(0.05, rawDt);
 
       const activeView = getActiveRenderable();
       const playerAlive = activeView.getPlayer().alive;
@@ -871,6 +912,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         deathCamActive: Boolean(!playerAlive && activeView.getDeathCam?.()?.active),
         paused: pausedRef.current || !matchPlaying,
       });
+
+      if (matchPlaying && !pausedRef.current && activeView.endgameState) {
+        soundEngine.updateEndgameTension(
+          activeView.endgameState.substate,
+          activeView.endgameState.tensionIntensity,
+          settingsRef.current.reducedMotion
+        );
+      }
 
       if (sim) {
         hudTimer += dt;
@@ -944,6 +993,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('resize', onResize);
+      resizeObserver?.disconnect();
       arena.dispose();
     };
   }, [lobbySize, mode, isMultiplayer, multiplayerPlayerId, onMatchFinished]);
@@ -1779,6 +1829,58 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               </div>
             )}
 
+            {hud.endgame &&
+              (hud.endgame.substate === 'final_convergence' ||
+                hud.endgame.substate === 'final_hunt') &&
+              !hud.finalFeast?.active &&
+              hud.matchResult.status === 'playing' && (
+                <div
+                  data-hud-element="endgame-status"
+                  className={`compendium-plaque rounded-sm text-center ${
+                    hud.endgame.substate === 'final_hunt'
+                      ? 'border-[#f59e0b]/80'
+                      : 'border-[#c99c4a]/65'
+                  } ${isCompactMode ? 'px-2.5 py-0.5' : 'px-4 py-1'}`}
+                >
+                  <div className="flex items-center justify-center gap-2 font-mono-num">
+                    <span
+                      className={`font-display font-semibold tracking-wider ${
+                        hud.endgame.substate === 'final_hunt'
+                          ? 'text-[#fde68a]'
+                          : 'text-[#f3d285]'
+                      } ${isCompactMode ? 'text-[10px]' : 'text-[11px]'}`}
+                    >
+                      ◆{' '}
+                      {hud.endgame.substate === 'final_hunt'
+                        ? 'FINAL HUNT'
+                        : 'FINAL CONVERGENCE'}
+                    </span>
+                    <span className="text-[10px] font-semibold text-[#fca5a5]">
+                      {hud.endgame.aliveCount} KELIS LEFT
+                    </span>
+                    {hud.endgame.finalZoneLocked && (
+                      <span className="text-[9.5px] font-semibold text-[#f3d285]">
+                        · FINAL ARENA LOCKED
+                      </span>
+                    )}
+                    {hud.endgame.contestedCarcassActive && (
+                      <span className="text-[9.5px] font-semibold text-[#fb923c]">
+                        · CONTESTED FEAST
+                      </span>
+                    )}
+                    {!hud.endgame.contestedCarcassActive &&
+                      !hud.endgame.finalZoneLocked &&
+                      hud.endgame.highValueCarcassCount > 0 &&
+                      !isCompactMode && (
+                        <span className="text-[9.5px] text-[#fde047]">
+                          · {hud.endgame.highValueCarcassCount} Rich Carcass
+                          {hud.endgame.highValueCarcassCount > 1 ? 'es' : ''}
+                        </span>
+                      )}
+                  </div>
+                </div>
+              )}
+
             {hud.finalFeast?.active && p.alive && !isSpectating && (
               <div
                 className={`compendium-plaque rounded-sm border-[#fbbf24]/70 text-center ${
@@ -2052,7 +2154,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   )}
                 </button>
               )}
-              {isMultiplayer && (
+              {isMultiplayer && platformCaps.spatialVoiceEnabled && (
                 <>
                   {voiceSnap.micEnabled && voiceSnap.voiceMode === 'ptt' && (
                     <button
@@ -2191,7 +2293,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             )}
 
             {/* Spatial Proximity Voice Roster (Multiplayer) */}
-            {isMultiplayer && (voiceSnap.error || voiceSnap.peers.length > 0) && (
+            {isMultiplayer && platformCaps.spatialVoiceEnabled && (voiceSnap.error || voiceSnap.peers.length > 0) && (
               <div className={`${isCompactMode ? 'w-32' : 'w-48'} space-y-1`}>
                 {voiceSnap.error && (
                   <div className="compendium-plaque-subtle rounded-[2px] border-[#ef4444]/60 px-2 py-1 text-[9.5px] text-[#fecaca] flex items-center justify-between gap-1.5">
@@ -2345,19 +2447,24 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   </span>
                   <span
                     className={
-                      hud.zone.isShrinking
-                        ? 'text-[#fca5a5] font-semibold'
-                        : hud.zone.warningActive
-                          ? 'text-[#fbbf24] font-semibold animate-pulse'
-                          : 'text-[#6ee7b7]'
+                      hud.zone.finalZoneLocked
+                        ? 'text-[#f3d285] font-semibold'
+                        : hud.zone.isShrinking
+                          ? 'text-[#fca5a5] font-semibold'
+                          : hud.zone.warningActive
+                            ? 'text-[#fbbf24] font-semibold animate-pulse'
+                            : 'text-[#6ee7b7]'
                     }
                   >
-                    P{hud.zone.phase} ·{' '}
-                    {hud.zone.isShrinking
-                      ? 'Closing'
-                      : hud.zone.warningActive
-                        ? `Soon ${Math.ceil(hud.zone.warningTimer)}s`
-                        : `${Math.ceil(hud.zone.warningTimer)}s`}
+                    {hud.zone.finalZoneLocked
+                      ? '60/40 Locked'
+                      : `P${hud.zone.phase} · ${
+                          hud.zone.isShrinking
+                            ? 'Closing'
+                            : hud.zone.warningActive
+                              ? `Soon ${Math.ceil(hud.zone.warningTimer)}s`
+                              : `${Math.ceil(hud.zone.warningTimer)}s`
+                        }`}
                   </span>
                 </div>
                 <div className="pt-1 border-t border-[#22313d] flex items-center justify-between gap-2 text-[10.5px]">
@@ -3090,6 +3197,26 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   </div>
                 </div>
 
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#e2e8f0]">Graphics Quality</span>
+                  <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                    {(['auto', 'low', 'medium', 'high'] as GraphicsQuality[]).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => onUpdateSettings({ graphicsQuality: q })}
+                        className={`px-2 py-1 text-xs rounded-[2px] capitalize ${
+                          (settings.graphicsQuality ?? 'auto') === q
+                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                            : 'text-[#9cb0ba] hover:text-white'
+                        }`}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="pt-2.5 border-t border-[#202e38]">
                   <HudVisibilityControls
                     hudVisibility={hudVis}
@@ -3098,7 +3225,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
                   />
                 </div>
 
-                {isMultiplayer && (
+                {isMultiplayer && platformCaps.spatialVoiceEnabled && (
                   <div className="pt-2 border-t border-[#202e38] space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-[#e2e8f0]">Proximity Mic</span>

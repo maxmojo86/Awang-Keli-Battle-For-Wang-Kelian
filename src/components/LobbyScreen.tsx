@@ -32,9 +32,10 @@ import {
   SurvivalLeaderboardEntry,
 } from '../game/leaderboard';
 import { multiplayerClient, MultiplayerSnapshot } from '../game/multiplayerClient';
+import { getPlatformCapabilities } from '../game/platform';
 import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import { spatialVoice, SpatialVoiceSnapshot } from '../game/spatialVoice';
-import { AccessibilitySettings, LobbySize, MatchMode } from '../game/types';
+import { AccessibilitySettings, AiDifficulty, GraphicsQuality, LobbySize, MatchMode } from '../game/types';
 import { resolveAssetUrl } from '../utils/assetUrl';
 import { DESIGN_PLATES } from './DesignCodexModal';
 import { HudVisibilityControls } from './HudVisibilityControls';
@@ -46,6 +47,7 @@ interface LobbyScreenProps {
   mode: LobbyPlayMode;
   playerName: string;
   playerRegion: RegionCode;
+  bestScore?: number;
   leaderboard: SurvivalLeaderboardEntry[];
   globalLeaderboard: GlobalLeaderboardResponse | null;
   globalLeaderboardLoading: boolean;
@@ -93,6 +95,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   mode,
   playerName,
   playerRegion,
+  bestScore = 0,
   leaderboard,
   globalLeaderboard,
   globalLeaderboardLoading,
@@ -118,9 +121,16 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   onOpenCodex,
   onReturnToTitle,
 }) => {
+  const platformCaps = getPlatformCapabilities();
+  const showMultiplayerTab = platformCaps.onlineMultiplayerEnabled;
+  const showExternalLeaderboard = platformCaps.externalLeaderboardsEnabled;
+  const effectiveMode: LobbyPlayMode = !showMultiplayerTab && mode === 'multiplayer' ? 'royale' : mode;
+  const activeDifficulty: AiDifficulty = settings.aiDifficulty ?? 'normal';
+  const activeGraphicsQuality: GraphicsQuality = settings.graphicsQuality ?? 'auto';
+
   const [nameDraft, setNameDraft] = useState(playerName);
   const [boardScope, setBoardScope] = useState<'global' | 'local'>(() =>
-    onlineLeaderboardAvailable ? 'global' : 'local'
+    showExternalLeaderboard && onlineLeaderboardAvailable ? 'global' : 'local'
   );
   const [sortOrder, setSortOrder] = useState<LeaderboardSortOrder>('longest');
   const [confirmClear, setConfirmClear] = useState(false);
@@ -133,8 +143,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   );
 
   useEffect(() => {
+    if (!platformCaps.spatialVoiceEnabled) return;
     return spatialVoice.subscribe(setVoiceSnap);
-  }, []);
+  }, [platformCaps.spatialVoiceEnabled]);
 
   useEffect(() => {
     setNameDraft(playerName);
@@ -211,9 +222,11 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </div>
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#b5c2c9]">
-            <a href="#leaderboard" className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0">
-              Leaderboard
-            </a>
+            {showExternalLeaderboard && (
+              <a href="#leaderboard" className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0">
+                Leaderboard
+              </a>
+            )}
             <a href="#arena" className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0">
               Arena
             </a>
@@ -280,10 +293,10 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
             <div className="compendium-plaque rounded-sm overflow-hidden">
               <div className="compendium-ribbon flex items-center justify-between px-4 py-2">
                 <span className="text-xs font-display font-semibold text-[#f3d285]">
-                  ◆ Basin Deployment
+                  ◆ {platformCaps.isYouTubePlayables ? 'AI Battle Royale' : 'Basin Deployment'}
                 </span>
                 <span className="text-[10.5px] font-mono-num text-[#9cb0ba]">
-                  100 Fragments
+                  {bestScore > 0 ? `Best ${bestScore.toLocaleString()} · 100 Frags` : '100 Fragments'}
                 </span>
               </div>
               <div className="p-5 space-y-4">
@@ -309,23 +322,25 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                   />
                 </div>
 
-                <div className="flex items-center justify-between gap-4">
-                  <label htmlFor="player-region" className="text-xs font-medium text-[#d9b25f] shrink-0">
-                    Region
-                  </label>
-                  <select
-                    id="player-region"
-                    value={playerRegion}
-                    onChange={(e) => onChangePlayerRegion(e.target.value as RegionCode)}
-                    className="w-48 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] focus:outline-none focus:border-[#c99c4a]"
-                  >
-                    {REGIONS.map((reg) => (
-                      <option key={reg.code} value={reg.code}>
-                        {reg.shortLabel} · {reg.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                {showExternalLeaderboard && (
+                  <div className="flex items-center justify-between gap-4">
+                    <label htmlFor="player-region" className="text-xs font-medium text-[#d9b25f] shrink-0">
+                      Region
+                    </label>
+                    <select
+                      id="player-region"
+                      value={playerRegion}
+                      onChange={(e) => onChangePlayerRegion(e.target.value as RegionCode)}
+                      className="w-48 px-2.5 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] focus:outline-none focus:border-[#c99c4a]"
+                    >
+                      {REGIONS.map((reg) => (
+                        <option key={reg.code} value={reg.code}>
+                          {reg.shortLabel} · {reg.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-medium text-[#d9b25f] shrink-0">Mode</span>
@@ -334,30 +349,32 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                       type="button"
                       onClick={() => onSelectMode('royale')}
                       className={`px-2.5 py-1.5 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap ${
-                        mode === 'royale'
+                        effectiveMode === 'royale'
                           ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
                           : 'text-[#a9b9c2] hover:text-white'
                       }`}
                     >
-                      Solo Royale
+                      {platformCaps.modeDisplayLabel}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => onSelectMode('multiplayer')}
-                      className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap ${
-                        mode === 'multiplayer'
-                          ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
-                          : 'text-[#a9b9c2] hover:text-white'
-                      }`}
-                    >
-                      <Users className="w-3.5 h-3.5" />
-                      Multiplayer
-                    </button>
+                    {showMultiplayerTab && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectMode('multiplayer')}
+                        className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap ${
+                          effectiveMode === 'multiplayer'
+                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                            : 'text-[#a9b9c2] hover:text-white'
+                        }`}
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        Multiplayer
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onSelectMode('tutorial')}
                       className={`px-2.5 py-1.5 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap ${
-                        mode === 'tutorial'
+                        effectiveMode === 'tutorial'
                           ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
                           : 'text-[#a9b9c2] hover:text-white'
                       }`}
@@ -367,32 +384,55 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                   </div>
                 </div>
 
-                {mode === 'royale' && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-[#a9b9c2]">Combatants</span>
-                      <span className="font-mono-num text-[#f3d285]">{distText}</span>
+                {effectiveMode === 'royale' && (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium text-[#a9b9c2]">Combatants</span>
+                        <span className="font-mono-num text-[#f3d285]">{distText}</span>
+                      </div>
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {LOBBY_SIZES.map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => onSelectLobbySize(n)}
+                            className={`py-2 text-xs font-mono-num font-semibold rounded-[2px] border transition-colors ${
+                              lobbySize === n
+                                ? 'border-[#f3d285] bg-[#c99c4a] text-[#0b1218]'
+                                : 'border-[#3d311d] bg-[#0b1218] text-[#d6d3c9] hover:border-[#c99c4a]'
+                            }`}
+                          >
+                            {n}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="grid grid-cols-6 gap-1.5">
-                      {LOBBY_SIZES.map((n) => (
-                        <button
-                          key={n}
-                          type="button"
-                          onClick={() => onSelectLobbySize(n)}
-                          className={`py-2 text-xs font-mono-num font-semibold rounded-[2px] border transition-colors ${
-                            lobbySize === n
-                              ? 'border-[#f3d285] bg-[#c99c4a] text-[#0b1218]'
-                              : 'border-[#3d311d] bg-[#0b1218] text-[#d6d3c9] hover:border-[#c99c4a]'
-                          }`}
-                        >
-                          {n}
-                        </button>
-                      ))}
+
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-xs font-medium text-[#a9b9c2] shrink-0">AI Difficulty</span>
+                      <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                        {(['easy', 'normal', 'hard'] as const).map((tier) => (
+                          <button
+                            key={tier}
+                            type="button"
+                            aria-pressed={activeDifficulty === tier}
+                            onClick={() => onUpdateSettings({ aiDifficulty: tier })}
+                            className={`px-2.5 py-1 text-xs capitalize rounded-[2px] transition-colors ${
+                              activeDifficulty === tier
+                                ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                                : 'text-[#a9b9c2] hover:text-white'
+                            }`}
+                          >
+                            {tier}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 )}
 
-                {mode === 'multiplayer' && (
+                {showMultiplayerTab && effectiveMode === 'multiplayer' && (
                   <div className="space-y-3 pt-1 border-t border-[#22313d]">
                     {!onlineMultiplayerAvailable || mpSnapshot.status === 'unavailable' ? (
                       <div
@@ -966,7 +1006,8 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </div>
         </section>
 
-        {/* Global Top 100 Survival Times & Regional Rankings */}
+        {/* Global Top 100 Survival Times & Regional Rankings (Hidden in YouTube Playables) */}
+        {showExternalLeaderboard && (
         <section id="leaderboard" className="space-y-4 pt-4 border-t border-[#1e2d38]">
           <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
             <div>
@@ -1461,6 +1502,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
             </div>
           )}
         </section>
+        )}
 
         {/* Bestiary & Design Sheets Strip */}
         <section className="space-y-4 pt-4 border-t border-[#1e2d38]">
@@ -1656,6 +1698,26 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                   {settings.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
                   {settings.muted ? 'Muted' : 'Sound On'}
                 </button>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[#e2e8f0]">Graphics Quality</span>
+                <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                  {(['auto', 'low', 'medium', 'high'] as const).map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      aria-pressed={activeGraphicsQuality === q}
+                      onClick={() => onUpdateSettings({ graphicsQuality: q })}
+                      className={`px-2 py-0.5 text-xs capitalize rounded-[2px] ${
+                        activeGraphicsQuality === q
+                          ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                          : 'text-[#9cb0ba] hover:text-white'
+                      }`}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="pt-3 border-t border-[#22323e]">
                 <HudVisibilityControls

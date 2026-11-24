@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Music, Settings, Volume2, VolumeX, X } from 'lucide-react';
 import { MenuMusicSnapshot, soundEngine } from '../game/audio';
+import { getPlatformCapabilities } from '../game/platform';
 import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
-import { AccessibilitySettings } from '../game/types';
+import { AccessibilitySettings, GraphicsQuality } from '../game/types';
 import { HudVisibilityControls } from './HudVisibilityControls';
 
 interface TitleSettingsModalProps {
@@ -75,9 +76,11 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
 
   if (!open) return null;
 
+  const platformCaps = getPlatformCapabilities();
   const musicPct = Math.round((settings.musicVolume ?? 0.35) * 100);
   const volumePct = Math.round(settings.volume * 100);
   const voicePct = Math.round((settings.voiceVolume ?? 0.9) * 100);
+  const graphicsQuality: GraphicsQuality = settings.graphicsQuality ?? 'auto';
 
   return (
     <div
@@ -231,47 +234,49 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
                 />
               </label>
 
-              <div className="pt-2 border-t border-[#22323e] space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-[#cbd5e1]">Proximity Voice Mode</span>
-                  <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
-                    {(['open', 'ptt'] as const).map((vm) => (
-                      <button
-                        key={vm}
-                        type="button"
-                        aria-pressed={(settings.voiceMode ?? 'open') === vm}
-                        onClick={() => onUpdateSettings({ voiceMode: vm })}
-                        className={`px-2.5 py-1 text-xs rounded-[2px] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] ${
-                          (settings.voiceMode ?? 'open') === vm
-                            ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
-                            : 'text-[#9cb0ba] hover:text-white'
-                        }`}
-                      >
-                        {vm === 'open' ? 'Open Mic' : 'PTT [V]'}
-                      </button>
-                    ))}
+              {platformCaps.spatialVoiceEnabled && (
+                <div className="pt-2 border-t border-[#22323e] space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-[#cbd5e1]">Proximity Voice Mode</span>
+                    <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                      {(['open', 'ptt'] as const).map((vm) => (
+                        <button
+                          key={vm}
+                          type="button"
+                          aria-pressed={(settings.voiceMode ?? 'open') === vm}
+                          onClick={() => onUpdateSettings({ voiceMode: vm })}
+                          className={`px-2.5 py-1 text-xs rounded-[2px] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] ${
+                            (settings.voiceMode ?? 'open') === vm
+                              ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                              : 'text-[#9cb0ba] hover:text-white'
+                          }`}
+                        >
+                          {vm === 'open' ? 'Open Mic' : 'PTT [V]'}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <label className="block space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-[#cbd5e1]">Proximity Voice Volume</span>
-                    <span className="font-mono-num text-[#f3d285]">{voicePct}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={settings.voiceVolume ?? 0.9}
-                    aria-label="Proximity Voice Volume"
-                    onChange={(e) =>
-                      onUpdateSettings({ voiceVolume: parseFloat(e.target.value) })
-                    }
-                    className="w-full accent-[#c99c4a] cursor-pointer"
-                  />
-                </label>
-              </div>
+                  <label className="block space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-[#cbd5e1]">Proximity Voice Volume</span>
+                      <span className="font-mono-num text-[#f3d285]">{voicePct}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={settings.voiceVolume ?? 0.9}
+                      aria-label="Proximity Voice Volume"
+                      onChange={(e) =>
+                        onUpdateSettings({ voiceVolume: parseFloat(e.target.value) })
+                      }
+                      className="w-full accent-[#c99c4a] cursor-pointer"
+                    />
+                  </label>
+                </div>
+              )}
             </div>
           </section>
 
@@ -326,6 +331,27 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
                 </div>
               </div>
 
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[#e6e4dd]">Graphics Quality</span>
+                <div className="compendium-track flex items-center gap-1 p-1 rounded-[2px]">
+                  {(['auto', 'low', 'medium', 'high'] as const).map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      aria-pressed={graphicsQuality === q}
+                      onClick={() => onUpdateSettings({ graphicsQuality: q })}
+                      className={`px-2 py-1 text-xs rounded-[2px] capitalize focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] ${
+                        graphicsQuality === q
+                          ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
+                          : 'text-[#9cb0ba] hover:text-white'
+                      }`}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="pt-3 border-t border-[#22323e]">
                 <HudVisibilityControls
                   hudVisibility={settings.hudVisibility ?? DEFAULT_HUD_VISIBILITY}
@@ -337,7 +363,11 @@ export const TitleSettingsModal: React.FC<TitleSettingsModalProps> = ({
         </div>
 
         <div className="border-t border-[#263643] bg-[#0b1319] px-4 sm:px-5 py-3 flex items-center justify-between gap-3 shrink-0">
-          <span className="text-[11px] text-[#9cb0ba]">Saved automatically on this device</span>
+          <span className="text-[11px] text-[#9cb0ba]">
+            {platformCaps.cloudSaveEnabled
+              ? 'Saved via YouTube Playables Cloud'
+              : 'Saved automatically on this device'}
+          </span>
           <button
             type="button"
             onClick={onClose}

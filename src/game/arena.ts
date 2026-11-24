@@ -1116,7 +1116,8 @@ export function findPickupSpawn(
   zoneRadius: number,
   existing: ReadonlyArray<{ x: number; z: number }>,
   minSpacing = 180,
-  waterOnly = false
+  waterOnly = false,
+  rng: () => number = Math.random
 ): { x: number; z: number } {
   const usableRadius = Math.max(80, zoneRadius - 60);
   const maxCliffDist = CLIFF_TERRAIN_DIST - 60;
@@ -1124,8 +1125,8 @@ export function findPickupSpawn(
   for (let pass = 0; pass < 2; pass++) {
     const reqSpacing = pass === 0 ? minSpacing : 70;
     for (let attempt = 0; attempt < 36; attempt++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * usableRadius;
+      const a = rng() * Math.PI * 2;
+      const r = Math.sqrt(rng()) * usableRadius;
       const x = centerX + Math.cos(a) * r;
       const z = centerZ + Math.sin(a) * r;
 

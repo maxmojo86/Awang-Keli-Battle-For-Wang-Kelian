@@ -47,6 +47,11 @@ import {
   MatchPacingDirector,
 } from './matchPacing.ts';
 import {
+  OPENING_ZONE_CENTER_X,
+  OPENING_ZONE_CENTER_Z,
+  PERMANENT_FINAL_ARENA,
+} from './finalArena.ts';
+import {
   computeInitialMilestoneMask,
   EVOLUTION_FORM_SPECS,
   type EvolutionEventKind,
@@ -64,6 +69,11 @@ import {
   NET_IMMUNITY_DURATION,
   WORLD_EVENT_METADATA,
 } from './environmentalEvents.ts';
+import {
+  ENDGAME_HIGH_VALUE_CARCASS_MASS,
+  ENDGAME_TIGHTEN_SPEED,
+  EndgameDirector,
+} from './endgameDirector.ts';
 import type {
   AbilityId,
   ActiveWorldEventState,
@@ -75,6 +85,7 @@ import type {
   DamageHitEvent,
   DamageImpulse,
   DeathCamState,
+  EndgameStateSnapshot,
   EvolutionForm,
   FinalFeastState,
   FloatingCallout,
@@ -292,10 +303,13 @@ export class GameSimulation {
   private prevPlayerZ = 0;
   private matchSeed: number;
   private explicitMatchSeed: boolean;
+  private pickupRng: () => number;
   private aiController: AiController;
   private botRegisterSeq = 0;
   private aiContext!: AiSimulationContext;
   private pacingDirector: MatchPacingDirector;
+  public readonly endgameDirector: EndgameDirector;
+  public endgameState: EndgameStateSnapshot;
   public eventDirector: EnvironmentalEventDirector;
   public activeWorldEvent: ActiveWorldEventState | null = null;
   private zonePaceMultiplier = 1.0;
@@ -317,6 +331,9 @@ export class GameSimulation {
       typeof options.matchSeed === 'number'
         ? options.matchSeed >>> 0
         : (Math.floor(Math.random() * 0xffffffff) >>> 0);
+    this.pickupRng = this.explicitMatchSeed
+      ? createSeededRng(this.matchSeed ^ 0x6a09e667)
+      : Math.random;
     this.aiController = new AiController(this.matchSeed, options.aiDifficulty ?? 'normal');
 
     const entrants =
@@ -371,15 +388,28 @@ export class GameSimulation {
       mode === 'tutorial' ? scaleArenaDist(960) : pacingProfile.initialZoneRadius;
 
     this.zone = {
-      centerX: scaleArenaCoord(1030),
-      centerZ: scaleArenaCoord(1210), // converges smoothly toward Jantung Tasik
+      centerX: OPENING_ZONE_CENTER_X,
+      centerZ: OPENING_ZONE_CENTER_Z, // converges smoothly toward the locked 60/40 Tebing Kering / Jantung Tasik arena
       currentRadius: initialZoneRadius,
       targetRadius: initialZoneRadius,
       phase: 1,
       warningTimer: mode === 'tutorial' ? 26 : pacingProfile.initialWarningSec,
       isShrinking: false,
       warningActive: false,
+      finalZoneLocked: false,
+      finalCenterX: PERMANENT_FINAL_ARENA.centerX,
+      finalCenterZ: PERMANENT_FINAL_ARENA.centerZ,
+      finalRadius: PERMANENT_FINAL_ARENA.radius,
+      finalLandPercent: PERMANENT_FINAL_ARENA.landPercent,
+      finalWaterPercent: PERMANENT_FINAL_ARENA.waterPercent,
     };
+
+    this.endgameDirector = new EndgameDirector(
+      Math.max(lobbySize, entrants.length),
+      PERMANENT_FINAL_ARENA.centerX,
+      PERMANENT_FINAL_ARENA.centerZ
+    );
+    this.endgameState = this.endgameDirector.getState();
 
     this.weather = {
       kind: 'clear',
@@ -400,6 +430,7 @@ export class GameSimulation {
       pickups: this.pickups,
       directorHotspots: [],
       matchPhase: 'early',
+      endgameSubstate: 'none',
       getMoveSpeed: (k) => this.getMoveSpeed(k),
       computeRadius: (lvl) => this.computeRadius(lvl),
       getFeedRange: (lvl) => this.getFeedRange(lvl),
@@ -762,6 +793,7 @@ export class GameSimulation {
     this.setHumanConnected(playerId, false);
     if (eliminate && k.alive && this.status === 'playing' && !this.matchConcluded) {
       this.handleDeath(k, null, 'Disconnected', 'zone_death');
+      this.endgameDirector.recordEngagement(this.matchTime);
     }
   }
 
@@ -1243,6 +1275,21 @@ export class GameSimulation {
       case 'event_net_snag':
         soundEngine.playNetSnag();
         break;
+      case 'endgame_convergence':
+        soundEngine.playEndgameConvergenceCue();
+        break;
+      case 'endgame_final_hunt':
+        soundEngine.playFinalHuntStartCue();
+        break;
+      case 'endgame_final_feast':
+        soundEngine.playFinalFeastTriumphCue();
+        break;
+      case 'endgame_call':
+        soundEngine.playFinalHuntDistantCall();
+        break;
+      case 'final_feed_claim':
+        soundEngine.playFinalFeedClaimCue();
+        break;
       case 'damage_hit_heavy':
         soundEngine.playDamageHit(true);
         break;
@@ -1400,27 +1447,98 @@ export class GameSimulation {
             'Mid-Game · Basin Pressure Rising',
             'Predators evolving · Watch for contested carcasses and zone shifts'
           );
-        } else if (dirRes.phase === 'endgame') {
-          this.pushBanner(
-            'Endgame · Final Convergence',
-            'Surviving Kelis closing in · Reunite 100 fragments to ascend'
-          );
         }
       }
 
-      // 1a-2. Authoritative Dynamic World Events Director (strictly max 1 active event, Final Feast safe)
-      let aliveCountNow = 0;
-      for (let i = 0; i < this.kelis.length; i++) {
-        if (this.kelis[i].alive) aliveCountNow++;
+      // 1a-1b. Formal Endgame Director (FINAL_CONVERGENCE -> FINAL_HUNT -> FINAL_FEAST -> KELI_KING_VICTORY)
+      const egRes = this.endgameDirector.step({
+        dt,
+        matchTime: this.matchTime,
+        mode: this.mode,
+        matchPhase: dirRes.phase,
+        lobbySize: this.lobbySize,
+        endgameAliveThreshold: this.pacingDirector.profile.endgameAliveCount,
+        kelis: this.kelis,
+        carcasses: this.carcasses,
+        zone: this.zone,
+        finalFeastActive: this.finalFeastActive,
+        matchConcluded: this.matchConcluded,
+        winnerId: this.winnerId,
+      });
+      this.endgameState = egRes.state;
+      this.aiContext.endgameSubstate = egRes.state.substate;
+
+      if (egRes.substateJustChanged) {
+        if (egRes.newSubstate === 'final_convergence') {
+          this.pushBanner(
+            'FINAL CONVERGENCE',
+            `${egRes.state.aliveCount} Kelis remain · Basin pressure intensifying around Jantung Tasik`
+          );
+          this.emitSfxGlobal('endgame_convergence');
+          this.addSoundCue('Final Convergence · Surviving Kelis closing in', null, 'warning');
+        } else if (egRes.newSubstate === 'final_hunt') {
+          this.pushBanner(
+            'FINAL HUNT',
+            egRes.state.aliveCount === 2
+              ? '2 Apex Kelis Remain · Fight for the Final Fragments'
+              : `${egRes.state.aliveCount} Kelis Remain · The Final Confrontation Begins`
+          );
+          this.emitSfxGlobal('endgame_final_hunt');
+          this.addSoundCue(`Final Hunt · ${egRes.state.aliveCount} Kelis remain`, null, 'danger');
+        } else if (egRes.newSubstate === 'final_feast') {
+          this.emitSfxGlobal('endgame_final_feast');
+        }
       }
+
+      if (egRes.shouldEmitDistantCall) {
+        this.emitSfxGlobal('endgame_call');
+      }
+
+      if (egRes.tightenWarningJustTriggered && !this.zone.finalZoneLocked) {
+        this.pushBanner(
+          'Final Basin Tightening',
+          'Radioactive surge in 6s · Converging on the 60/40 shoreline arena'
+        );
+        this.addSoundCue('Final basin tightening in 6 seconds', null, 'warning');
+      }
+
+      if (
+        !this.zone.finalZoneLocked &&
+        egRes.shouldTightenZone &&
+        egRes.nextTightenTargetRadius !== null &&
+        !this.zone.isShrinking
+      ) {
+        const safeTarget = Math.max(
+          this.endgameDirector.getMinViableRadius(),
+          PERMANENT_FINAL_ARENA.radius,
+          egRes.nextTightenTargetRadius
+        );
+        if (this.zone.currentRadius > safeTarget + 4) {
+          this.zone.isShrinking = true;
+          this.zone.warningActive = false;
+          this.zone.targetRadius = safeTarget;
+          this.emitSfxGlobal('whistle');
+          this.addSoundCue('Final safe zone tightening', null, 'warning');
+        } else if (this.mode === 'royale' && this.zone.phase >= 5) {
+          this.lockPermanentFinalArena();
+        }
+      }
+
+      // Fair non-shrinking stalemate information pressure once the 60/40 final arena is locked
+      if (egRes.stalemateInfoPulseJustTriggered && this.zone.finalZoneLocked) {
+        this.emitLockedArenaActivityClue();
+      }
+
+      // 1a-2. Authoritative Dynamic World Events Director (strictly max 1 active event, Final Hunt & Final Feast safe)
       const evStep = this.eventDirector.step(
         dt,
         this.matchTime,
         this.zone,
         dirRes.phase,
-        aliveCountNow,
+        egRes.state.aliveCount,
         this.finalFeastActive,
-        this.matchConcluded
+        this.matchConcluded,
+        egRes.state.substate === 'final_hunt'
       );
       this.activeWorldEvent = evStep.activeEvent;
       this.aiContext.activeWorldEvent = evStep.activeEvent;
@@ -1581,7 +1699,78 @@ export class GameSimulation {
     this.weather.visibilityRange += (targetVis - this.weather.visibilityRange) * Math.min(1, dt * 0.9);
   }
 
+  private lockPermanentFinalArena() {
+    const locked = this.endgameDirector.lockFinalZone(this.matchTime, this.zone);
+    if (!locked) return;
+    this.endgameState = this.endgameDirector.getState();
+    this.pushBanner(
+      'FINAL ARENA LOCKED',
+      `${Math.round(PERMANENT_FINAL_ARENA.landPercent)}% Land · ${Math.round(PERMANENT_FINAL_ARENA.waterPercent)}% Water · Boundary Permanent`
+    );
+    this.emitSfxGlobal('final_zone_locked');
+    this.addSoundCue('Final 60/40 shoreline arena locked permanently', null, 'warning');
+  }
+
+  /**
+   * Emits fair, approximate non-shrinking stalemate information pressure inside the locked
+   * 60/40 arena. Strictly respects Silt Veil and never reveals exact hidden enemy coordinates.
+   */
+  private emitLockedArenaActivityClue() {
+    // Prefer legitimately known high-value unclaimed carcasses inside the locked arena
+    let bestCarc: CarcassEntity | null = null;
+    for (let i = 0; i < this.carcasses.length; i++) {
+      const c = this.carcasses[i];
+      if (c.consumed || c.mass <= 0) continue;
+      if (!bestCarc || c.mass > bestCarc.mass) bestCarc = c;
+    }
+
+    if (bestCarc) {
+      this.pacingDirector.recordActivityClue(
+        'large_carcass',
+        bestCarc.x,
+        bestCarc.z,
+        this.matchTime,
+        `Unclaimed Fragments (+${Math.trunc(bestCarc.mass)})`
+      );
+      this.addSoundCue(
+        `Unclaimed +${Math.trunc(bestCarc.mass)} fragments resting in the final arena`,
+        { x: bestCarc.x, z: bestCarc.z },
+        'info'
+      );
+      return;
+    }
+
+    // Otherwise emit a broad quantized shoreline-sector clue biased toward non-veiled activity
+    // (coarse 260u sector quantization guarantees exact positions are NEVER revealed)
+    let clueX = this.zone.centerX;
+    let clueZ = this.zone.centerZ;
+    for (let i = 0; i < this.kelis.length; i++) {
+      const k = this.kelis[i];
+      if (!k.alive || k.veilTimer > 0) continue;
+      clueX = Math.round(k.x / 260) * 260;
+      clueZ = Math.round(k.z / 260) * 260;
+      break;
+    }
+    this.pacingDirector.recordActivityClue(
+      'convergence',
+      clueX,
+      clueZ,
+      this.matchTime,
+      'Locked Shoreline Activity'
+    );
+    this.addSoundCue('Movement stirs along the locked shoreline', null, 'info');
+  }
+
   private updateZone(dt: number) {
+    // Permanent 60/40 final arena lock: stop all contraction and freeze center/radius forever.
+    // Radioactive damage OUTSIDE the locked boundary continues normally until Final Feast pauses it.
+    if (this.zone.finalZoneLocked) {
+      this.zone.isShrinking = false;
+      this.zone.warningActive = false;
+      this.zone.warningTimer = 0;
+      return;
+    }
+
     if (this.finalFeastActive) {
       this.zone.warningActive = false;
       return; // Pause radioactive contraction during Final Feast so the sole survivor can collect remaining fragments
@@ -1593,6 +1782,10 @@ export class GameSimulation {
 
     const usePacingProfile = this.mode !== 'tutorial';
     const profile = this.pacingDirector.profile;
+    const permanentFloor = Math.max(
+      this.endgameDirector.getMinViableRadius(),
+      PERMANENT_FINAL_ARENA.radius
+    );
 
     if (!this.zone.isShrinking) {
       // Gently accelerate idle wait countdown during verified lulls while preserving the full pre-contraction warning window
@@ -1621,28 +1814,56 @@ export class GameSimulation {
               scaleArenaDist(720),
               scaleArenaDist(490),
               scaleArenaDist(300),
-              scaleArenaDist(160),
+              PERMANENT_FINAL_ARENA.radius,
             ];
-        this.zone.targetRadius = radii[this.zone.phase - 1] ?? scaleArenaDist(160);
+        const rawTarget = radii[this.zone.phase - 1] ?? PERMANENT_FINAL_ARENA.radius;
+        // Guarantee the permanent 60% land / 40% water arena floor so contractions never collapse below it
+        this.zone.targetRadius = Math.max(permanentFloor, rawTarget);
         if (this.zone.phase >= 2) {
           this.pushBanner(
             'Radioactive Zone Contracting',
-            `Phase ${this.zone.phase} · Move toward Jantung Tasik`
+            this.zone.phase >= 5
+              ? 'Final Contraction · Locking 60/40 Shoreline Arena'
+              : `Phase ${this.zone.phase} · Move toward the Shoreline Basin`
           );
           this.emitSfxGlobal('whistle');
           this.addSoundCue('Radioactive zone closing in', null, 'warning');
         }
       }
     } else {
-      const shrinkSpeed = usePacingProfile ? profile.shrinkSpeed : Math.round(24 * ARENA_SCALE);
+      const shrinkSpeed =
+        this.zone.phase >= 5 && this.zone.targetRadius < (profile.zoneRadii[4] ?? PERMANENT_FINAL_ARENA.radius)
+          ? ENDGAME_TIGHTEN_SPEED
+          : usePacingProfile
+            ? profile.shrinkSpeed
+            : Math.round(24 * ARENA_SCALE);
+      const safeFloor = Math.max(permanentFloor, this.zone.targetRadius);
       this.zone.currentRadius = Math.max(
-        this.zone.targetRadius,
+        safeFloor,
         this.zone.currentRadius - shrinkSpeed * dt
       );
-      if (this.zone.currentRadius <= this.zone.targetRadius + 0.5) {
-        this.zone.currentRadius = this.zone.targetRadius;
+
+      // Smoothly converge safe-zone center toward the permanent 60/40 shoreline center while shrinking
+      // so every intermediate circle nests smoothly inside the opening safe zone without stranding players.
+      if (usePacingProfile) {
+        const initR = Math.max(permanentFloor + 1, profile.initialZoneRadius);
+        const progress = Math.max(
+          0,
+          Math.min(1, (initR - this.zone.currentRadius) / (initR - permanentFloor))
+        );
+        this.zone.centerX =
+          OPENING_ZONE_CENTER_X + (PERMANENT_FINAL_ARENA.centerX - OPENING_ZONE_CENTER_X) * progress;
+        this.zone.centerZ =
+          OPENING_ZONE_CENTER_Z + (PERMANENT_FINAL_ARENA.centerZ - OPENING_ZONE_CENTER_Z) * progress;
+      }
+
+      if (this.zone.currentRadius <= safeFloor + 0.5) {
+        this.zone.currentRadius = safeFloor;
         this.zone.isShrinking = false;
         this.zone.warningTimer = usePacingProfile ? profile.phasePauseSec : 28;
+        if (usePacingProfile && this.zone.phase >= 5 && safeFloor <= permanentFloor + 1) {
+          this.lockPermanentFinalArena();
+        }
       }
     }
   }
@@ -2575,6 +2796,7 @@ export class GameSimulation {
                 this.matchTime,
                 allVeiled
               );
+              this.endgameDirector.recordEngagement(this.matchTime);
             }
           }
 
@@ -2948,6 +3170,7 @@ export class GameSimulation {
           target.veilTimer > 0 || attacker.veilTimer > 0,
           target.id === this.primaryPlayerId || attacker.id === this.primaryPlayerId
         );
+        this.endgameDirector.recordEngagement(this.matchTime);
       }
     }
 
@@ -3165,6 +3388,7 @@ export class GameSimulation {
         this.matchTime,
         victim.veilTimer > 0
       );
+      this.endgameDirector.recordEngagement(this.matchTime);
     }
 
     // Non-fragment Bounty Claim: grants temporary movement speed + stamina surge,
@@ -3312,6 +3536,7 @@ export class GameSimulation {
     }
 
     this.recordLedger('feed', eater.name, `${carc.sourceName}'s Remains`, transfer);
+    this.endgameDirector.recordEngagement(this.matchTime);
 
     if (carc.sourceId && this.humanIds.has(carc.sourceId)) {
       const deadMeta = this.playerMetaById.get(carc.sourceId);
@@ -3329,6 +3554,13 @@ export class GameSimulation {
       }
     }
 
+    const isHighValueEndgameMeal =
+      fullyConsumed &&
+      (this.endgameState.substate === 'final_convergence' ||
+        this.endgameState.substate === 'final_hunt' ||
+        this.endgameState.substate === 'final_feast') &&
+      (carc.initialMass ?? transfer) >= ENDGAME_HIGH_VALUE_CARCASS_MASS;
+
     if (eater.isPlayer) {
       if (keepChannel) {
         this.emitSfxFor(eater.id, 'feed_tick');
@@ -3339,15 +3571,34 @@ export class GameSimulation {
           '#e6b86e'
         );
       } else {
-        this.emitSfxFor(eater.id, 'feed');
+        this.emitSfxFor(eater.id, isHighValueEndgameMeal ? 'final_feed_claim' : 'feed');
         const labelAmount = opts?.keepChannel && nextSession > transfer ? nextSession : transfer;
         this.spawnCallout(
           eater.x,
           eater.z,
-          labelAmount === 1 ? '+1 FRAGMENT' : `+${labelAmount} FRAGMENTS`,
+          isHighValueEndgameMeal
+            ? `CLAIMED +${Math.max(labelAmount, Math.trunc(carc.initialMass ?? labelAmount))}!`
+            : labelAmount === 1
+              ? '+1 FRAGMENT'
+              : `+${labelAmount} FRAGMENTS`,
           '#fde047'
         );
       }
+    }
+
+    if (isHighValueEndgameMeal && eater.level < TOTAL_MATCH_FRAGMENTS) {
+      this.effects.push({
+        id: this.nextId('fx'),
+        type: 'evolution_burst',
+        x: eater.x,
+        z: eater.z,
+        angle: 0,
+        radius: 95,
+        duration: 0.65,
+        elapsed: 0,
+        ownerId: eater.id,
+        color: '#fbbf24',
+      });
     }
 
     if (fullyConsumed && carc.sourceId && carc.sourceId !== eater.id) {
@@ -3895,6 +4146,12 @@ export class GameSimulation {
       this.finalFeastActive = true;
       this.finalFeastTriggered = true;
 
+      // Immediately suppress environmental event hazards and clear any net snag on the sole survivor
+      this.eventDirector.suppressForFinalFeast();
+      this.activeWorldEvent = this.eventDirector.getActiveEvent();
+      this.aiContext.activeWorldEvent = this.activeWorldEvent;
+      survivor.netEntangleTimer = 0;
+
       // Immediately ensure every remaining carcass is reachable by the sole survivor
       let relocatedCount = 0;
       for (const c of activeCarcasses) {
@@ -3929,25 +4186,27 @@ export class GameSimulation {
         { x: activeCarcasses[0].x, z: activeCarcasses[0].z },
         'warning'
       );
-      this.emitSfxGlobal('sonar');
+      this.emitSfxGlobal('endgame_final_feast');
     }
 
-    // Keep Final Feast short and purposeful: briskly draw distant carcasses along safe water
-    // toward the survivor's sector so there is zero tedious arena-wide backtracking.
+    // Keep Final Feast short and purposeful: smoothly draw distant carcasses along safe accessible paths
+    // toward the survivor's sector (down to ~135u — never teleporting into the player or auto-awarding fragments!)
     for (const c of activeCarcasses) {
       const dx = survivor.x - c.x;
       const dz = survivor.z - c.z;
       const dist = Math.hypot(dx, dz);
-      if (dist > 220) {
-        const pullSpeed = Math.min(340, 140 + dist * 0.16);
-        const stepDist = Math.min(dist - 160, pullSpeed * dt);
+      if (dist > 135) {
+        const pullSpeed = Math.min(380, 165 + dist * 0.18);
+        const stepDist = Math.min(dist - 120, pullSpeed * dt);
         const nx = c.x + (dx / dist) * stepDist;
         const nz = c.z + (dz / dist) * stepDist;
         const resolved = resolveArenaCollision(nx, nz, 14, canGoAshore);
-        if (isPositionAccessible(resolved.x, resolved.z, 14, canGoAshore)) {
+        const moved = Math.hypot(resolved.x - c.x, resolved.z - c.z);
+        if (isPositionAccessible(resolved.x, resolved.z, 14, canGoAshore) && moved > stepDist * 0.25) {
           c.x = resolved.x;
           c.z = resolved.z;
         } else {
+          // Obstacle detour: glide smoothly around rocks/banks toward survivor's sector
           const safePos = findNearestAccessiblePosition(
             nx,
             nz,
@@ -3955,7 +4214,7 @@ export class GameSimulation {
             canGoAshore,
             survivor.x,
             survivor.z,
-            Math.max(320, dist)
+            Math.max(240, dist)
           );
           c.x = safePos.x;
           c.z = safePos.z;
@@ -3968,6 +4227,14 @@ export class GameSimulation {
   private updateCarcasses(dt: number) {
     const aliveKelis = this.kelis.filter((k) => k.alive);
     const anyCanGoAshore = aliveKelis.some((k) => k.level >= 40);
+    const anyWaterBound = aliveKelis.some((k) => k.level < 40);
+    const inEndgame =
+      this.finalFeastActive ||
+      this.endgameState.substate === 'final_convergence' ||
+      this.endgameState.substate === 'final_hunt';
+    // During endgame, if any living survivor is water-bound (Lv.1-39), keep carcasses accessible in water
+    // so water-bound survivors are never soft-locked out of required fragments
+    const allowShoreForCarcass = anyCanGoAshore && !(inEndgame && anyWaterBound);
 
     for (const c of this.carcasses) {
       if (c.consumed || c.mass <= 0) continue;
@@ -3995,18 +4262,18 @@ export class GameSimulation {
         c.z -= (dz / dist) * zonePull;
       }
 
-      // Keep clear of solid rock interiors and inaccessible shoreline (when no survivor is Lv.40+)
-      const res = resolveArenaCollision(c.x, c.z, 12, anyCanGoAshore);
+      // Keep clear of solid rock interiors and inaccessible shoreline
+      const res = resolveArenaCollision(c.x, c.z, 12, allowShoreForCarcass);
       c.x = res.x;
       c.z = res.z;
 
       // Recover any carcass still trapped on shore/cliff/obstacle
-      if (!isPositionAccessible(c.x, c.z, 14, anyCanGoAshore)) {
+      if (!isPositionAccessible(c.x, c.z, 14, allowShoreForCarcass)) {
         const recovered = findNearestAccessiblePosition(
           c.x,
           c.z,
           16,
-          anyCanGoAshore,
+          allowShoreForCarcass,
           this.zone.centerX,
           this.zone.centerZ,
           this.zone.currentRadius
@@ -4019,7 +4286,7 @@ export class GameSimulation {
   }
 
   private rollPickupKind(): PickupKind {
-    const r = Math.random();
+    const r = this.pickupRng();
     if (r < 0.44) return 'kelp_salve';
     if (r < 0.64) return 'amphetide';
     if (r < 0.84) return 'fang_charge';
@@ -4027,7 +4294,7 @@ export class GameSimulation {
   }
 
   private rollRainFedPickupKind(): PickupKind {
-    const r = Math.random();
+    const r = this.pickupRng();
     if (r < 0.36) return 'monsoon_dew';
     if (r < 0.7) return 'storm_fin';
     return 'thunder_roe';
@@ -4040,7 +4307,8 @@ export class GameSimulation {
       this.zone.currentRadius,
       this.pickups,
       165,
-      true
+      true,
+      this.pickupRng
     );
     const kind = explicitKind ?? this.rollRainFedPickupKind();
     this.pickups.push({
@@ -4049,21 +4317,22 @@ export class GameSimulation {
       x: pos.x,
       z: pos.z,
       createdAt: this.matchTime,
-      bobPhase: Math.random() * Math.PI * 2,
+      bobPhase: this.pickupRng() * Math.PI * 2,
       rainFed: true,
     });
   }
 
   private spawnRandomPickup(avoidTutorialStart = false) {
     const spawnRainFed =
-      !avoidTutorialStart && this.weather.kind === 'light_rain' && Math.random() < 0.68;
+      !avoidTutorialStart && this.weather.kind === 'light_rain' && this.pickupRng() < 0.68;
     let pos = findPickupSpawn(
       this.zone.centerX,
       this.zone.centerZ,
       this.zone.currentRadius,
       this.pickups,
       180,
-      spawnRainFed
+      spawnRainFed,
+      this.pickupRng
     );
     if (avoidTutorialStart) {
       for (let i = 0; i < 6; i++) {
@@ -4074,7 +4343,10 @@ export class GameSimulation {
           this.zone.centerX,
           this.zone.centerZ,
           this.zone.currentRadius,
-          this.pickups
+          this.pickups,
+          180,
+          false,
+          this.pickupRng
         );
       }
     }
@@ -4085,7 +4357,7 @@ export class GameSimulation {
       x: pos.x,
       z: pos.z,
       createdAt: this.matchTime,
-      bobPhase: Math.random() * Math.PI * 2,
+      bobPhase: this.pickupRng() * Math.PI * 2,
       rainFed: spawnRainFed,
     });
   }
@@ -4370,6 +4642,10 @@ export class GameSimulation {
     this.winnerName = king.name;
     this.status = king.id === this.primaryPlayerId ? 'victory' : 'defeat';
     this.pacingDirector.recordConclusion('level_100_king', this.matchTime);
+    const aliveNow = this.kelis.filter((k) => k.alive).length;
+    this.endgameDirector.markVictory(this.matchTime, king.name, aliveNow);
+    this.endgameState = this.endgameDirector.getState();
+    this.aiContext.endgameSubstate = 'keli_king_victory';
     for (const k of this.kelis) {
       if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
       // Halt all locomotion & active bursts cleanly so the Keli King and survivors never drift post-victory
@@ -4379,6 +4655,20 @@ export class GameSimulation {
       k.evadeTimer = 0;
       k.netEntangleTimer = 0;
     }
+
+    // Final fragment absorption golden shockwave burst at the moment of Lv.100 ascension
+    this.effects.push({
+      id: this.nextId('fx'),
+      type: 'evolution_burst',
+      x: king.x,
+      z: king.z,
+      angle: 0,
+      radius: 185,
+      duration: 1.15,
+      elapsed: 0,
+      ownerId: king.id,
+      color: '#fde047',
+    });
 
     const subtitle = sourceLabel
       ? `Reunited all 100 fragments from ${sourceLabel}`
@@ -4433,41 +4723,64 @@ export class GameSimulation {
       return;
     }
 
-    // Special Case: If only 1 Keli remains with < 100 fragments and unclaimed carcasses exist,
-    // NEVER award immediate victory — keep Final Feast active until all 100 fragments are reunited!
+    // Special Case: If only 1 Keli remains with < 100 fragments, check whether unclaimed carcasses exist.
+    // Never award an illegitimate Keli King victory — keep Final Feast active while fragments remain,
+    // or conclude cleanly as a deterministic draw if the match state ever became unrecoverable.
     if (aliveKelis.length === 1 && aliveKelis[0].level < TOTAL_MATCH_FRAGMENTS) {
+      const remainingCarcassMass = this.carcasses
+        .filter((c) => !c.consumed && c.mass > 0)
+        .reduce((acc, c) => acc + Math.trunc(c.mass), 0);
+      if (remainingCarcassMass > 0) {
+        return;
+      }
+      this.resolveDraw('draw_unrecoverable_fragment_state');
       return;
     }
 
     if (aliveKelis.length === 0) {
-      this.matchConcluded = true;
-      this.finalFeastActive = false;
-      this.eventDirector.clearForConclusion();
-      this.activeWorldEvent = null;
-      this.aiContext.activeWorldEvent = null;
-      this.status = 'draw';
-      this.pacingDirector.recordConclusion('draw_mutual_elimination', this.matchTime);
-      for (const k of this.kelis) {
-        if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
-        k.netEntangleTimer = 0;
-      }
-      for (const [pid, meta] of this.playerMetaById.entries()) {
-        const entity = this.getPlayer(pid);
-        if (entity.alive || meta.survivalTime === 0) {
-          meta.finalLevel = entity.alive
-            ? Math.trunc(entity.level)
-            : (entity.eliminatedAtLevel ?? meta.finalLevel);
-          meta.survivalTime = this.matchTime;
-        }
-      }
-      if (this.getPlayer().alive || this.playerSurvivalTime === 0) {
-        const primary = this.getPlayer();
-        this.playerFinalLevel = primary.alive
-          ? Math.trunc(primary.level)
-          : (primary.eliminatedAtLevel ?? this.playerFinalLevel);
-        this.playerSurvivalTime = this.matchTime;
+      this.resolveDraw('draw_mutual_elimination');
+    }
+  }
+
+  /**
+   * Explicit deterministic draw procedure when a match becomes permanently unwinnable.
+   * Preserves all fragments and halts simulation cleanly rather than granting an illegitimate victory.
+   */
+  public resolveDraw(reason: string): boolean {
+    if (this.matchConcluded || this.status !== 'playing') return false;
+    this.matchConcluded = true;
+    this.finalFeastActive = false;
+    this.eventDirector.clearForConclusion();
+    this.activeWorldEvent = null;
+    this.aiContext.activeWorldEvent = null;
+    this.status = 'draw';
+    this.pacingDirector.recordConclusion(reason, this.matchTime);
+    for (const k of this.kelis) {
+      if (k.feedingTargetId) this.cancelFeeding(k, 'depleted');
+      k.vx = 0;
+      k.vz = 0;
+      k.dashTimer = 0;
+      k.evadeTimer = 0;
+      k.netEntangleTimer = 0;
+    }
+    this.pushBanner('MATCH DRAW', `Ended safely (${reason}) · No illegitimate Keli King crowned`);
+    for (const [pid, meta] of this.playerMetaById.entries()) {
+      const entity = this.getPlayer(pid);
+      if (entity.alive || meta.survivalTime === 0) {
+        meta.finalLevel = entity.alive
+          ? Math.trunc(entity.level)
+          : (entity.eliminatedAtLevel ?? meta.finalLevel);
+        meta.survivalTime = this.matchTime;
       }
     }
+    const primary = this.getPlayer();
+    if (primary.alive || this.playerSurvivalTime === 0) {
+      this.playerFinalLevel = primary.alive
+        ? Math.trunc(primary.level)
+        : (primary.eliminatedAtLevel ?? this.playerFinalLevel);
+      this.playerSurvivalTime = this.matchTime;
+    }
+    return true;
   }
 
   public getMatchPhase(): MatchPhase {
@@ -4673,10 +4986,21 @@ export class GameSimulation {
     const feedingContested = feedingCompetitorCount >= 2;
 
     const tacticalCarcasses: NonNullable<HudSnapshot['tacticalCarcasses']> = [];
+    const inEndgameSub =
+      this.endgameState.substate === 'final_convergence' ||
+      this.endgameState.substate === 'final_hunt';
+    const tacticalMassThreshold = inEndgameSub
+      ? ENDGAME_HIGH_VALUE_CARCASS_MASS
+      : LARGE_CARCASS_THRESHOLD;
+    // Respect weather/Silt Bloom visibility rules unless sonar is actively sweeping
+    const tacticalRange =
+      focus.sonarTimer > 0
+        ? LARGE_CARCASS_MINIMAP_RANGE * 1.15
+        : LARGE_CARCASS_MINIMAP_RANGE * Math.max(0.55, this.weather.visibilityRange);
     for (const c of activeCarcasses) {
-      if (c.mass < LARGE_CARCASS_THRESHOLD) continue;
+      if (c.mass < tacticalMassThreshold) continue;
       const dist = Math.hypot(c.x - focus.x, c.z - focus.z);
-      if (dist <= LARGE_CARCASS_MINIMAP_RANGE) {
+      if (dist <= tacticalRange) {
         const count = feedersPerCarcass.get(c.id) ?? 0;
         tacticalCarcasses.push({
           id: c.id,
@@ -4832,6 +5156,7 @@ export class GameSimulation {
         ? computePlayerEventThreat(this.activeWorldEvent, p.x, p.z, this.computeRadius(p.level))
         : null,
       matchPhase: this.pacingDirector.getPhase(),
+      endgame: { ...this.endgameState },
       fragmentsToKing: Math.max(0, TOTAL_MATCH_FRAGMENTS - Math.trunc(p.level)),
       nextMilestoneLevel:
         p.level >= TOTAL_MATCH_FRAGMENTS
@@ -5018,6 +5343,7 @@ export class GameSimulation {
       zone: { ...this.zone },
       weather: { ...this.weather },
       worldEvent: this.activeWorldEvent ? { ...this.activeWorldEvent } : null,
+      endgame: { ...this.endgameState },
       kelis,
       carcasses: this.carcasses.map((c) => ({
         ...c,

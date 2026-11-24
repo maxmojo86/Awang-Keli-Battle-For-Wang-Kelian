@@ -105,6 +105,36 @@ export interface PlayerEventThreat {
   severity: 'warning' | 'active';
 }
 
+export type EndgameSubstate =
+  | 'none'
+  | 'final_convergence'
+  | 'final_hunt'
+  | 'final_feast'
+  | 'keli_king_victory';
+
+export interface EndgameStateSnapshot {
+  substate: EndgameSubstate;
+  transitionSeq: number;
+  aliveCount: number;
+  remainingUnclaimedFragments: number;
+  highValueCarcassCount: number;
+  contestedCarcassActive: boolean;
+  tensionIntensity: number; // 0..1 smooth tension level for audio/lighting
+  safeWaterVerified: boolean;
+  minViableRadius: number;
+  stalemateQuietSec: number;
+  endgameShrinkPending: boolean;
+  finalZoneLocked: boolean;
+  finalZoneLockSeq: number;
+  finalLandPercent: number;
+  finalWaterPercent: number;
+  stalemateInfoPulseSeq: number;
+  stalemateClueLabel: string | null;
+  announcementTitle: string | null;
+  announcementSubtitle: string | null;
+  announcementSeq: number;
+}
+
 export type BitePhase = 'idle' | 'windup' | 'strike' | 'recovery';
 
 export type HitReactKind = 'normal' | 'crit' | 'stun' | 'mitigated';
@@ -382,6 +412,13 @@ export interface ZoneState {
   isShrinking: boolean;
   /** True during the pre-contraction alert window before the zone begins moving. */
   warningActive?: boolean;
+  /** Single-fire authoritative lock once the permanent 60% land / 40% water arena is reached. */
+  finalZoneLocked?: boolean;
+  finalCenterX?: number;
+  finalCenterZ?: number;
+  finalRadius?: number;
+  finalLandPercent?: number;
+  finalWaterPercent?: number;
 }
 
 export interface TutorialStepState {
@@ -544,6 +581,7 @@ export interface HudSnapshot {
   activeWorldEvent?: ActiveWorldEventState | null;
   playerThreatenedByEvent?: PlayerEventThreat | null;
   matchPhase?: MatchPhase;
+  endgame?: EndgameStateSnapshot;
   fragmentsToKing?: number;
   nextMilestoneLevel?: number | null;
   evolutionProgress?: HudEvolutionProgress;
@@ -649,11 +687,16 @@ export interface HudVisibilitySettings {
   banners: boolean;
 }
 
+export type GraphicsQuality = 'auto' | 'low' | 'medium' | 'high';
+export type ResolvedGraphicsQuality = 'low' | 'medium' | 'high';
+
 export interface AccessibilitySettings {
   reducedMotion: boolean;
   visualSoundCues: boolean;
   hudScale: 'compact' | 'standard' | 'large';
   hudVisibility: HudVisibilitySettings;
+  graphicsQuality?: GraphicsQuality;
+  aiDifficulty?: AiDifficulty;
   muted: boolean;
   volume: number;
   musicVolume?: number;

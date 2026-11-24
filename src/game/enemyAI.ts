@@ -26,6 +26,7 @@ import type {
   AiPersonality,
   AiState,
   CarcassEntity,
+  EndgameSubstate,
   KeliEntity,
   MatchPhase,
   PickupItem,
@@ -205,6 +206,7 @@ export interface AiSimulationContext {
   pickups: PickupItem[];
   directorHotspots?: ReadonlyArray<{ x: number; z: number; kind: string; radius: number }>;
   matchPhase?: MatchPhase;
+  endgameSubstate?: EndgameSubstate;
   getMoveSpeed: (k: KeliEntity) => number;
   computeRadius: (level: number) => number;
   getFeedRange: (level: number) => number;
@@ -1670,8 +1672,28 @@ export class AiController {
         }
       }
 
-      if (evalRes.score > bestPreyScore) {
-        bestPreyScore = evalRes.score;
+      let preyScore = evalRes.score;
+      // Personality-faithful endgame awareness (uses ONLY legitimately visible targets — never hidden/veiled Kelis)
+      const egSub = ctx.endgameSubstate ?? 'none';
+      if (egSub === 'final_hunt') {
+        if (mem.personality === 'aggressive_hunter') {
+          // Hunters commit decisively to favourable visible confrontations
+          preyScore += evalRes.isThreat ? 4 : 18;
+        } else if (mem.personality === 'patient_ambusher') {
+          // Ambushers look for vulnerable or distracted rivals
+          const targetVulnerable = other.hp < other.maxHp * 0.65 || Boolean(other.feedingTargetId);
+          preyScore += targetVulnerable ? 20 : 6;
+        } else if (mem.personality === 'cautious_survivor') {
+          // Survivors stay disciplined: punish weakened foes, never suicide-dive stronger healthy predators
+          preyScore += other.hp < other.maxHp * 0.5 ? 14 : evalRes.isThreat ? -12 : 4;
+        }
+      } else if (egSub === 'final_convergence') {
+        if (mem.personality === 'aggressive_hunter') preyScore += 8;
+        else if (mem.personality === 'patient_ambusher' && other.feedingTargetId) preyScore += 10;
+      }
+
+      if (preyScore > bestPreyScore) {
+        bestPreyScore = preyScore;
         bestPrey = other;
         bestPreyDist = d;
       }
@@ -1742,6 +1764,16 @@ export class AiController {
 
       if (ctx.finalFeastActive) {
         score += 45;
+      } else if (ctx.endgameSubstate === 'final_hunt' || ctx.endgameSubstate === 'final_convergence') {
+        // High-value endgame carcasses become decisive strategic objectives without abandoning personality identity
+        const isHighValue = c.mass >= 12;
+        if (mem.personality === 'opportunistic_scavenger') {
+          score += isHighValue ? 24 : 12;
+        } else if (mem.personality === 'patient_ambusher' && isHighValue) {
+          score += 14;
+        } else if (isHighValue) {
+          score += 10;
+        }
       }
 
       // If contested by a much stronger healthy rival, cautious bots penalize heavily
@@ -2321,23 +2353,42 @@ export class AiController {
         if (bot.aiGoalTimer <= 0) {
           bot.aiGoalTimer = 1.6 + mem.rng() * 2.1;
           const toCenter = Math.atan2(ctx.zone.centerZ - bot.z, ctx.zone.centerX - bot.x);
-          // Purposeful curved exploration inside the safe zone
-          bot.aiWanderAngle = toCenter + (mem.rng() - 0.5) * 2.1;
+          const egSub = ctx.endgameSubstate ?? 'none';
+          const inFinalHunt = egSub === 'final_hunt';
+          const inConvergence = egSub === 'final_convergence';
+
+          // Purposeful curved exploration inside the safe zone (tighter interior patrol during endgame,
+          // never blindly charging dead-center — Cautious holds mid-ring cover, Ambushers flank)
+          const spreadFactor = inFinalHunt
+            ? mem.personality === 'cautious_survivor'
+              ? 1.55
+              : mem.personality === 'patient_ambusher'
+                ? 1.4
+                : 1.15
+            : inConvergence
+              ? 1.65
+              : 2.1;
+          bot.aiWanderAngle = toCenter + (mem.rng() - 0.5) * spreadFactor;
 
           // Fair encounter pacing: idle EXPLORE bots may naturally investigate public activity
           // hotspots (approximate zones, never hidden/veiled players) without altering movement speed
           if (ctx.directorHotspots && ctx.directorHotspots.length > 0 && !ctx.finalFeastActive) {
-            const baseChance =
-              ctx.matchPhase === 'endgame' ? 0.62 : ctx.matchPhase === 'mid' ? 0.48 : 0.34;
+            const baseChance = inFinalHunt
+              ? 0.74
+              : inConvergence || ctx.matchPhase === 'endgame'
+                ? 0.66
+                : ctx.matchPhase === 'mid'
+                  ? 0.48
+                  : 0.34;
             const personalityBonus =
               mem.personality === 'aggressive_hunter' || mem.personality === 'opportunistic_scavenger'
                 ? 0.14
                 : mem.personality === 'cautious_survivor'
-                  ? -0.14
-                  : 0.04;
-            if (mem.rng() < Math.max(0.12, Math.min(0.8, baseChance + personalityBonus))) {
+                  ? -0.18
+                  : 0.06;
+            if (mem.rng() < Math.max(0.14, Math.min(0.86, baseChance + personalityBonus))) {
               let bestHotspot: { x: number; z: number } | null = null;
-              let bestDist = 1850;
+              let bestScore = -Infinity;
               for (let hi = 0; hi < ctx.directorHotspots.length; hi++) {
                 const hs = ctx.directorHotspots[hi];
                 // Respect Lv.1-39 shoreline restrictions & safe-zone bounds
@@ -2349,25 +2400,40 @@ export class AiController {
                   continue;
                 }
                 const hd = Math.hypot(hs.x - bot.x, hs.z - bot.z);
-                if (hd > 130 && hd < bestDist) {
-                  bestDist = hd;
+                if (hd <= 110 || hd >= 1950) continue;
+                let hsScore = 1000 - hd * 0.5;
+                // Scavengers & Ambushers favor carcass / contested-feed hotspots; Hunters favor combat
+                if (
+                  (hs.kind === 'large_carcass' || hs.kind === 'contested_feed') &&
+                  (mem.personality === 'opportunistic_scavenger' || mem.personality === 'patient_ambusher')
+                ) {
+                  hsScore += 280;
+                } else if (hs.kind === 'combat' && mem.personality === 'aggressive_hunter') {
+                  hsScore += 220;
+                }
+                if (hsScore > bestScore) {
+                  bestScore = hsScore;
                   bestHotspot = hs;
                 }
               }
               if (bestHotspot) {
+                const flankJitter =
+                  mem.personality === 'patient_ambusher'
+                    ? mem.flankSign * 0.38
+                    : (mem.rng() - 0.5) * 0.42;
                 bot.aiWanderAngle =
-                  Math.atan2(bestHotspot.z - bot.z, bestHotspot.x - bot.x) +
-                  (mem.rng() - 0.5) * 0.45;
+                  Math.atan2(bestHotspot.z - bot.z, bestHotspot.x - bot.x) + flankJitter;
               }
             }
           }
 
           // Use Echo Sonar (Lv.20+) or Hunter Sonar (Lv.80+) periodically while patrolling
+          // (higher cadence during Final Hunt while obeying exact sonar cooldowns & rules)
           if (
             bot.level >= 20 &&
             bot.cooldowns.sonar <= 0 &&
             mem.sonarCooldownGate <= 0 &&
-            (bot.level >= 80 || mem.rng() < 0.45)
+            (bot.level >= 80 || inFinalHunt || mem.rng() < 0.45)
           ) {
             ctx.trySonar(bot);
             mem.sonarCooldownGate = diff.sonarCadenceSec;

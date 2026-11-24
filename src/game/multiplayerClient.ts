@@ -2,8 +2,12 @@ import type { EmoteId } from '../data/emotes';
 import { resolveArenaCollision } from './arena';
 import { soundEngine } from './audio';
 import { getMultiplayerWsUrl } from './backendConfig';
-import { EvolutionPresentationGuard } from './evolutionExperience';
 import {
+  createInitialEndgameState,
+  EndgamePresentationGuard,
+} from './endgameDirector';
+import { EvolutionPresentationGuard } from './evolutionExperience';
+import type {
   ClientMessage,
   ClientSfxEvent,
   RemoteKeliState,
@@ -14,12 +18,13 @@ import {
   WorldStatePacket,
 } from './multiplayerTypes';
 import type { RenderableSimulation } from './scene3d';
-import {
+import type {
   AbilityId,
   ActiveWorldEventState,
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
+  EndgameStateSnapshot,
   FloatingCallout,
   HitStopEvent,
   HudSnapshot,
@@ -164,6 +169,7 @@ export class RemoteSimulationView implements RenderableSimulation {
     visibilityRange: 1.0,
   };
   public activeWorldEvent: ActiveWorldEventState | null = null;
+  public endgameState: EndgameStateSnapshot = createInitialEndgameState(0);
   public cameraShake = 0;
   public damageImpulse: DamageImpulse | null = null;
   public hitStop: HitStopEvent | null = null;
@@ -178,6 +184,7 @@ export class RemoteSimulationView implements RenderableSimulation {
   private speakingPeers = new Set<string>();
   private seenDamageHitIds = new Set<string>();
   private evolutionGuard = new EvolutionPresentationGuard();
+  private endgameGuard = new EndgamePresentationGuard();
 
   constructor(localPlayerId: string) {
     this.localPlayerId = localPlayerId;
@@ -194,13 +201,35 @@ export class RemoteSimulationView implements RenderableSimulation {
     }
 
     const wasAlreadyConcluded = this.status !== 'playing';
-    this.latestHud = packet.hud;
-    this.status = packet.status;
-    this.winnerId = packet.hud.matchResult.winnerId ?? null;
-    this.zone = packet.zone;
+    const incomingEndgame = packet.endgame ?? packet.hud.endgame;
+    const egCheck = this.endgameGuard.ingest(packet.tick, incomingEndgame, packet.status);
+    if (egCheck.accepted) {
+      this.endgameState = egCheck.state;
+    }
+
+    this.latestHud = {
+      ...packet.hud,
+      endgame: { ...this.endgameState },
+    };
+    // Prevent stale packets from overriding an already concluded match state
+    if (!wasAlreadyConcluded || packet.status !== 'playing') {
+      this.status = packet.status;
+      this.winnerId = packet.hud.matchResult.winnerId ?? this.winnerId;
+    }
+    // Enforce monotonic permanent final zone lock on the client
+    if (this.endgameGuard.isFinalZoneLocked() && !packet.zone.finalZoneLocked) {
+      this.zone = {
+        ...this.zone,
+        finalZoneLocked: true,
+        isShrinking: false,
+        warningActive: false,
+      };
+    } else {
+      this.zone = packet.zone;
+    }
     this.weather = packet.weather;
     this.activeWorldEvent =
-      packet.status === 'playing'
+      this.status === 'playing'
         ? (packet.worldEvent ?? packet.hud.activeWorldEvent ?? null)
         : null;
     this.cameraShake = Math.max(this.cameraShake, packet.cameraShake);
@@ -484,6 +513,24 @@ export class RemoteSimulationView implements RenderableSimulation {
         break;
       case 'event_net_snag':
         soundEngine.playNetSnag();
+        break;
+      case 'endgame_convergence':
+        soundEngine.playEndgameConvergenceCue();
+        break;
+      case 'endgame_final_hunt':
+        soundEngine.playFinalHuntStartCue();
+        break;
+      case 'endgame_final_feast':
+        soundEngine.playFinalFeastTriumphCue();
+        break;
+      case 'endgame_call':
+        soundEngine.playFinalHuntDistantCall();
+        break;
+      case 'final_feed_claim':
+        soundEngine.playFinalFeedClaimCue();
+        break;
+      case 'final_zone_locked':
+        soundEngine.playEndgameConvergenceCue();
         break;
     }
   }

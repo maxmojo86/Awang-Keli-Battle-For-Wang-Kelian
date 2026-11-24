@@ -2652,10 +2652,14 @@ class SoundEngine {
    * Deep monstrous amphibious catfish roar synchronized to Frame 4 (wide-open mouth)
    * of the Keli King victory animation, paired with a resonant golden chime swell.
    */
+  private lastKingRoarSfxAt = -10;
+
   public playKeliKingRoar() {
     const ctx = this.ensureContext();
     if (!ctx || !this.masterGain) return;
     const now = ctx.currentTime;
+    if (now - this.lastKingRoarSfxAt < 1.5) return;
+    this.lastKingRoarSfxAt = now;
 
     // 1. Guttural low sawtooth vocal core with growling FM modulation
     const core = ctx.createOscillator();
@@ -3240,6 +3244,214 @@ class SoundEngine {
     gain.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 0.24);
+  }
+
+  // --- Gameplay Improvement 09: Restrained, rate-limited Endgame Tension Audio ---
+  private lastEndgameCueMs = 0;
+  private lastEndgameTensionPulseAt = 0;
+  private lastEndgameCallAt = 0;
+
+  private canPlayEndgameCue(minGapMs = 900): boolean {
+    if (this.muted || this.appBackgrounded) return false;
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (nowMs - this.lastEndgameCueMs < minGapMs) return false;
+    this.lastEndgameCueMs = nowMs;
+    return true;
+  }
+
+  /**
+   * Subtle low-frequency basin tension swell when entering FINAL CONVERGENCE.
+   */
+  public playEndgameConvergenceCue() {
+    if (!this.canPlayEndgameCue(1200)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(74, now);
+    osc.frequency.exponentialRampToValueAtTime(55, now + 1.15);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.28);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.25);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 1.3);
+  }
+
+  /**
+   * Dramatic yet restrained double-pulse + distant deep call when FINAL HUNT begins (2-3 Kelis).
+   */
+  public playFinalHuntStartCue() {
+    if (!this.canPlayEndgameCue(1200)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Two rhythmic low-end hunting pulses
+    [0, 0.26].forEach((offset, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(idx === 0 ? 92 : 110, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(48, now + offset + 0.24);
+
+      gain.gain.setValueAtTime(0.001, now + offset);
+      gain.gain.linearRampToValueAtTime(0.15, now + offset + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.28);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.3);
+    });
+
+    // Distant resonant fifth call
+    const call = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const callGain = ctx.createGain();
+    call.type = 'sawtooth';
+    call.frequency.setValueAtTime(146.83, now + 0.38);
+    call.frequency.exponentialRampToValueAtTime(110, now + 1.2);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(340, now + 0.38);
+    filter.frequency.exponentialRampToValueAtTime(160, now + 1.2);
+
+    callGain.gain.setValueAtTime(0.001, now + 0.38);
+    callGain.gain.linearRampToValueAtTime(0.085, now + 0.56);
+    callGain.gain.exponentialRampToValueAtTime(0.001, now + 1.25);
+
+    call.connect(filter);
+    filter.connect(callGain);
+    callGain.connect(this.masterGain);
+    call.start(now + 0.38);
+    call.stop(now + 1.3);
+  }
+
+  /**
+   * Distant low-frequency amphibious creature call echoing across the collapsing basin.
+   */
+  public playFinalHuntDistantCall() {
+    if (this.muted || this.appBackgrounded) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    if (now - this.lastEndgameCallAt < 6.0) return;
+    this.lastEndgameCallAt = now;
+
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(118, now);
+    osc.frequency.linearRampToValueAtTime(132, now + 0.22);
+    osc.frequency.exponentialRampToValueAtTime(68, now + 1.05);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(280, now);
+    filter.frequency.exponentialRampToValueAtTime(140, now + 1.05);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.068, now + 0.18);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.12);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 1.16);
+  }
+
+  /**
+   * Releases combat tension into a warm golden harmonic swell upon entering FINAL FEAST.
+   */
+  public playFinalFeastTriumphCue() {
+    if (!this.canPlayEndgameCue(1200)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    [220.0, 293.66, 369.99, 440.0].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+      gain.gain.setValueAtTime(0.001, now + idx * 0.08);
+      gain.gain.linearRampToValueAtTime(0.085, now + idx * 0.08 + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.72);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.08);
+      osc.stop(now + idx * 0.08 + 0.76);
+    });
+  }
+
+  /**
+   * Rewarding resonant chime + deep pulse when claiming a high-value endgame carcass.
+   */
+  public playFinalFeedClaimCue() {
+    if (!this.canPlayEndgameCue(450)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    [196.0, 293.66, 440.0].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = idx === 0 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.045);
+      gain.gain.setValueAtTime(0.001, now + idx * 0.045);
+      gain.gain.linearRampToValueAtTime(idx === 0 ? 0.13 : 0.095, now + idx * 0.045 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.045 + 0.42);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.045);
+      osc.stop(now + idx * 0.045 + 0.45);
+    });
+  }
+
+  /**
+   * Lightweight, capped rhythmic pulse layer driven from HUD loop during FINAL_CONVERGENCE / FINAL_HUNT.
+   * Respects mute, backgrounded state, and reduced-audio preferences.
+   */
+  public updateEndgameTension(
+    substate: 'none' | 'final_convergence' | 'final_hunt' | 'final_feast' | 'keli_king_victory',
+    intensity: number,
+    reducedAudio = false
+  ) {
+    if (this.muted || this.appBackgrounded || reducedAudio) return;
+    if (substate !== 'final_convergence' && substate !== 'final_hunt') return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const minGap = substate === 'final_hunt' ? 1.45 : 2.85;
+    if (now - this.lastEndgameTensionPulseAt < minGap) return;
+    this.lastEndgameTensionPulseAt = now;
+
+    const clampedInt = Math.max(0.2, Math.min(1, intensity));
+    const peakGain = (substate === 'final_hunt' ? 0.055 : 0.032) * clampedInt;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(substate === 'final_hunt' ? 62 : 54, now);
+    osc.frequency.exponentialRampToValueAtTime(42, now + 0.22);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(peakGain, now + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.28);
   }
 }
 

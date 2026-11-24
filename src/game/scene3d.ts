@@ -16,6 +16,9 @@ import {
 import { getEvolutionForm, getMilestoneTier } from '../data/abilities';
 import { getEmoteSpec } from '../data/emotes';
 import { AmbientHazardParticles } from './ambientParticles';
+import { resolveGraphicsQuality } from './graphicsQuality';
+import { getPlatformCapabilities } from './platform';
+import type { GraphicsQuality } from './types';
 import { ArenaTextureSet, createArenaTextureSet } from './arenaTextures';
 import {
   applyEnvFrameUVs,
@@ -61,11 +64,12 @@ import {
 } from './statusIcons';
 import { BITE_CONE_HALF_ANGLE } from './simulation';
 import { WorldEventVfxPool } from './worldEventVfx';
-import {
+import type {
   ActiveWorldEventState,
   CarcassEntity,
   DamageImpulse,
   DeathCamState,
+  EndgameStateSnapshot,
   EvolutionForm,
   FloatingCallout,
   HitStopEvent,
@@ -87,6 +91,7 @@ export interface RenderableSimulation {
   zone: ZoneState;
   weather: WeatherState;
   activeWorldEvent?: ActiveWorldEventState | null;
+  endgameState?: EndgameStateSnapshot;
   cameraShake: number;
   damageImpulse?: DamageImpulse | null;
   status?: 'playing' | 'victory' | 'defeat' | 'draw';
@@ -110,6 +115,9 @@ const _dummy = new THREE.Object3D();
 const _skyClear = new THREE.Color(0x162b35);
 const _skyRain = new THREE.Color(0x10222c);
 const _skyFog = new THREE.Color(0x283e46);
+const _skyFinalHunt = new THREE.Color(0x1c1824);
+const _skyFinalFeast = new THREE.Color(0x243330);
+const _skyKingVictory = new THREE.Color(0x2c2b22);
 const _workSky = new THREE.Color();
 const _evoColor = new THREE.Color();
 const RAIN_COUNT = 360;
@@ -341,8 +349,8 @@ export class ArenaScene3D {
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    const w = container.clientWidth || window.innerWidth;
-    const h = container.clientHeight || window.innerHeight;
+    const w = Math.max(1, container.clientWidth || window.innerWidth || 1);
+    const h = Math.max(1, container.clientHeight || window.innerHeight || 1);
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
 
@@ -846,10 +854,31 @@ export class ArenaScene3D {
     return this.activeFloatingStatusIds;
   }
 
+  public setGraphicsQuality(preference: GraphicsQuality = 'auto') {
+    if (this.disposed) return;
+    const caps = getPlatformCapabilities();
+    const resolved = resolveGraphicsQuality(preference, {
+      isSoftwareGl: this.isSoftwareGl,
+      isYouTubePlayables: caps.isYouTubePlayables,
+    });
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    this.renderer.setPixelRatio(Math.min(dpr, resolved.maxPixelRatio));
+    const shadowsOn = resolved.shadowsEnabled && !this.isSoftwareGl;
+    this.renderer.shadowMap.enabled = shadowsOn;
+    if (this.keyLight) {
+      this.keyLight.castShadow = shadowsOn;
+    }
+    this.resize();
+  }
+
   public resize() {
     if (this.disposed) return;
-    const w = this.container.clientWidth || window.innerWidth;
-    const h = this.container.clientHeight || window.innerHeight;
+    const rawW = this.container.clientWidth || window.innerWidth || 0;
+    const rawH = this.container.clientHeight || window.innerHeight || 0;
+    // Gracefully skip resizing while viewport is temporarily collapsed to 0x0 (e.g. split-screen/WebView transition)
+    if (rawW <= 0 || rawH <= 0) return;
+    const w = Math.max(1, rawW);
+    const h = Math.max(1, rawH);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
@@ -857,6 +886,7 @@ export class ArenaScene3D {
 
   public screenToSim(clientX: number, clientY: number): { x: number; z: number } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
     _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     _raycaster.setFromCamera(_ndc, this.camera);
@@ -2274,17 +2304,26 @@ export class ArenaScene3D {
     }
   }
 
-  private updateWeatherVisuals(weather: WeatherState, dt: number, elapsed: number) {
+  private updateWeatherVisuals(
+    weather: WeatherState,
+    dt: number,
+    elapsed: number,
+    endgame?: EndgameStateSnapshot
+  ) {
     const kind = weather?.kind ?? 'clear';
     const intensity = weather?.intensity ?? 0;
+    const egSub = endgame?.substate ?? 'none';
+    const egTension = endgame?.tensionIntensity ?? 0;
 
-    // 1. Dynamic FogExp2, Sky tint, and Light damping
+    // 1. Dynamic FogExp2, Sky tint, and Light damping (with restrained endgame atmospheric grading)
     const targetDensity =
       kind === 'basin_fog'
         ? 0.0046 + intensity * 0.0195
         : kind === 'light_rain'
           ? 0.0046 + intensity * 0.0048
-          : 0.0046;
+          : egSub === 'final_hunt'
+            ? 0.0046 + 0.0012 * egTension
+            : 0.0046;
 
     const fog = this.scene.fog as THREE.FogExp2;
     fog.density = THREE.MathUtils.damp(fog.density, targetDensity, 2.8, dt);
@@ -2296,21 +2335,49 @@ export class ArenaScene3D {
     } else {
       _workSky.copy(_skyClear);
     }
+    if (egSub === 'final_hunt') {
+      _workSky.lerp(_skyFinalHunt, Math.min(0.38, 0.34 * Math.max(0.4, egTension)));
+    } else if (egSub === 'final_convergence') {
+      _workSky.lerp(_skyFinalHunt, Math.min(0.16, 0.16 * Math.max(0.3, egTension)));
+    } else if (egSub === 'final_feast') {
+      _workSky.lerp(_skyFinalFeast, 0.24);
+    } else if (egSub === 'keli_king_victory') {
+      _workSky.lerp(_skyKingVictory, 0.34);
+    }
     fog.color.lerp(_workSky, 1 - Math.exp(-3.0 * dt));
     (this.scene.background as THREE.Color).copy(fog.color);
+
+    const endgameKeyDelta =
+      egSub === 'keli_king_victory'
+        ? 0.22
+        : egSub === 'final_feast'
+          ? 0.1
+          : egSub === 'final_hunt'
+            ? -0.14 * egTension
+            : egSub === 'final_convergence'
+              ? -0.06 * egTension
+              : 0;
+    const endgameHemiDelta =
+      egSub === 'keli_king_victory'
+        ? 0.14
+        : egSub === 'final_hunt'
+          ? -0.08 * egTension
+          : 0;
 
     const targetKeyInt =
       (kind === 'basin_fog'
         ? 1.72 - intensity * 0.56
         : kind === 'light_rain'
           ? 1.72 - intensity * 0.44
-          : 1.72) + this.activeLocalTransformLightBoost;
+          : 1.72) +
+      this.activeLocalTransformLightBoost +
+      endgameKeyDelta;
     const targetHemiInt =
-      kind === 'basin_fog'
+      (kind === 'basin_fog'
         ? 1.08 + intensity * 0.14
         : kind === 'light_rain'
           ? 1.08 - intensity * 0.16
-          : 1.08;
+          : 1.08) + endgameHemiDelta;
     this.keyLight.intensity = THREE.MathUtils.damp(this.keyLight.intensity, targetKeyInt, 6.0, dt);
     this.hemiLight.intensity = THREE.MathUtils.damp(this.hemiLight.intensity, targetHemiInt, 2.5, dt);
 
@@ -2503,13 +2570,18 @@ export class ArenaScene3D {
         shakeTimer: 0,
       };
       soundEngine.playKeliKingAscension();
-      // Initial royal water-ripple & rising golden fragment burst upon reuniting all 100 fragments
+      // Initial royal final-fragment absorption burst & multi-ring golden water shockwaves upon reuniting all 100 fragments
       const kx = simTo3D(livingKeliKing.x);
       const kz = simTo3D(livingKeliKing.z);
       const ky = livingKeliKing.isOnShore ? getElevationAt(livingKeliKing.x, livingKeliKing.z) + 0.18 : 0.2;
-      this.spawnEvolutionRing(kx, ky, kz, 2.2, 16.5, 1.1, 0xfde68a, 0.85);
-      this.spawnEvolutionRing(kx, ky + 0.04, kz, 1.4, 11.2, 0.85, 0xf59e0b, 0.72);
-      this.spawnEvolutionMoteBurst(kx, ky, kz, 28, 0xfde68a, 7.2, 6.4, 1.35, 1.35);
+      this.spawnEvolutionRing(kx, ky, kz, 2.4, 22.0, 1.25, 0xfde68a, 0.92);
+      this.spawnEvolutionRing(kx, ky + 0.04, kz, 1.5, 14.5, 0.95, 0xf59e0b, 0.8);
+      if (!livingKeliKing.isOnShore) {
+        // Immediate water reaction wave spreading outward across the basin surface
+        this.spawnEvolutionRing(kx, 0.14, kz, 3.0, 26.5, 1.45, 0xbae6fd, 0.62);
+      }
+      this.spawnEvolutionMoteBurst(kx, ky, kz, 34, 0xfde68a, 8.0, 7.2, 1.4, 1.45);
+      this.spawnEvolutionMoteBurst(kx, ky + 0.3, kz, 16, 0xfffbeb, 4.8, 8.8, 1.15, 1.15);
     } else if (this.keliKingVictoryState) {
       this.keliKingVictoryState.elapsed += dt;
       if (this.keliKingVictoryState.shakeTimer > 0) {
@@ -2735,7 +2807,7 @@ export class ArenaScene3D {
     this.keyLight.position.set(this.currentCamLook.x + 35, 65, this.currentCamLook.z + 25);
     this.keyLight.target.position.copy(this.currentCamLook);
 
-    this.updateWeatherVisuals(sim.weather, visualDt, elapsed);
+    this.updateWeatherVisuals(sim.weather, visualDt, elapsed, sim.endgameState);
     this.worldEventVfx.update(
       sim.activeWorldEvent ?? null,
       elapsed,

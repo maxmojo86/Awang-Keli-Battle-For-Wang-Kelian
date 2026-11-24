@@ -1,8 +1,9 @@
 import React from 'react';
-import { BookOpen, RotateCcw, ArrowLeft, Crown, Globe } from 'lucide-react';
+import { BookOpen, RotateCcw, ArrowLeft, Crown, Globe, Trophy } from 'lucide-react';
 import { RegionCode } from '../data/regions';
 import { formatSurvivalDuration } from '../game/leaderboard';
 import { MatchReplayData } from '../game/replay';
+import { computeMatchScoreFromHud, MatchScoreBreakdown } from '../game/scoring';
 import { HudSnapshot } from '../game/types';
 import { MatchReplayPanel } from './MatchReplayPanel';
 import { KeliKingShowcase } from './KeliKingShowcase';
@@ -11,6 +12,8 @@ import { VictoryCelebrationCanvas } from './VictoryCelebrationCanvas';
 interface PostMatchScreenProps {
   hud: HudSnapshot;
   replay?: MatchReplayData | null;
+  matchScore?: MatchScoreBreakdown | null;
+  bestScore?: number;
   leaderboardRank?: number | null;
   globalRankInfo?: {
     globalRank: number | null;
@@ -34,6 +37,8 @@ function formatTime(sec: number): string {
 export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   hud,
   replay = null,
+  matchScore = null,
+  bestScore = 0,
   leaderboardRank = null,
   globalRankInfo = null,
   isMultiplayer = false,
@@ -46,6 +51,8 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   const { matchResult } = hud;
   const isVictory = matchResult.status === 'victory';
   const recentLedger = [...matchResult.ledger].reverse().slice(0, 28);
+  const resolvedScore = matchScore ?? computeMatchScoreFromHud(hud);
+  const displayBestScore = Math.max(bestScore, resolvedScore.totalScore);
 
   return (
     <div
@@ -151,6 +158,38 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                 </div>
               </div>
             </div>
+
+            {hud.mode !== 'tutorial' && (
+              <div
+                data-testid="match-score-summary"
+                className="compendium-plaque-subtle rounded-[2px] px-4 py-3 mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+              >
+                <div className="flex items-center gap-3">
+                  <Trophy className="w-5 h-5 text-[#f3d285] shrink-0" />
+                  <div>
+                    <div className="text-[11px] text-[#9cb0ba] uppercase tracking-wider font-mono-num">
+                      Match Score · Best {displayBestScore.toLocaleString()}
+                    </div>
+                    <div className="font-mono-num text-2xl font-bold text-[#f3d285]">
+                      {resolvedScore.totalScore.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono-num text-[#b8c4bf]">
+                  <span>Defeats +{resolvedScore.defeatedScore}</span>
+                  <span>Fragments +{resolvedScore.fragmentScore}</span>
+                  <span>Survival +{resolvedScore.survivalScore}</span>
+                  {resolvedScore.milestoneScore > 0 && (
+                    <span>Milestones +{resolvedScore.milestoneScore}</span>
+                  )}
+                  {resolvedScore.victoryBonus > 0 && (
+                    <span className="text-[#4ade80] font-semibold">
+                      King +{resolvedScore.victoryBonus}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-3 mt-6">
               {isVictory && (

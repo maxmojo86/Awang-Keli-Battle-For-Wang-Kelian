@@ -190,20 +190,35 @@ export const Minimap: React.FC<MinimapProps> = ({
     ctx.fillStyle = 'rgba(127, 29, 29, 0.28)';
     ctx.fill();
 
-    ctx.strokeStyle = hud.zone.isShrinking
-      ? 'rgba(248, 113, 113, 0.92)'
-      : hud.zone.warningActive
-        ? 'rgba(251, 191, 36, 0.92)'
-        : 'rgba(74, 222, 128, 0.88)';
-    ctx.lineWidth = hud.zone.warningActive ? 1.85 : 1.6;
-    if (hud.zone.isShrinking) {
-      ctx.setLineDash([4, 3]);
-    } else if (hud.zone.warningActive) {
-      ctx.setLineDash([6, 2.5]);
+    const isFinalLocked = Boolean(hud.zone.finalZoneLocked || hud.endgame?.finalZoneLocked);
+
+    ctx.strokeStyle = isFinalLocked
+      ? 'rgba(251, 191, 36, 0.96)'
+      : hud.zone.isShrinking
+        ? 'rgba(248, 113, 113, 0.92)'
+        : hud.zone.warningActive
+          ? 'rgba(251, 191, 36, 0.92)'
+          : 'rgba(74, 222, 128, 0.88)';
+    ctx.lineWidth = isFinalLocked ? 2.1 : hud.zone.warningActive ? 1.85 : 1.6;
+    if (!isFinalLocked) {
+      if (hud.zone.isShrinking) {
+        ctx.setLineDash([4, 3]);
+      } else if (hud.zone.warningActive) {
+        ctx.setLineDash([6, 2.5]);
+      }
     }
     ctx.beginPath();
     ctx.arc(zoneCx, zoneCy, Math.max(1, zoneR), 0, Math.PI * 2);
     ctx.stroke();
+
+    // Permanent outer brass halo when the 60/40 final arena is locked
+    if (isFinalLocked) {
+      ctx.strokeStyle = 'rgba(253, 230, 138, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(zoneCx, zoneCy, Math.max(2, zoneR + 2.5), 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.restore();
 
     // 4. Highlighted Hazard Tile Zones (24 sectors across the 8x arena)
@@ -611,16 +626,22 @@ export const Minimap: React.FC<MinimapProps> = ({
 
     // Tactical large (30+ fragment) carcasses within ambush range, pulsing when actively fed on
     if (hud.tacticalCarcasses && hud.tacticalCarcasses.length > 0 && !hud.finalFeast?.active) {
+      const inEndgame =
+        hud.endgame?.substate === 'final_convergence' || hud.endgame?.substate === 'final_hunt';
       for (const tc of hud.tacticalCarcasses) {
         const tx = toPxX(tc.x);
         const ty = toPxY(tc.z);
         ctx.save();
-        if (tc.activelyFed) {
-          const pulse = 5.5 + Math.sin(hud.matchTime * (tc.contested ? 11 : 7)) * 2.2;
+        if (tc.activelyFed || (inEndgame && tc.mass >= 12)) {
+          const pulse = tc.activelyFed
+            ? 5.5 + Math.sin(hud.matchTime * (tc.contested ? 11 : 7)) * 2.2
+            : 6.4;
           ctx.strokeStyle = tc.contested
-            ? 'rgba(251, 146, 60, 0.85)'
-            : 'rgba(253, 224, 71, 0.72)';
-          ctx.lineWidth = 1.4;
+            ? 'rgba(251, 146, 60, 0.92)'
+            : tc.activelyFed
+              ? 'rgba(253, 224, 71, 0.82)'
+              : 'rgba(253, 224, 71, 0.58)';
+          ctx.lineWidth = tc.contested ? 1.65 : 1.35;
           ctx.beginPath();
           ctx.arc(tx, ty, pulse + 1.8, 0, Math.PI * 2);
           ctx.stroke();
@@ -628,17 +649,18 @@ export const Minimap: React.FC<MinimapProps> = ({
         ctx.fillStyle = tc.contested ? '#fb923c' : '#fde047';
         ctx.strokeStyle = '#1c1204';
         ctx.lineWidth = 1.1;
+        const size = inEndgame ? 5.0 : 4.4;
         ctx.beginPath();
-        ctx.moveTo(tx, ty - 4.4);
-        ctx.lineTo(tx + 4.4, ty);
-        ctx.lineTo(tx, ty + 4.4);
-        ctx.lineTo(tx - 4.4, ty);
+        ctx.moveTo(tx, ty - size);
+        ctx.lineTo(tx + size, ty);
+        ctx.lineTo(tx, ty + size);
+        ctx.lineTo(tx - size, ty);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
 
         if (!compact || zoomMode === 'local') {
-          const tag = `+${tc.mass}`;
+          const tag = tc.contested ? `⚔+${tc.mass}` : `+${tc.mass}`;
           ctx.font = 'bold 8px monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'bottom';
@@ -1010,6 +1032,22 @@ export const Minimap: React.FC<MinimapProps> = ({
             </span>
             <span className="text-[#fca5a5]">Surge + Pts</span>
           </div>
+        </div>
+      )}
+
+      {/* Permanent 60/40 Final Arena Boundary Indicator */}
+      {(hud.zone.finalZoneLocked || hud.endgame?.finalZoneLocked) && !hud.finalFeast?.active && (
+        <div
+          className={`flex items-center justify-between gap-1 bg-[#1e1709]/95 border-b border-[#c99c4a]/70 font-mono-num ${
+            compact ? 'px-1.5 py-0.5 text-[8.5px]' : 'px-2 py-1 text-[9.5px]'
+          }`}
+        >
+          <span className="text-[#fde68a] font-semibold truncate">
+            ◆ FINAL ARENA LOCKED
+          </span>
+          <span className="text-[#f3d285] shrink-0">
+            {Math.round(hud.zone.finalLandPercent ?? 60)}/{Math.round(hud.zone.finalWaterPercent ?? 40)}
+          </span>
         </div>
       )}
 

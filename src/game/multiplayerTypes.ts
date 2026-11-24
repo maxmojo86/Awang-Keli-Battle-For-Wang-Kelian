@@ -5,6 +5,7 @@ import type {
   ActiveWorldEventState,
   BitePhase,
   CarcassEntity,
+  EndgameStateSnapshot,
   EvolutionForm,
   FloatingCallout,
   HazardTileKind,
@@ -188,7 +189,13 @@ export interface ClientSfxEvent {
     | 'event_flood'
     | 'event_silt'
     | 'event_whirlpool'
-    | 'event_net_snag';
+    | 'event_net_snag'
+    | 'endgame_convergence'
+    | 'endgame_final_hunt'
+    | 'endgame_final_feast'
+    | 'endgame_call'
+    | 'final_feed_claim'
+    | 'final_zone_locked';
 }
 
 export interface WorldStatePacket {
@@ -201,6 +208,7 @@ export interface WorldStatePacket {
   zone: ZoneState;
   weather: WeatherState;
   worldEvent?: ActiveWorldEventState | null;
+  endgame?: EndgameStateSnapshot;
   kelis: RemoteKeliState[];
   carcasses: CarcassEntity[];
   pickups: PickupItem[];

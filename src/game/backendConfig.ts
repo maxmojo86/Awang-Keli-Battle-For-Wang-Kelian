@@ -1,3 +1,5 @@
+import { getPlatformCapabilities } from './platform.ts';
+
 export interface BackendRuntimeConfig {
   apiBaseUrl?: string;
   wsUrl?: string;
@@ -61,6 +63,19 @@ export function getBackendConfig(): ResolvedBackendConfig {
     import.meta as ImportMeta & { env?: { DEV?: boolean; PROD?: boolean } }
   ).env;
   const isDev = Boolean(env?.DEV);
+
+  // Strict YouTube Playables isolation: never configure external HTTP or WebSocket endpoints.
+  const caps = getPlatformCapabilities();
+  if (caps.isYouTubePlayables || !caps.webSocketEnabled) {
+    return {
+      apiBaseUrl: null,
+      wsUrl: null,
+      isApiConfigured: false,
+      isWsConfigured: false,
+      isProductionStaticBuild: !isDev,
+    };
+  }
+
   const runtime = readRuntimeOverride();
 
   const rawApi =

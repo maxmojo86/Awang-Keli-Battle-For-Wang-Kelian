@@ -6,6 +6,7 @@ import {
 } from '../data/regions';
 import { HudSnapshot, LobbySize, MatchMode } from './types';
 import { buildApiUrl } from './backendConfig';
+import { getPlatformCapabilities } from './platform';
 
 export const SURVIVAL_LEADERBOARD_STORAGE_KEY = 'awang_keli_top_survival_times';
 export const PLAYER_NAME_STORAGE_KEY = 'awang_keli_player_name';
@@ -30,6 +31,7 @@ const VALID_LOBBY_SIZES = new Set<number>([5, 10, 20, 25, 50, 100]);
 
 function getSafeStorage(): Storage | null {
   try {
+    if (!getPlatformCapabilities().localStorageAllowed) return null;
     if (typeof window === 'undefined' || !window.localStorage) return null;
     return window.localStorage;
   } catch {

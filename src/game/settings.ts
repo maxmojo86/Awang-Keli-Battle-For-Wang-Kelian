@@ -64,6 +64,8 @@ export const DEFAULT_SETTINGS: AccessibilitySettings = {
   visualSoundCues: true,
   hudScale: 'standard',
   hudVisibility: { ...DEFAULT_HUD_VISIBILITY },
+  graphicsQuality: 'auto',
+  aiDifficulty: 'normal',
   muted: false,
   volume: 0.65,
   musicVolume: 0.35,
@@ -136,6 +138,21 @@ export function loadSavedSettings(): AccessibilitySettings {
         ? Math.max(0, Math.min(1, v))
         : fallback;
 
+    const graphicsQuality =
+      parsed.graphicsQuality === 'auto' ||
+      parsed.graphicsQuality === 'low' ||
+      parsed.graphicsQuality === 'medium' ||
+      parsed.graphicsQuality === 'high'
+        ? parsed.graphicsQuality
+        : DEFAULT_SETTINGS.graphicsQuality;
+
+    const aiDifficulty =
+      parsed.aiDifficulty === 'easy' ||
+      parsed.aiDifficulty === 'normal' ||
+      parsed.aiDifficulty === 'hard'
+        ? parsed.aiDifficulty
+        : DEFAULT_SETTINGS.aiDifficulty;
+
     return {
       reducedMotion:
         typeof parsed.reducedMotion === 'boolean'
@@ -147,6 +164,8 @@ export function loadSavedSettings(): AccessibilitySettings {
           : DEFAULT_SETTINGS.visualSoundCues,
       hudScale,
       hudVisibility: sanitizeHudVisibility(parsed.hudVisibility),
+      graphicsQuality,
+      aiDifficulty,
       muted:
         typeof parsed.muted === 'boolean' ? parsed.muted : DEFAULT_SETTINGS.muted,
       volume: clamp01(parsed.volume, DEFAULT_SETTINGS.volume),
@@ -168,6 +187,10 @@ export function loadSavedSettings(): AccessibilitySettings {
 
 export function saveSettings(settings: AccessibilitySettings): void {
   try {
+    if (typeof window !== 'undefined') {
+      const yt = (window as unknown as { ytgame?: { IN_PLAYABLES_ENV?: boolean } }).ytgame;
+      if (yt?.IN_PLAYABLES_ENV) return;
+    }
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // Ignore storage quota or private mode failures

@@ -485,6 +485,19 @@ export class MatchPacingDirector {
   }
 
   /**
+   * Emits an approximate, non-shrinking activity clue hotspot inside the locked final arena.
+   */
+  public recordActivityClue(
+    kind: 'large_carcass' | 'convergence',
+    x: number,
+    z: number,
+    matchTime: number,
+    label: string
+  ): void {
+    this.upsertHotspot(kind, x, z, 240, 9.0, matchTime, label);
+  }
+
+  /**
    * Records when any Keli crosses an evolution milestone (20/40/60/80/100) for dev telemetry.
    */
   public recordEvolutionLevel(level: number, matchTime: number): void {
@@ -627,11 +640,12 @@ export class MatchPacingDirector {
       }
     }
 
-    // Highlight genuine large unclaimed carcasses (25+ fragments) as strategic hotspots
+    // Highlight genuine large unclaimed carcasses as strategic hotspots (25+ midgame, 12+ during endgame)
     if (!finalFeastActive) {
+      const highValueThreshold = this.phase === 'endgame' ? 12 : 25;
       for (let i = 0; i < carcasses.length; i++) {
         const c = carcasses[i];
-        if (c.consumed || c.mass < 25) continue;
+        if (c.consumed || c.mass < highValueThreshold) continue;
         this.upsertHotspot(
           'large_carcass',
           c.x,

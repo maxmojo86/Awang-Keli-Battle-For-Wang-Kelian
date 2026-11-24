@@ -14,6 +14,9 @@ import {
 } from './game/androidNative';
 import { soundEngine } from './game/audio';
 import { getBackendConfig } from './game/backendConfig';
+import { persistentSaveManager } from './game/cloudSave';
+import { getPlatformCapabilities } from './game/platform';
+import { computeMatchScoreFromHud, MatchScoreBreakdown } from './game/scoring';
 import { loadSavedSettings, saveSettings } from './game/settings';
 import {
   clearTopSurvivalTimes,
@@ -33,14 +36,16 @@ import { multiplayerClient, MultiplayerSnapshot } from './game/multiplayerClient
 import { MatchReplayData } from './game/replay';
 import { spatialVoice } from './game/spatialVoice';
 import { AccessibilitySettings, HudSnapshot, LobbySize } from './game/types';
+import { youtubePlayablesBridge } from './game/youtubePlayables';
 
 type ScreenState = 'title' | 'lobby' | 'playing' | 'summary';
 
 export default function App() {
+  const platformCapabilities = getPlatformCapabilities();
   const [screen, setScreen] = useState<ScreenState>(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      if (params.get('room')?.trim()) return 'lobby';
+      if (params.get('room')?.trim() && platformCapabilities.onlineMultiplayerEnabled) return 'lobby';
     } catch {
       // Ignore URL parse errors
     }
@@ -51,6 +56,12 @@ export default function App() {
   const [matchKey, setMatchKey] = useState(1);
   const [finalHud, setFinalHud] = useState<HudSnapshot | null>(null);
   const [finalReplay, setFinalReplay] = useState<MatchReplayData | null>(null);
+  const [lastMatchScore, setLastMatchScore] = useState<MatchScoreBreakdown | null>(null);
+  const [bestScore, setBestScore] = useState<number>(0);
+  const [ytAudioEnabled, setYtAudioEnabled] = useState<boolean>(() =>
+    platformCapabilities.youtubeSdkEnabled ? youtubePlayablesBridge.isAudioEnabled() : true
+  );
+  const [ytPaused, setYtPaused] = useState<boolean>(false);
   const [playerName, setPlayerName] = useState<string>(() => getSavedPlayerName());
   const [playerRegion, setPlayerRegion] = useState<RegionCode>(() => getSavedPlayerRegion());
   const [leaderboard, setLeaderboard] = useState<SurvivalLeaderboardEntry[]>(() =>
@@ -58,8 +69,10 @@ export default function App() {
   );
   const [lastLeaderboardRank, setLastLeaderboardRank] = useState<number | null>(null);
   const backendConfig = getBackendConfig();
-  const onlineLeaderboardAvailable = backendConfig.isApiConfigured;
-  const onlineMultiplayerAvailable = backendConfig.isWsConfigured;
+  const onlineLeaderboardAvailable =
+    platformCapabilities.externalLeaderboardsEnabled && backendConfig.isApiConfigured;
+  const onlineMultiplayerAvailable =
+    platformCapabilities.onlineMultiplayerEnabled && backendConfig.isWsConfigured;
 
   const [globalLeaderboard, setGlobalLeaderboard] = useState<GlobalLeaderboardResponse | null>(
     null
@@ -85,6 +98,7 @@ export default function App() {
   } | null>(null);
 
   const [epilogueUnlocked, setEpilogueUnlocked] = useState<boolean>(() => {
+    if (!platformCapabilities.localStorageAllowed) return false;
     try {
       return localStorage.getItem('awang_keli_epilogue') === '1';
     } catch {
@@ -106,6 +120,59 @@ export default function App() {
   const exitToastTimerRef = useRef<number | null>(null);
   const recordedMatchKeyRef = useRef<number | null>(null);
 
+  // YouTube Playables SDK lifecycle, audio state, and load-before-save cloud sync
+  useEffect(() => {
+    let active = true;
+    let raf1 = 0;
+    let raf2 = 0;
+
+    if (platformCapabilities.youtubeSdkEnabled) {
+      raf1 = window.requestAnimationFrame(() => {
+        raf2 = window.requestAnimationFrame(() => {
+          youtubePlayablesBridge.signalFirstFrameReady();
+        });
+      });
+    }
+
+    const unsubAudio = platformCapabilities.youtubeSdkEnabled
+      ? youtubePlayablesBridge.subscribeAudioEnabledChange((enabled) => {
+          setYtAudioEnabled(enabled);
+        })
+      : () => {};
+
+    const unsubLifecycle = platformCapabilities.youtubeSdkEnabled
+      ? youtubePlayablesBridge.subscribeLifecycle(
+          () => setYtPaused(true),
+          () => setYtPaused(false)
+        )
+      : () => {};
+
+    void persistentSaveManager.load().then((loaded) => {
+      if (!active) return;
+      setBestScore(loaded.bestScore);
+      if (loaded.epilogueUnlocked) {
+        setEpilogueUnlocked(true);
+      }
+      if (platformCapabilities.cloudSaveEnabled) {
+        setSettings((prev) => ({
+          ...prev,
+          ...persistentSaveManager.extractSettingsPatch(),
+        }));
+      }
+      if (platformCapabilities.youtubeSdkEnabled) {
+        youtubePlayablesBridge.signalGameReady();
+      }
+    });
+
+    return () => {
+      active = false;
+      if (raf1) window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+      unsubAudio();
+      unsubLifecycle();
+    };
+  }, [platformCapabilities.cloudSaveEnabled, platformCapabilities.youtubeSdkEnabled]);
+
   useEffect(() => {
     return initAndroidNativeShell();
   }, []);
@@ -123,18 +190,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    soundEngine.setMuted(settings.muted);
+    const effectiveMuted = settings.muted || !ytAudioEnabled || ytPaused;
+    soundEngine.setMuted(effectiveMuted);
     soundEngine.setVolume(settings.volume);
     soundEngine.setMusicVolume(settings.musicVolume ?? 0.35);
-    spatialVoice.setMasterMuted(settings.muted);
-    spatialVoice.setVoiceVolume(settings.voiceVolume ?? 0.9);
-    spatialVoice.setVoiceMode(settings.voiceMode ?? 'open');
+    if (platformCapabilities.spatialVoiceEnabled) {
+      spatialVoice.setMasterMuted(effectiveMuted);
+      spatialVoice.setVoiceVolume(settings.voiceVolume ?? 0.9);
+      spatialVoice.setVoiceMode(settings.voiceMode ?? 'open');
+    }
   }, [
     settings.muted,
     settings.volume,
     settings.musicVolume,
     settings.voiceVolume,
     settings.voiceMode,
+    ytAudioEnabled,
+    ytPaused,
+    platformCapabilities.spatialVoiceEnabled,
   ]);
 
   useEffect(() => {
@@ -142,14 +215,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    soundEngine.setMenuMusicWanted(screen === 'title', 1.0);
-  }, [screen]);
+    soundEngine.setMenuMusicWanted(screen === 'title' && !ytPaused, 1.0);
+  }, [screen, ytPaused]);
 
   useEffect(() => {
+    if (!platformCapabilities.onlineMultiplayerEnabled) {
+      return;
+    }
     const unsubState = multiplayerClient.subscribe(setMpSnapshot);
     const unsubStart = multiplayerClient.onMatchStarted((info) => {
       setFinalHud(null);
       setFinalReplay(null);
+      setLastMatchScore(null);
       setLastLeaderboardRank(null);
       setLastGlobalRank(null);
       setActiveMpSession(info);
@@ -159,7 +236,9 @@ export default function App() {
     });
 
     if (onlineMultiplayerAvailable) {
-      spatialVoice.init();
+      if (platformCapabilities.spatialVoiceEnabled) {
+        spatialVoice.init();
+      }
       multiplayerClient.connect();
     }
 
@@ -183,15 +262,35 @@ export default function App() {
       unsubStart();
       unsubState();
     };
-  }, [onlineMultiplayerAvailable]);
+  }, [
+    onlineMultiplayerAvailable,
+    platformCapabilities.onlineMultiplayerEnabled,
+    platformCapabilities.spatialVoiceEnabled,
+  ]);
 
-  const handleUpdateSettings = useCallback((patch: Partial<AccessibilitySettings>) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      saveSettings(next);
-      return next;
-    });
-  }, []);
+  const handleUpdateSettings = useCallback(
+    (patch: Partial<AccessibilitySettings>) => {
+      setSettings((prev) => {
+        const next = { ...prev, ...patch };
+        saveSettings(next);
+        void persistentSaveManager.savePatch((curr) => ({
+          ...curr,
+          settings: {
+            reducedMotion: next.reducedMotion,
+            visualSoundCues: next.visualSoundCues,
+            hudScale: next.hudScale,
+            graphicsQuality: next.graphicsQuality ?? 'auto',
+            aiDifficulty: next.aiDifficulty ?? 'normal',
+            muted: next.muted,
+            volume: next.volume,
+            musicVolume: next.musicVolume ?? 0.35,
+          },
+        }));
+        return next;
+      });
+    },
+    []
+  );
 
   const refreshGlobalLeaderboard = useCallback(
     async (regionFilter: RegionFilter = globalRegionFilter, sort: GlobalLeaderboardSort = globalSort) => {
@@ -241,6 +340,7 @@ export default function App() {
     setActiveMpSession(null);
     setFinalHud(null);
     setFinalReplay(null);
+    setLastMatchScore(null);
     setLastLeaderboardRank(null);
     setLastGlobalRank(null);
     setMatchKey((k) => k + 1);
@@ -252,22 +352,61 @@ export default function App() {
       setFinalHud(snap);
       setFinalReplay(replayData);
 
+      const scoreBreakdown = computeMatchScoreFromHud(snap);
+      setLastMatchScore(scoreBreakdown);
+
       const alreadyRecorded = recordedMatchKeyRef.current === matchKey;
       if (!alreadyRecorded) {
         recordedMatchKeyRef.current = matchKey;
+        const isKingVictory =
+          snap.matchResult.status === 'victory' && snap.matchResult.finalLevel === 100;
 
-        if (snap.matchResult.status === 'victory' && snap.matchResult.finalLevel === 100) {
+        if (isKingVictory) {
           setEpilogueUnlocked(true);
-          try {
-            localStorage.setItem('awang_keli_epilogue', '1');
-          } catch {
-            // Ignore storage errors
+          if (platformCapabilities.localStorageAllowed) {
+            try {
+              localStorage.setItem('awang_keli_epilogue', '1');
+            } catch {
+              // Ignore storage errors
+            }
           }
           const result = recordKeliKingSurvivalTime(snap, playerName);
           setLeaderboard(result.entries);
           setLastLeaderboardRank(result.rank);
         } else {
           setLastLeaderboardRank(null);
+        }
+
+        if (snap.mode !== 'tutorial') {
+          setBestScore((prev) => Math.max(prev, scoreBreakdown.totalScore));
+          void persistentSaveManager.savePatch((curr) => ({
+            ...curr,
+            bestScore: Math.max(curr.bestScore, scoreBreakdown.totalScore),
+            bestSurvivalSec: Math.max(
+              curr.bestSurvivalSec,
+              Math.floor(snap.matchResult.survivalTime)
+            ),
+            matchesCompleted: curr.matchesCompleted + 1,
+            keliKingVictories: curr.keliKingVictories + (isKingVictory ? 1 : 0),
+            epilogueUnlocked: curr.epilogueUnlocked || isKingVictory,
+            recentMatches: [
+              {
+                completedAt: Date.now(),
+                score: scoreBreakdown.totalScore,
+                finalLevel: Math.max(1, Math.min(100, Math.round(snap.matchResult.finalLevel))),
+                kills: Math.max(0, Math.floor(snap.matchResult.kills)),
+                survivalSec: Math.max(0, Math.floor(snap.matchResult.survivalTime)),
+                lobbySize: snap.lobbySize,
+                victory: isKingVictory,
+              },
+              ...curr.recentMatches,
+            ].slice(0, 10),
+          }));
+
+          if (platformCapabilities.scoreSubmissionEnabled && scoreBreakdown.totalScore > 0) {
+            const ytMatchId = `yt-run-${matchKey}`;
+            void youtubePlayablesBridge.submitScore(scoreBreakdown.totalScore, ytMatchId);
+          }
         }
 
         if (onlineLeaderboardAvailable && snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
@@ -305,6 +444,8 @@ export default function App() {
       globalSort,
       matchKey,
       onlineLeaderboardAvailable,
+      platformCapabilities.localStorageAllowed,
+      platformCapabilities.scoreSubmissionEnabled,
       playerName,
       playerRegion,
       refreshGlobalLeaderboard,
@@ -395,7 +536,7 @@ export default function App() {
   );
 
   return (
-    <div className="w-full min-h-screen bg-[#0c141a]">
+    <div className="w-full min-h-[100dvh] bg-[#0c141a] overflow-x-hidden">
       {screen === 'title' && (
         <TitleScreen
           settings={settings}
@@ -407,9 +548,10 @@ export default function App() {
       {screen === 'lobby' && (
         <LobbyScreen
           lobbySize={lobbySize}
-          mode={mode}
+          mode={platformCapabilities.onlineMultiplayerEnabled ? mode : mode === 'multiplayer' ? 'royale' : mode}
           playerName={playerName}
           playerRegion={playerRegion}
+          bestScore={bestScore}
           leaderboard={leaderboard}
           globalLeaderboard={globalLeaderboard}
           globalLeaderboardLoading={globalLeaderboardLoading}
@@ -438,7 +580,7 @@ export default function App() {
       )}
 
       {screen === 'playing' && (
-        <div className="w-full h-screen">
+        <div className="w-full h-[100dvh] overflow-hidden">
           <GameViewport
             key={matchKey}
             lobbySize={lobbySize}
@@ -461,6 +603,8 @@ export default function App() {
         <PostMatchScreen
           hud={finalHud}
           replay={finalReplay}
+          matchScore={lastMatchScore}
+          bestScore={bestScore}
           leaderboardRank={lastLeaderboardRank}
           globalRankInfo={lastGlobalRank}
           isMultiplayer={Boolean(activeMpSession)}
