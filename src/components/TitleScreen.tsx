@@ -202,9 +202,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!assetsReady) return;
     void soundEngine.preloadMenuMusic();
-  }, [assetsReady]);
+  }, []);
 
   const reducedMotion = settings.reducedMotion || osReducedMotion;
   const [introActive, setIntroActive] = useState<boolean>(() => !hasPlayedTitleIntro);
@@ -233,8 +232,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     if (isEnteringPlay) return;
     setIsEnteringPlay(true);
     soundEngine.unlockFromGesture();
+    void soundEngine.unlockMenuMusicFromGesture();
     soundEngine.playUiConfirm(false);
-    soundEngine.setMenuMusicWanted(false, 1.0);
 
     const handoffMs = reducedMotion ? 90 : 180;
     playTimerRef.current = window.setTimeout(() => {
@@ -311,6 +310,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       ref: howToPlayButtonRef,
       onClick: () => {
         soundEngine.unlockFromGesture();
+        void soundEngine.unlockMenuMusicFromGesture();
         soundEngine.playUiConfirm(true);
         setHowToPlayOpen(true);
       },
@@ -323,6 +323,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       ref: settingsButtonRef,
       onClick: () => {
         soundEngine.unlockFromGesture();
+        void soundEngine.unlockMenuMusicFromGesture();
         soundEngine.playUiConfirm(true);
         setSettingsOpen(true);
       },

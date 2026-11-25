@@ -215,7 +215,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    soundEngine.setMenuMusicWanted(screen === 'title' && !ytPaused, 1.0);
+    const wantsMenuSoundtrack = (screen === 'title' || screen === 'lobby') && !ytPaused;
+    soundEngine.setMenuMusicWanted(wantsMenuSoundtrack, 0.85);
   }, [screen, ytPaused]);
 
   useEffect(() => {
@@ -224,6 +225,7 @@ export default function App() {
     }
     const unsubState = multiplayerClient.subscribe(setMpSnapshot);
     const unsubStart = multiplayerClient.onMatchStarted((info) => {
+      soundEngine.setMenuMusicWanted(false, 0.75);
       setFinalHud(null);
       setFinalReplay(null);
       setLastMatchScore(null);
@@ -337,6 +339,7 @@ export default function App() {
 
   const handleStartMatch = useCallback(() => {
     if (mode === 'multiplayer') return;
+    soundEngine.setMenuMusicWanted(false, 0.75);
     setActiveMpSession(null);
     setFinalHud(null);
     setFinalReplay(null);

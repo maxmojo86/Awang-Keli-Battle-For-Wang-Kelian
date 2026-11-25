@@ -354,6 +354,58 @@ for (let i = 0; i < XFADE_STEPS; i++) {
   SIN_XFADE_CURVE[i] = Math.sin(phase);
 }
 
+// Tiny 1-sample silent PCM WAV data URI used once on iOS inside a user gesture
+// to switch WebKit's audio session from `ambient` (muted by hardware Silent switch)
+// to `playback` on iOS versions where `navigator.audioSession` is absent or incomplete.
+const SILENT_IOS_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+function isIosWebKit(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/i.test(ua)) return true;
+  const platform = (navigator as { platform?: string }).platform || '';
+  return platform === 'MacIntel' && (navigator.maxTouchPoints ?? 0) > 1;
+}
+
+function configurePlaybackAudioSession(): void {
+  if (typeof navigator === 'undefined') return;
+  try {
+    const nav = navigator as Navigator & {
+      audioSession?: { type?: string };
+    };
+    if (nav.audioSession && nav.audioSession.type !== 'playback') {
+      nav.audioSession.type = 'playback';
+    }
+  } catch {
+    // Ignore browsers without AudioSession API
+  }
+}
+
+function decodeAudioDataCompat(ctx: AudioContext, buf: ArrayBuffer): Promise<AudioBuffer> {
+  return new Promise<AudioBuffer>((resolve, reject) => {
+    let settled = false;
+    const onSuccess = (decoded: AudioBuffer) => {
+      if (settled) return;
+      settled = true;
+      resolve(decoded);
+    };
+    const onError = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    try {
+      const maybePromise = ctx.decodeAudioData(buf, onSuccess, onError);
+      if (maybePromise && typeof (maybePromise as Promise<AudioBuffer>).then === 'function') {
+        (maybePromise as Promise<AudioBuffer>).then(onSuccess, onError);
+      }
+    } catch (err) {
+      onError(err);
+    }
+  });
+}
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private outputGain: GainNode | null = null;
@@ -403,6 +455,8 @@ class SoundEngine {
   private appBackgrounded = typeof document !== 'undefined' ? document.hidden : false;
   private wasAudioInterrupted = false;
   private gestureUnlocked = false;
+  private iosAudioSessionPrimed = false;
+  private iosSilentAudioEl: HTMLAudioElement | null = null;
   private gestureListenersAttached = false;
   private visibilityListenerAttached = false;
   private lifecycleRefCount = 0;
@@ -428,6 +482,7 @@ class SoundEngine {
 
   private ensureAudioContextRaw(): AudioContext | null {
     if (typeof window === 'undefined') return null;
+    configurePlaybackAudioSession();
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
@@ -493,15 +548,73 @@ class SoundEngine {
           }
         }
       });
+
+      if (this.rawAudioBytes && !this.menuMusicBuffer && !this.decodePromise) {
+        void this.preDecodeMenuBufferInBackground(ctx);
+      }
     }
     return this.ctx;
+  }
+
+  private primeIosAudioFromGesture(ctx: AudioContext | null) {
+    configurePlaybackAudioSession();
+
+    // Play a 1-sample silent Web Audio buffer synchronously inside the user gesture
+    // to reliably wake iOS WebKit / Safari CoreAudio hardware.
+    if (ctx) {
+      try {
+        const silentBuf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = silentBuf;
+        src.connect(ctx.destination);
+        src.start(0);
+      } catch {
+        // Ignore if context cannot start yet
+      }
+    }
+
+    // On iOS/iPadOS, also play a tiny inline silent WAV once inside a user gesture
+    // so iOS routes subsequent Web Audio through the `playback` session (audible even
+    // when the physical Ring/Silent switch is on Silent).
+    if (
+      !this.iosAudioSessionPrimed &&
+      isIosWebKit() &&
+      typeof Audio !== 'undefined'
+    ) {
+      try {
+        if (!this.iosSilentAudioEl) {
+          const el = new Audio(SILENT_IOS_WAV_DATA_URI);
+          el.setAttribute('playsinline', '');
+          el.setAttribute('webkit-playsinline', '');
+          (el as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+          el.preload = 'auto';
+          el.loop = false;
+          el.volume = 1;
+          this.iosSilentAudioEl = el;
+        }
+        const playResult = this.iosSilentAudioEl.play();
+        if (playResult && typeof playResult.then === 'function') {
+          playResult
+            .then(() => {
+              this.iosAudioSessionPrimed = true;
+            })
+            .catch(() => {
+              // Retry on next valid activating gesture (e.g. touchend / click)
+            });
+        } else {
+          this.iosAudioSessionPrimed = true;
+        }
+      } catch {
+        // Ignore silent primer failure
+      }
+    }
   }
 
   private ensureContext(): AudioContext | null {
     if (this.muted || this.appBackgrounded) return null;
     const ctx = this.ensureAudioContextRaw();
     if (!ctx) return null;
-    if (ctx.state === 'suspended') {
+    if ((ctx.state as string) !== 'running') {
       ctx.resume().catch(() => {});
     }
     return ctx;
@@ -624,6 +737,9 @@ class SoundEngine {
       const el = new Audio();
       el.loop = true;
       el.preload = 'auto';
+      el.setAttribute('playsinline', '');
+      el.setAttribute('webkit-playsinline', '');
+      (el as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
       el.volume = 0;
       el.muted = this.muted;
       this.fallbackAudioEl = el;
@@ -797,8 +913,9 @@ class SoundEngine {
   public unlockFromGesture(): boolean {
     if (this.muted || typeof window === 'undefined') return false;
     const ctx = this.ensureContext();
+    this.primeIosAudioFromGesture(ctx);
     if (!ctx) return false;
-    if (ctx.state === 'suspended') {
+    if ((ctx.state as string) !== 'running') {
       ctx.resume().catch(() => {});
     }
     return true;
@@ -811,6 +928,7 @@ class SoundEngine {
     this.lifecycleRefCount += 1;
     if (!this.visibilityListenerAttached) {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
+      window.addEventListener('pageshow', this.handlePageShow);
       this.visibilityListenerAttached = true;
     }
     return () => {
@@ -820,6 +938,12 @@ class SoundEngine {
       }
     };
   }
+
+  private handlePageShow = () => {
+    if (typeof document !== 'undefined' && !document.hidden) {
+      this.handleAppForegrounded();
+    }
+  };
 
   public preloadMenuMusic(): Promise<ArrayBuffer | null> {
     if (typeof window === 'undefined' || typeof fetch !== 'function') {
@@ -848,6 +972,10 @@ class SoundEngine {
           throw new Error('Empty audio payload');
         }
         this.rawAudioBytes = buf;
+        // Start decoding in the background right away so first tap on iPhone starts immediately
+        if (this.ctx && !this.menuMusicBuffer && !this.decodePromise) {
+          void this.preDecodeMenuBufferInBackground(this.ctx);
+        }
         // If menu music is already wanted and unmuted, probe autoplay immediately once bytes arrive
         if (
           this.menuMusicWanted &&
@@ -924,6 +1052,7 @@ class SoundEngine {
         this.stopAmbient();
       }
       this.menuMusicWanted = true;
+      void this.preloadMenuMusic();
 
       // Cancel any pending stop-after-fade-out timer immediately
       this.fadeEpoch += 1;
@@ -1087,13 +1216,15 @@ class SoundEngine {
     }
 
     const ctx = this.ensureAudioContextRaw();
+    // Synchronously prime iOS playback session & audio hardware inside the user gesture
+    this.primeIosAudioFromGesture(ctx);
     if (!ctx) {
       return this.startOrResumeFallbackElement(1.5);
     }
 
-    // Call ctx.resume() synchronously inside the user gesture, with a bounded wait so
-    // non-activating events (like pointerdown on Safari/WebView) NEVER jam subsequent clicks/taps.
-    const running = await this.resumeContextWithTimeout(ctx, 260);
+    // Call ctx.resume() synchronously inside the user gesture, with a generous wait for
+    // iOS CoreAudio startup without blocking UI taps.
+    const running = await this.resumeContextWithTimeout(ctx, 650);
     if (!running) {
       this.gestureUnlocked = false;
       this.menuMusicStatus = 'blocked';
@@ -1122,6 +1253,14 @@ class SoundEngine {
 
   private armGestureListeners() {
     if (typeof window === 'undefined' || this.gestureListenersAttached) return;
+    window.addEventListener('touchstart', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('touchend', this.handleGestureUnlockEvent, {
+      capture: true,
+      passive: true,
+    });
     window.addEventListener('pointerdown', this.handleGestureUnlockEvent, {
       capture: true,
       passive: true,
@@ -1134,10 +1273,6 @@ class SoundEngine {
       capture: true,
       passive: true,
     });
-    window.addEventListener('touchend', this.handleGestureUnlockEvent, {
-      capture: true,
-      passive: true,
-    });
     window.addEventListener('keydown', this.handleGestureUnlockEvent, {
       capture: true,
       passive: true,
@@ -1147,6 +1282,12 @@ class SoundEngine {
 
   private teardownGestureListeners() {
     if (typeof window === 'undefined' || !this.gestureListenersAttached) return;
+    window.removeEventListener('touchstart', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
+    window.removeEventListener('touchend', this.handleGestureUnlockEvent, {
+      capture: true,
+    });
     window.removeEventListener('pointerdown', this.handleGestureUnlockEvent, {
       capture: true,
     });
@@ -1154,9 +1295,6 @@ class SoundEngine {
       capture: true,
     });
     window.removeEventListener('click', this.handleGestureUnlockEvent, {
-      capture: true,
-    });
-    window.removeEventListener('touchend', this.handleGestureUnlockEvent, {
       capture: true,
     });
     window.removeEventListener('keydown', this.handleGestureUnlockEvent, {
@@ -1255,12 +1393,9 @@ class SoundEngine {
     this.handleAppForegrounded();
   };
 
-  private async ensureDecodedMenuBuffer(ctx: AudioContext): Promise<AudioBuffer | null> {
-    if (this.menuMusicBuffer) return this.menuMusicBuffer;
+  private preDecodeMenuBufferInBackground(ctx: AudioContext): Promise<AudioBuffer | null> {
+    if (this.menuMusicBuffer) return Promise.resolve(this.menuMusicBuffer);
     if (this.decodePromise) return this.decodePromise;
-
-    this.menuMusicStatus = 'loading';
-    this.notifyMenuMusic();
 
     this.decodePromise = (async () => {
       const raw = await this.preloadMenuMusic();
@@ -1269,7 +1404,7 @@ class SoundEngine {
         return null;
       }
       try {
-        const decoded = await ctx.decodeAudioData(raw.slice(0));
+        const decoded = await decodeAudioDataCompat(ctx, raw.slice(0));
         this.menuMusicBuffer = decoded;
         return decoded;
       } catch {
@@ -1281,6 +1416,15 @@ class SoundEngine {
     })();
 
     return this.decodePromise;
+  }
+
+  private async ensureDecodedMenuBuffer(ctx: AudioContext): Promise<AudioBuffer | null> {
+    if (this.menuMusicBuffer) return this.menuMusicBuffer;
+    if (!this.decodePromise) {
+      this.menuMusicStatus = 'loading';
+      this.notifyMenuMusic();
+    }
+    return this.preDecodeMenuBufferInBackground(ctx);
   }
 
   private getLoopBounds(buffer: AudioBuffer) {
@@ -1373,8 +1517,12 @@ class SoundEngine {
       this.musicDeckGains[1].gain.setValueAtTime(0, now);
 
       this.musicFadeGain.gain.cancelScheduledValues(now);
-      this.musicFadeGain.gain.setValueAtTime(0, now);
-      this.musicFadeGain.gain.linearRampToValueAtTime(1.0, now + fadeInDurationSec);
+      if (fadeInDurationSec <= 0.05) {
+        this.musicFadeGain.gain.setValueAtTime(1.0, now);
+      } else {
+        this.musicFadeGain.gain.setValueAtTime(0.001, now);
+        this.musicFadeGain.gain.linearRampToValueAtTime(1.0, now + fadeInDurationSec);
+      }
 
       if (this.outputGain) {
         this.outputGain.gain.cancelScheduledValues(now);
@@ -1544,6 +1692,9 @@ class SoundEngine {
     this.teardownGestureListeners();
     if (typeof document !== 'undefined' && this.visibilityListenerAttached) {
       document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pageshow', this.handlePageShow);
+      }
       this.visibilityListenerAttached = false;
     }
     this.fadeEpoch += 1;

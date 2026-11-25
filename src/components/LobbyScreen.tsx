@@ -22,6 +22,7 @@ import {
 import { EVOLUTION_MILESTONES } from '../data/abilities';
 import { getRegionInfo, REGIONS, RegionCode, RegionFilter } from '../data/regions';
 import { ZONE_METADATA } from '../game/arena';
+import { soundEngine } from '../game/audio';
 import {
   DEFAULT_PLAYER_NAME,
   formatSurvivalDuration,
@@ -1692,7 +1693,15 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                 <span className="text-[#e2e8f0]">Audio</span>
                 <button
                   type="button"
-                  onClick={() => onUpdateSettings({ muted: !settings.muted })}
+                  onClick={() => {
+                    const nextMuted = !settings.muted;
+                    soundEngine.setMuted(nextMuted);
+                    if (!nextMuted) {
+                      soundEngine.unlockFromGesture();
+                      void soundEngine.unlockMenuMusicFromGesture();
+                    }
+                    onUpdateSettings({ muted: nextMuted });
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1 rounded border border-[#5b4724] bg-[#0b1218] text-xs text-[#f3e6c8] hover:border-[#c99c4a]"
                 >
                   {settings.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
