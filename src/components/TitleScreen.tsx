@@ -23,6 +23,7 @@ export const TITLE_ASSETS = {
   buttonHowToPlay: resolveAssetUrl('assets/aistudio/button_how_to_play_76f4c34d.webp'),
   buttonSettings: resolveAssetUrl('assets/aistudio/button_settings_d47aea02.webp'),
   buttonSound: resolveAssetUrl('assets/aistudio/button_sound_e94609b9.webp'),
+  creatorLogo: resolveAssetUrl('assets/aistudio/image_dbd82719.png'),
 } as const;
 
 export function selectTitleComposition(width: number, height: number): TitleComposition {
@@ -158,6 +159,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       TITLE_ASSETS.buttonHowToPlay,
       TITLE_ASSETS.buttonSettings,
       TITLE_ASSETS.buttonSound,
+      TITLE_ASSETS.creatorLogo,
     ],
     [activeBackgroundUrl]
   );
@@ -360,9 +362,131 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         </div>
       )}
 
-      {/* Main Title Screen Content Layer (inside device safe areas, strictly within 100dvh) */}
+      {/* Upper-Left Safe Area Standalone Web Install Game Control (hidden in dev/Android/YouTube/installed) */}
       <div
-        className={`relative z-10 w-full h-full flex flex-col items-center justify-start overflow-hidden transition-opacity ${
+        className={`absolute z-20 transition-opacity ${
+          reducedMotion ? 'duration-100' : 'duration-300'
+        } ${assetsReady ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        style={{
+          top: isPhoneLandscape
+            ? 'max(14px, env(safe-area-inset-top))'
+            : isPortrait
+              ? 'max(18px, clamp(16px, 2.4vh, 30px), env(safe-area-inset-top))'
+              : isTabletLandscape
+                ? 'max(24px, env(safe-area-inset-top))'
+                : 'max(26px, clamp(22px, 3.8vh, 44px), env(safe-area-inset-top))',
+          left: isPhoneLandscape
+            ? 'max(16px, env(safe-area-inset-left))'
+            : isPortrait
+              ? 'max(16px, clamp(16px, 3.6vw, 34px), env(safe-area-inset-left))'
+              : isTabletLandscape
+                ? 'max(24px, env(safe-area-inset-left))'
+                : 'max(26px, clamp(22px, 3vw, 48px), env(safe-area-inset-left))',
+        }}
+      >
+        <InstallGameControl
+          compact={isPhoneLandscape || viewport.width < 420}
+          disabled={isEnteringPlay}
+        />
+      </div>
+
+      {/* Upper-Right Safe Area Sound Toggle Button */}
+      <div
+        className={`absolute z-20 transition-opacity ${
+          reducedMotion ? 'duration-100' : 'duration-300'
+        } ${assetsReady ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        style={{
+          top: isPhoneLandscape
+            ? 'max(18px, env(safe-area-inset-top))'
+            : isPortrait
+              ? 'max(20px, clamp(18px, 2.8vh, 34px), env(safe-area-inset-top))'
+              : isTabletLandscape
+                ? 'max(26px, env(safe-area-inset-top))'
+                : 'max(28px, clamp(24px, 4.2vh, 48px), env(safe-area-inset-top))',
+          right: isPhoneLandscape
+            ? 'max(24px, env(safe-area-inset-right))'
+            : isPortrait
+              ? 'max(20px, clamp(18px, 4vw, 38px), env(safe-area-inset-right))'
+              : isTabletLandscape
+                ? 'max(28px, env(safe-area-inset-right))'
+                : 'max(28px, clamp(24px, 3.2vw, 52px), env(safe-area-inset-right))',
+        }}
+      >
+        <div className={shouldAnimateIntro ? 'animate-title-sound-intro' : undefined}>
+        <button
+          type="button"
+          onClick={handleSoundToggle}
+          aria-pressed={settings.muted}
+          aria-label={
+            settings.muted
+              ? 'Sound muted. Activate to unmute game audio'
+              : 'Sound on. Activate to mute game audio'
+          }
+          title={settings.muted ? 'Unmute Audio' : 'Mute Audio'}
+          className={`relative appearance-none border-0 bg-transparent p-0 m-0 cursor-pointer flex items-center justify-center overflow-visible rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] focus-visible:ring-offset-2 focus-visible:ring-offset-[#091116] ${
+            isPhoneLandscape || isPortrait
+              ? 'w-11 h-11 sm:w-13 sm:h-13'
+              : 'w-13 h-13 lg:w-14 lg:h-14'
+          } ${buttonMotionClasses}`}
+        >
+          <img
+            src={TITLE_ASSETS.buttonSound}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            width={1262}
+            height={1246}
+            className={`pointer-events-none select-none block max-w-none h-auto ${
+              settings.muted ? 'brightness-75 saturate-50' : ''
+            }`}
+            style={{
+              width: '150%',
+              aspectRatio: '1262 / 1246',
+            }}
+          />
+
+          {settings.muted && (
+            <>
+              <svg
+                viewBox="0 0 48 48"
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 w-full h-full"
+              >
+                <line
+                  x1="10"
+                  y1="10"
+                  x2="38"
+                  y2="38"
+                  stroke="#ef4444"
+                  strokeWidth="4.2"
+                  strokeLinecap="round"
+                />
+                <line
+                  x1="10"
+                  y1="10"
+                  x2="38"
+                  y2="38"
+                  stroke="#fef2f2"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </svg>
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute -bottom-1.5 -right-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-[2px] border border-[#fca5a5]/85 bg-[#7f1d1d] text-[9px] font-mono-num font-bold tracking-wider text-[#fef2f2] shadow"
+              >
+                <VolumeX className="w-2.5 h-2.5" />
+                MUTE
+              </span>
+            </>
+          )}
+        </button>
+        </div>
+      </div>
+
+      {/* Main Title Screen Content Layer (inside device safe areas, scrolls cleanly on short viewports) */}
+      <div
+        className={`relative z-10 w-full h-full flex flex-col items-center justify-start overflow-y-auto overflow-x-hidden overscroll-contain transition-opacity ${
           reducedMotion ? 'duration-100' : 'duration-300'
         } ${assetsReady ? 'opacity-100' : 'opacity-0'}`}
         style={{
@@ -376,7 +500,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 ? 'max(28px, clamp(26px, 3.8vh, 42px), env(safe-area-inset-top))'
                 : 'max(34px, clamp(28px, 4.2vh, 52px), env(safe-area-inset-top))',
           paddingBottom: isPhoneLandscape
-            ? 'max(14px, env(safe-area-inset-bottom))'
+            ? 'max(16px, env(safe-area-inset-bottom))'
             : 'max(24px, env(safe-area-inset-bottom))',
           paddingLeft: isPhoneLandscape
             ? 'max(24px, env(safe-area-inset-left))'
@@ -388,123 +512,6 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             : landscapeRightReserve,
         }}
       >
-        {/* Upper-Left Safe Area Standalone Web Install Game Control (hidden in dev/Android/YouTube/installed) */}
-        <div
-          className="absolute z-20"
-          style={{
-            top: isPhoneLandscape
-              ? 'max(14px, env(safe-area-inset-top))'
-              : isPortrait
-                ? 'max(18px, clamp(16px, 2.4vh, 30px), env(safe-area-inset-top))'
-                : isTabletLandscape
-                  ? 'max(24px, env(safe-area-inset-top))'
-                  : 'max(26px, clamp(22px, 3.8vh, 44px), env(safe-area-inset-top))',
-            left: isPhoneLandscape
-              ? 'max(16px, env(safe-area-inset-left))'
-              : isPortrait
-                ? 'max(16px, clamp(16px, 3.6vw, 34px), env(safe-area-inset-left))'
-                : isTabletLandscape
-                  ? 'max(24px, env(safe-area-inset-left))'
-                  : 'max(26px, clamp(22px, 3vw, 48px), env(safe-area-inset-left))',
-          }}
-        >
-          <InstallGameControl
-            compact={isPhoneLandscape || viewport.width < 420}
-            disabled={isEnteringPlay}
-          />
-        </div>
-
-        {/* Upper-Right Safe Area Sound Toggle Button */}
-        <div
-          className="absolute z-20"
-          style={{
-            top: isPhoneLandscape
-              ? 'max(18px, env(safe-area-inset-top))'
-              : isPortrait
-                ? 'max(20px, clamp(18px, 2.8vh, 34px), env(safe-area-inset-top))'
-                : isTabletLandscape
-                  ? 'max(26px, env(safe-area-inset-top))'
-                  : 'max(28px, clamp(24px, 4.2vh, 48px), env(safe-area-inset-top))',
-            right: isPhoneLandscape
-              ? 'max(24px, env(safe-area-inset-right))'
-              : isPortrait
-                ? 'max(20px, clamp(18px, 4vw, 38px), env(safe-area-inset-right))'
-                : isTabletLandscape
-                  ? 'max(28px, env(safe-area-inset-right))'
-                  : 'max(28px, clamp(24px, 3.2vw, 52px), env(safe-area-inset-right))',
-          }}
-        >
-          <div className={shouldAnimateIntro ? 'animate-title-sound-intro' : undefined}>
-          <button
-            type="button"
-            onClick={handleSoundToggle}
-            aria-pressed={settings.muted}
-            aria-label={
-              settings.muted
-                ? 'Sound muted. Activate to unmute game audio'
-                : 'Sound on. Activate to mute game audio'
-            }
-            title={settings.muted ? 'Unmute Audio' : 'Mute Audio'}
-            className={`relative appearance-none border-0 bg-transparent p-0 m-0 cursor-pointer flex items-center justify-center overflow-visible rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f3d285] focus-visible:ring-offset-2 focus-visible:ring-offset-[#091116] ${
-              isPhoneLandscape || isPortrait
-                ? 'w-11 h-11 sm:w-13 sm:h-13'
-                : 'w-13 h-13 lg:w-14 lg:h-14'
-            } ${buttonMotionClasses}`}
-          >
-            <img
-              src={TITLE_ASSETS.buttonSound}
-              alt=""
-              aria-hidden="true"
-              draggable={false}
-              width={1262}
-              height={1246}
-              className={`pointer-events-none select-none block max-w-none h-auto ${
-                settings.muted ? 'brightness-75 saturate-50' : ''
-              }`}
-              style={{
-                width: '150%',
-                aspectRatio: '1262 / 1246',
-              }}
-            />
-
-            {settings.muted && (
-              <>
-                <svg
-                  viewBox="0 0 48 48"
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-0 w-full h-full"
-                >
-                  <line
-                    x1="10"
-                    y1="10"
-                    x2="38"
-                    y2="38"
-                    stroke="#ef4444"
-                    strokeWidth="4.2"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1="10"
-                    y1="10"
-                    x2="38"
-                    y2="38"
-                    stroke="#fef2f2"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                  />
-                </svg>
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute -bottom-1.5 -right-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-[2px] border border-[#fca5a5]/85 bg-[#7f1d1d] text-[9px] font-mono-num font-bold tracking-wider text-[#fef2f2] shadow"
-                >
-                  <VolumeX className="w-2.5 h-2.5" />
-                  MUTE
-                </span>
-              </>
-            )}
-          </button>
-          </div>
-        </div>
 
         {/* Centered Top-Middle Title Logo & Middle-Aligned Menu Stack (clear of Awang Keli) */}
         <main className="flex flex-col items-center justify-start min-w-0 max-w-full">
@@ -602,6 +609,42 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               </div>
             ))}
           </nav>
+
+          {/* Compact Static Creator Credit (Title Screen Only, Secondary to Title & Menu) */}
+          <div
+            data-testid="title-creator-credit"
+            className={`pointer-events-none select-none shrink-0 flex flex-col items-center text-center ${
+              isPhoneLandscape
+                ? 'mt-3 gap-1.5'
+                : isPortrait
+                  ? 'mt-[clamp(16px,2.8vh,28px)] gap-1.5'
+                  : isTabletLandscape
+                    ? 'mt-[clamp(18px,3vh,30px)] gap-2'
+                    : 'mt-[clamp(20px,3.4vh,34px)] gap-2'
+            }`}
+          >
+            <img
+              src={TITLE_ASSETS.creatorLogo}
+              alt="drmujahid logo"
+              draggable={false}
+              width={1118}
+              height={1118}
+              className="block shrink-0 aspect-square object-contain drop-shadow-[0_6px_16px_rgba(0,0,0,0.62)]"
+              style={{
+                width: isPhoneLandscape
+                  ? 'clamp(48px, 12vh, 56px)'
+                  : isPortrait
+                    ? 'clamp(52px, 14vw, 64px)'
+                    : isTabletLandscape
+                      ? 'clamp(64px, 6.4vw, 72px)'
+                      : 'clamp(64px, 5.2vw, 80px)',
+                height: 'auto',
+              }}
+            />
+            <p className="px-2.5 py-0.5 rounded-[2px] bg-[#091116]/65 border border-[#c99c4a]/20 text-[11px] sm:text-xs font-medium tracking-[0.02em] text-[#f5efe6] drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+              a Malaysian game by drmujahid
+            </p>
+          </div>
         </main>
       </div>
 
