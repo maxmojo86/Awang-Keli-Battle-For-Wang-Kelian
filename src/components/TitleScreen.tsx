@@ -110,6 +110,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     updateViewport();
     window.addEventListener('resize', updateViewport);
     window.addEventListener('orientationchange', updateViewport);
+    window.visualViewport?.addEventListener('resize', updateViewport);
 
     const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     const onMqChange = (e: MediaQueryListEvent) => setOsReducedMotion(e.matches);
@@ -118,6 +119,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     return () => {
       window.removeEventListener('resize', updateViewport);
       window.removeEventListener('orientationchange', updateViewport);
+      window.visualViewport?.removeEventListener('resize', updateViewport);
       mq?.removeEventListener?.('change', onMqChange);
     };
   }, []);
@@ -266,6 +268,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const isPortrait = composition === 'portrait';
   const isPhoneLandscape = composition === 'phone_landscape';
   const isTabletLandscape = composition === 'tablet_landscape';
+  const isPhone = isPhoneLandscape || (isPortrait && viewport.width < 700);
 
   const logoWidthStyle = isPortrait
     ? 'clamp(248px, 70vw, 450px)'
@@ -484,12 +487,15 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         </div>
       </div>
 
-      {/* Main Title Screen Content Layer (inside device safe areas, scrolls cleanly on short viewports) */}
+      {/* Main Title Screen Content Layer (inside device safe areas, reserves bottom space for fixed credit and scrolls cleanly on short viewports) */}
       <div
-        className={`relative z-10 w-full h-full flex flex-col items-center justify-start overflow-y-auto overflow-x-hidden overscroll-contain transition-opacity ${
+        className={`absolute inset-x-0 top-0 z-10 flex flex-col items-center justify-start overflow-y-auto overflow-x-hidden overscroll-contain transition-opacity ${
           reducedMotion ? 'duration-100' : 'duration-300'
         } ${assetsReady ? 'opacity-100' : 'opacity-0'}`}
         style={{
+          bottom: isPhone
+            ? 'calc(max(8px, env(safe-area-inset-bottom)) + 48px)'
+            : 'calc(max(8px, env(safe-area-inset-bottom)) + 58px)',
           paddingTop: isPhoneLandscape
             ? 'max(16px, env(safe-area-inset-top))'
             : isPortrait
@@ -499,9 +505,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               : isTabletLandscape
                 ? 'max(28px, clamp(26px, 3.8vh, 42px), env(safe-area-inset-top))'
                 : 'max(34px, clamp(28px, 4.2vh, 52px), env(safe-area-inset-top))',
-          paddingBottom: isPhoneLandscape
-            ? 'max(16px, env(safe-area-inset-bottom))'
-            : 'max(24px, env(safe-area-inset-bottom))',
+          paddingBottom: isPhoneLandscape ? '10px' : '16px',
           paddingLeft: isPhoneLandscape
             ? 'max(24px, env(safe-area-inset-left))'
             : isPortrait
@@ -609,43 +613,42 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               </div>
             ))}
           </nav>
-
-          {/* Compact Static Creator Credit (Title Screen Only, Secondary to Title & Menu) */}
-          <div
-            data-testid="title-creator-credit"
-            className={`pointer-events-none select-none shrink-0 flex flex-col items-center text-center ${
-              isPhoneLandscape
-                ? 'mt-3 gap-1.5'
-                : isPortrait
-                  ? 'mt-[clamp(16px,2.8vh,28px)] gap-1.5'
-                  : isTabletLandscape
-                    ? 'mt-[clamp(18px,3vh,30px)] gap-2'
-                    : 'mt-[clamp(20px,3.4vh,34px)] gap-2'
-            }`}
-          >
-            <img
-              src={TITLE_ASSETS.creatorLogo}
-              alt="drmujahid logo"
-              draggable={false}
-              width={1118}
-              height={1118}
-              className="block shrink-0 aspect-square object-contain drop-shadow-[0_6px_16px_rgba(0,0,0,0.62)]"
-              style={{
-                width: isPhoneLandscape
-                  ? 'clamp(48px, 12vh, 56px)'
-                  : isPortrait
-                    ? 'clamp(52px, 14vw, 64px)'
-                    : isTabletLandscape
-                      ? 'clamp(64px, 6.4vw, 72px)'
-                      : 'clamp(64px, 5.2vw, 80px)',
-                height: 'auto',
-              }}
-            />
-            <p className="px-2.5 py-0.5 rounded-[2px] bg-[#091116]/65 border border-[#c99c4a]/20 text-[11px] sm:text-xs font-medium tracking-[0.02em] text-[#f5efe6] drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
-              a Malaysian game by drmujahid
-            </p>
-          </div>
         </main>
+      </div>
+
+      {/* Compact Fixed Bottom-Center Creator Credit (Title Screen Only, Non-Interactive) */}
+      <div
+        data-testid="title-creator-credit"
+        className={`fixed z-20 pointer-events-none select-none inline-flex flex-row items-center justify-center max-w-[calc(100vw-24px)] rounded-[4px] bg-[#091116]/68 border border-[#c99c4a]/22 shadow-[0_4px_14px_rgba(0,0,0,0.45)] transition-opacity ${
+          isPhone ? 'gap-2 px-2.5 py-1' : 'gap-2.5 px-3 py-1'
+        } ${reducedMotion ? 'duration-100' : 'duration-300'} ${
+          assetsReady ? 'opacity-100' : 'opacity-0'
+        }`}
+        style={{
+          bottom: 'max(8px, env(safe-area-inset-bottom))',
+          left: '50%',
+          transform: 'translateX(-50%)',
+        }}
+      >
+        <img
+          src={TITLE_ASSETS.creatorLogo}
+          alt="drmujahid logo"
+          draggable={false}
+          width={1118}
+          height={1118}
+          className="block shrink-0 aspect-square object-contain"
+          style={{
+            width: isPhone ? '32px' : '40px',
+            height: 'auto',
+          }}
+        />
+        <p
+          className={`leading-tight whitespace-nowrap font-medium tracking-[0.02em] text-[#f5efe6] drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] ${
+            isPhone ? 'text-[11px]' : 'text-[12px]'
+          }`}
+        >
+          a Malaysian game by drmujahid
+        </p>
       </div>
 
       {/* Concise Non-Blocking Audio Failure Status */}
@@ -653,9 +656,11 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[92vw] compendium-plaque rounded-[2px] px-3 py-1.5 flex items-center gap-2.5 text-[11px] sm:text-xs text-[#fecaca]"
+          className="fixed left-1/2 -translate-x-1/2 z-30 max-w-[92vw] compendium-plaque rounded-[2px] px-3 py-1.5 flex items-center gap-2.5 text-[11px] sm:text-xs text-[#fecaca]"
           style={{
-            marginBottom: 'env(safe-area-inset-bottom)',
+            bottom: isPhone
+              ? 'calc(max(8px, env(safe-area-inset-bottom)) + 54px)'
+              : 'calc(max(8px, env(safe-area-inset-bottom)) + 64px)',
           }}
         >
           <span className="truncate">{menuMusic.errorMessage}</span>
