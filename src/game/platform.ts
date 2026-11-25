@@ -18,6 +18,7 @@ export interface PlatformCapabilities {
   readonly localStorageAllowed: boolean;
   readonly mobileControlsSupported: boolean;
   readonly pwaEnabled: boolean;
+  readonly voluntarySupportEnabled: boolean;
   readonly modeDisplayLabel: string;
 }
 
@@ -142,6 +143,7 @@ export function resolvePlatformCapabilities(
       localStorageAllowed: false,
       mobileControlsSupported: true,
       pwaEnabled: false,
+      voluntarySupportEnabled: false,
       modeDisplayLabel: 'AI Battle Royale',
     };
   }
@@ -163,6 +165,7 @@ export function resolvePlatformCapabilities(
       localStorageAllowed: true,
       mobileControlsSupported: true,
       pwaEnabled: false,
+      voluntarySupportEnabled: false,
       modeDisplayLabel: 'Solo Royale',
     };
   }
@@ -183,6 +186,7 @@ export function resolvePlatformCapabilities(
     localStorageAllowed: true,
     mobileControlsSupported: true,
     pwaEnabled: isProdBuild,
+    voluntarySupportEnabled: true,
     modeDisplayLabel: 'Solo Royale',
   };
 }

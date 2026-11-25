@@ -2,7 +2,9 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
+
+const DEFAULT_STANDALONE_SUPPORT_URL = 'https://buy.stripe.com/5kQ9ASgXJ1q91tv3Iv2B200';
 
 const UNREFERENCED_LEGACY_YOUTUBE_PNGS = [
   'awang_keli_phase1.png_e5238957.png',
@@ -15,15 +17,25 @@ const UNREFERENCED_LEGACY_YOUTUBE_PNGS = [
 
 const ROOT_DIR = import.meta.dirname;
 
-export default defineConfig(({ command }) => {
+export default defineConfig(({ command, mode }) => {
   const rawTarget = (process.env.BUILD_TARGET || 'standalone').toLowerCase();
   const buildTarget =
     rawTarget === 'youtube' || rawTarget === 'android' ? rawTarget : 'standalone';
   const isYouTube = buildTarget === 'youtube';
-  const isStandaloneProd = command === 'build' && buildTarget === 'standalone';
+  const isStandalone = buildTarget === 'standalone';
+  const isStandaloneProd = command === 'build' && isStandalone;
   const outDir = isYouTube ? 'dist-youtube' : 'dist';
   const releaseSeed = (process.env.RENDER_GIT_COMMIT || process.env.GITHUB_SHA || '').slice(0, 10);
   const pwaCacheVersion = `v1-${releaseSeed ? `${releaseSeed}-` : ''}${Date.now().toString(36)}`;
+
+  const loadedViteEnv = loadEnv(mode, ROOT_DIR, 'VITE_');
+  const rawSupportOverride = isStandalone
+    ? (process.env.VITE_SUPPORT_URL ?? loadedViteEnv.VITE_SUPPORT_URL ?? '')
+    : '';
+
+  if (!isStandalone && 'VITE_SUPPORT_URL' in process.env) {
+    delete process.env.VITE_SUPPORT_URL;
+  }
 
   return {
     base: './',
@@ -32,6 +44,10 @@ export default defineConfig(({ command }) => {
       __CORE_VERSION__: JSON.stringify('1.0.0-core-freeze'),
       __PWA_ENABLED__: JSON.stringify(isStandaloneProd),
       __PWA_CACHE_VERSION__: JSON.stringify(isStandaloneProd ? pwaCacheVersion : ''),
+      __VOLUNTARY_SUPPORT_ENABLED__: JSON.stringify(isStandalone),
+      __DEFAULT_SUPPORT_URL__: JSON.stringify(isStandalone ? DEFAULT_STANDALONE_SUPPORT_URL : ''),
+      __SUPPORT_URL_OVERRIDE__: JSON.stringify(rawSupportOverride),
+      ...(!isStandalone ? { 'import.meta.env.VITE_SUPPORT_URL': JSON.stringify('') } : {}),
     },
     build: {
       outDir,
@@ -50,6 +66,14 @@ export default defineConfig(({ command }) => {
       },
     },
     plugins: [
+      {
+        name: 'strip-non-standalone-support-env',
+        configResolved(resolvedConfig) {
+          if (!isStandalone && resolvedConfig.env && 'VITE_SUPPORT_URL' in resolvedConfig.env) {
+            delete resolvedConfig.env.VITE_SUPPORT_URL;
+          }
+        },
+      },
       react(),
       tailwindcss(),
       // Standalone production Web PWA transform & asset emitter:

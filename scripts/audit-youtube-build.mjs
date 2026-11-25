@@ -156,7 +156,7 @@ export function auditYouTubeBuild(distDir = DIST_YT) {
         ) {
           continue;
         }
-        // Fail on fonts, analytics, APIs, WebSockets, CDNs
+        // Fail on fonts, analytics, APIs, WebSockets, CDNs, Stripe checkout, or ad networks
         if (
           url.startsWith('ws://') ||
           url.startsWith('wss://') ||
@@ -165,10 +165,17 @@ export function auditYouTubeBuild(distDir = DIST_YT) {
           url.includes('google-analytics') ||
           url.includes('googletagmanager') ||
           url.includes('sentry.io') ||
+          url.includes('stripe.com') ||
+          url.includes('googlesyndication.com') ||
+          url.includes('doubleclick.net') ||
+          url.includes('pagead2') ||
           url.includes('/api/')
         ) {
           errors.push(`Forbidden external endpoint in ${rel}: ${url}`);
         }
+      }
+      if (/buy\.stripe\.com|5kQ9ASgXJ1q91tv3Iv2B200|adsbygoogle|googlesyndication/i.test(text)) {
+        errors.push(`Forbidden checkout or advertising reference leaked into ${rel}`);
       }
     }
   }

@@ -8,6 +8,7 @@ import { HudSnapshot } from '../game/types';
 import { MatchReplayPanel } from './MatchReplayPanel';
 import { KeliKingShowcase } from './KeliKingShowcase';
 import { VictoryCelebrationCanvas } from './VictoryCelebrationCanvas';
+import { VoluntarySupportControl } from './VoluntarySupportControl';
 
 interface PostMatchScreenProps {
   hud: HudSnapshot;
@@ -57,7 +58,10 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   return (
     <div
       className="fixed inset-0 z-40 overflow-y-auto bg-[#091116] safe-area-page-x"
-      style={{ paddingTop: 'max(2rem, var(--sat))' }}
+      style={{
+        paddingTop: 'max(2rem, var(--sat))',
+        paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
+      }}
     >
       {isVictory && <VictoryCelebrationCanvas reducedMotion={reducedMotion} />}
       <div className="relative z-10 max-w-4xl mx-auto space-y-6">
@@ -224,6 +228,11 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                 <ArrowLeft className="w-4 h-4" />
                 {isMultiplayer ? 'Return to Basin Room' : 'Return to Lobby'}
               </button>
+              <VoluntarySupportControl
+                variant="postmatch"
+                reducedMotion={reducedMotion}
+                className="sm:ml-auto"
+              />
             </div>
           </div>
         </section>

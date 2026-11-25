@@ -8,7 +8,7 @@
  * - Precaches ONLY the lightweight offline fallback page and its local icons.
  * - Never downloads all game assets during install.
  * - Never caches or intercepts /api/*, WebSocket traffic, non-GET requests, voice signalling,
- *   cross-origin URLs, YouTube SDK, or game HTML/JS bundles.
+ *   cross-origin URLs (including Stripe checkout), payment paths, YouTube SDK, or game HTML/JS bundles.
  * - Navigation requests stay network-fresh and fall back to /offline.html ONLY on network failure
  *   (server 4xx/5xx responses are returned directly without caching).
  * - Optional same-origin image caching uses an explicit allowlist, response cloning before body reads,
@@ -40,6 +40,16 @@ function isExcludedPath(pathname) {
   if (pathname === '/api') return true;
   if (pathname === '/ws' || pathname.startsWith('/ws/')) return true;
   if (pathname === '/sw.js') return true;
+  if (
+    pathname === '/checkout' ||
+    pathname.startsWith('/checkout/') ||
+    pathname === '/stripe' ||
+    pathname.startsWith('/stripe/') ||
+    pathname === '/payment' ||
+    pathname.startsWith('/payment/')
+  ) {
+    return true;
+  }
   return false;
 }
 

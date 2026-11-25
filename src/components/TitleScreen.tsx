@@ -6,6 +6,7 @@ import { AccessibilitySettings } from '../game/types';
 import { HowToPlayModal } from './HowToPlayModal';
 import { InstallGameControl } from './InstallGameControl';
 import { TitleSettingsModal } from './TitleSettingsModal';
+import { VoluntarySupportControl } from './VoluntarySupportControl';
 import { resolveAssetUrl } from '../utils/assetUrl';
 
 export type TitleComposition =
@@ -613,6 +614,24 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               </div>
             ))}
           </nav>
+
+          {/* Compact Secondary Voluntary Support Control (Standalone Web & PWA Only) */}
+          <div
+            className={
+              isPhoneLandscape
+                ? 'mt-2.5 flex justify-center'
+                : isPortrait
+                  ? 'mt-3.5 flex justify-center'
+                  : 'mt-4 flex justify-center'
+            }
+          >
+            <VoluntarySupportControl
+              variant="title"
+              compact={isPhone}
+              disabled={isEnteringPlay}
+              reducedMotion={reducedMotion}
+            />
+          </div>
         </main>
       </div>
 
