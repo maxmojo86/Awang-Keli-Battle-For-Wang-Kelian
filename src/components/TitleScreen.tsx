@@ -4,6 +4,7 @@ import { registerAndroidBackHandler } from '../game/androidNative';
 import { MenuMusicSnapshot, soundEngine } from '../game/audio';
 import { AccessibilitySettings } from '../game/types';
 import { HowToPlayModal } from './HowToPlayModal';
+import { InstallGameControl } from './InstallGameControl';
 import { TitleSettingsModal } from './TitleSettingsModal';
 import { resolveAssetUrl } from '../utils/assetUrl';
 
@@ -369,8 +370,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             ? 'max(16px, env(safe-area-inset-top))'
             : isPortrait
               ? viewport.width < 520
-                ? 'max(48px, clamp(44px, 5.6vh, 62px), env(safe-area-inset-top))'
-                : 'max(40px, clamp(36px, 4.5vh, 54px), env(safe-area-inset-top))'
+                ? 'max(66px, clamp(62px, 7.2vh, 78px), env(safe-area-inset-top))'
+                : 'max(54px, clamp(48px, 5.5vh, 66px), env(safe-area-inset-top))'
               : isTabletLandscape
                 ? 'max(28px, clamp(26px, 3.8vh, 42px), env(safe-area-inset-top))'
                 : 'max(34px, clamp(28px, 4.2vh, 52px), env(safe-area-inset-top))',
@@ -387,6 +388,32 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             : landscapeRightReserve,
         }}
       >
+        {/* Upper-Left Safe Area Standalone Web Install Game Control (hidden in dev/Android/YouTube/installed) */}
+        <div
+          className="absolute z-20"
+          style={{
+            top: isPhoneLandscape
+              ? 'max(14px, env(safe-area-inset-top))'
+              : isPortrait
+                ? 'max(18px, clamp(16px, 2.4vh, 30px), env(safe-area-inset-top))'
+                : isTabletLandscape
+                  ? 'max(24px, env(safe-area-inset-top))'
+                  : 'max(26px, clamp(22px, 3.8vh, 44px), env(safe-area-inset-top))',
+            left: isPhoneLandscape
+              ? 'max(16px, env(safe-area-inset-left))'
+              : isPortrait
+                ? 'max(16px, clamp(16px, 3.6vw, 34px), env(safe-area-inset-left))'
+                : isTabletLandscape
+                  ? 'max(24px, env(safe-area-inset-left))'
+                  : 'max(26px, clamp(22px, 3vw, 48px), env(safe-area-inset-left))',
+          }}
+        >
+          <InstallGameControl
+            compact={isPhoneLandscape || viewport.width < 420}
+            disabled={isEnteringPlay}
+          />
+        </div>
+
         {/* Upper-Right Safe Area Sound Toggle Button */}
         <div
           className="absolute z-20"

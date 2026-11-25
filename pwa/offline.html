@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#091116" />
+    <title>Connection Required · Awang Keli: Battle for Wang Kelian</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        min-height: 100dvh;
+        background: radial-gradient(circle at 50% 24%, #102a31 0%, #091116 68%, #050a0d 100%);
+        color: #e6e4dd;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      main {
+        width: min(92vw, 420px);
+        margin: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+        background: linear-gradient(180deg, rgba(18, 31, 41, 0.96) 0%, rgba(9, 16, 23, 0.98) 100%);
+        border: 1.5px solid #c99c4a;
+        border-radius: 4px;
+        box-shadow:
+          inset 0 0 0 1px rgba(88, 66, 30, 0.72),
+          inset 0 1px 0 rgba(247, 224, 163, 0.2),
+          0 16px 36px -8px rgba(0, 0, 0, 0.8);
+        overflow: hidden;
+      }
+      .ribbon {
+        background: linear-gradient(180deg, #172734 0%, #0d161e 100%);
+        border-bottom: 1px solid #6e5528;
+        padding: 12px 18px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #f3d285;
+      }
+      .body {
+        padding: 22px 20px 20px;
+        text-align: center;
+      }
+      .emblem {
+        width: 84px;
+        height: 84px;
+        border-radius: 14px;
+        border: 1.5px solid rgba(201, 156, 74, 0.75);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
+        display: block;
+        margin: 0 auto 16px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+        line-height: 1.25;
+        color: #f7f2e7;
+        font-family: Georgia, "Times New Roman", serif;
+      }
+      p {
+        margin: 0 0 14px;
+        font-size: 14px;
+        line-height: 1.5;
+        color: #b8c4bf;
+      }
+      .notice {
+        margin: 0 0 18px;
+        padding: 10px 12px;
+        border: 1px solid #2b424c;
+        background: rgba(11, 18, 24, 0.78);
+        border-radius: 3px;
+        font-size: 12.5px;
+        line-height: 1.45;
+        color: #9cb0ba;
+      }
+      .status {
+        margin: 0 0 14px;
+        min-height: 18px;
+        font-size: 12px;
+        color: #f3d285;
+      }
+      button {
+        width: 100%;
+        min-height: 44px;
+        padding: 11px 16px;
+        font-size: 14px;
+        font-weight: 700;
+        color: #091116;
+        background: linear-gradient(180deg, #e5be6b 0%, #c99c4a 100%);
+        border: 1px solid #f3d285;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: filter 120ms ease;
+      }
+      button:hover {
+        filter: brightness(1.08);
+      }
+      button:active {
+        filter: brightness(0.95);
+      }
+      button:focus-visible {
+        outline: 2px solid #f3d285;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <main role="main">
+      <div class="ribbon">Awang Keli · Wang Kelian Basin</div>
+      <div class="body">
+        <img
+          src="/pwa/pwa-192x192.png"
+          alt="Awang Keli: Battle for Wang Kelian"
+          width="84"
+          height="84"
+          class="emblem"
+        />
+        <h1>Internet Connection Required</h1>
+        <p>
+          You appear to be offline. An active internet connection is required to
+          load <strong>AWANG KELI: BATTLE FOR WANG KELIAN</strong> and play
+          online multiplayer.
+        </p>
+        <div class="notice">
+          Reconnect to Wi-Fi or mobile data, then select <strong>Try Again</strong>
+          to enter the basin. Room invite links will be preserved automatically.
+        </div>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <button id="retry-btn" type="button">Try Again</button>
+      </div>
+    </main>
+    <script>
+      (function () {
+        var btn = document.getElementById('retry-btn');
+        var statusEl = document.getElementById('status');
+
+        function setStatus(msg) {
+          if (statusEl) statusEl.textContent = msg;
+        }
+
+        function retryLoad() {
+          setStatus('Checking connection…');
+          window.location.reload();
+        }
+
+        if (btn) {
+          btn.addEventListener('click', retryLoad);
+        }
+
+        window.addEventListener('online', function () {
+          setStatus('Connection restored. Tap Try Again to reload.');
+        });
+
+        window.addEventListener('offline', function () {
+          setStatus('Still offline.');
+        });
+      })();
+    </script>
+  </body>
+</html>

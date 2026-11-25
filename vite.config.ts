@@ -15,18 +15,23 @@ const UNREFERENCED_LEGACY_YOUTUBE_PNGS = [
 
 const ROOT_DIR = import.meta.dirname;
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   const rawTarget = (process.env.BUILD_TARGET || 'standalone').toLowerCase();
   const buildTarget =
     rawTarget === 'youtube' || rawTarget === 'android' ? rawTarget : 'standalone';
   const isYouTube = buildTarget === 'youtube';
+  const isStandaloneProd = command === 'build' && buildTarget === 'standalone';
   const outDir = isYouTube ? 'dist-youtube' : 'dist';
+  const releaseSeed = (process.env.RENDER_GIT_COMMIT || process.env.GITHUB_SHA || '').slice(0, 10);
+  const pwaCacheVersion = `v1-${releaseSeed ? `${releaseSeed}-` : ''}${Date.now().toString(36)}`;
 
   return {
     base: './',
     define: {
       __BUILD_TARGET__: JSON.stringify(buildTarget),
       __CORE_VERSION__: JSON.stringify('1.0.0-core-freeze'),
+      __PWA_ENABLED__: JSON.stringify(isStandaloneProd),
+      __PWA_CACHE_VERSION__: JSON.stringify(isStandaloneProd ? pwaCacheVersion : ''),
     },
     build: {
       outDir,
@@ -47,6 +52,62 @@ export default defineConfig(() => {
     plugins: [
       react(),
       tailwindcss(),
+      // Standalone production Web PWA transform & asset emitter:
+      // - Strictly active ONLY when `command === 'build' && buildTarget === 'standalone'`.
+      // - Excluded from dev mode, Android Capacitor builds, and YouTube Playables builds.
+      {
+        name: 'standalone-pwa-build',
+        transformIndexHtml(html: string) {
+          if (!isStandaloneProd) return html;
+          const pwaTags = [
+            '    <meta name="apple-mobile-web-app-capable" content="yes" />',
+            '    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />',
+            '    <meta name="apple-mobile-web-app-title" content="Awang Keli" />',
+            '    <link rel="apple-touch-icon" sizes="180x180" href="/pwa/apple-touch-icon.png" />',
+            '    <link rel="manifest" href="/manifest.webmanifest" />',
+          ].join('\n');
+          return html.replace(
+            '<meta name="mobile-web-app-capable" content="yes" />',
+            `<meta name="mobile-web-app-capable" content="yes" />\n${pwaTags}`
+          );
+        },
+        closeBundle(error?: Error): void {
+          if (error || !isStandaloneProd) return;
+          const resolvedOutDir = path.resolve(ROOT_DIR, outDir);
+          const pwaSrcDir = path.resolve(ROOT_DIR, 'pwa');
+          const pwaIconsSrcDir = path.join(pwaSrcDir, 'icons');
+          const pwaIconsOutDir = path.join(resolvedOutDir, 'pwa');
+
+          if (!fs.existsSync(resolvedOutDir) || !fs.existsSync(pwaSrcDir)) return;
+
+          // Copy manifest and lightweight offline fallback page
+          fs.copyFileSync(
+            path.join(pwaSrcDir, 'manifest.webmanifest'),
+            path.join(resolvedOutDir, 'manifest.webmanifest')
+          );
+          fs.copyFileSync(
+            path.join(pwaSrcDir, 'offline.html'),
+            path.join(resolvedOutDir, 'offline.html')
+          );
+
+          // Stamp a unique cache version into the standalone service worker per build
+          const swTemplate = fs.readFileSync(path.join(pwaSrcDir, 'sw.js'), 'utf8');
+          const stampedSw = swTemplate.replace(/__PWA_CACHE_VERSION__/g, pwaCacheVersion);
+          fs.writeFileSync(path.join(resolvedOutDir, 'sw.js'), stampedSw, 'utf8');
+
+          // Copy approved PNG icon variants into dist/pwa/
+          if (fs.existsSync(pwaIconsSrcDir)) {
+            fs.mkdirSync(pwaIconsOutDir, { recursive: true });
+            for (const entry of fs.readdirSync(pwaIconsSrcDir)) {
+              if (!entry.endsWith('.png')) continue;
+              fs.copyFileSync(
+                path.join(pwaIconsSrcDir, entry),
+                path.join(pwaIconsOutDir, entry)
+              );
+            }
+          }
+        },
+      },
       // YouTube Playables build compliance transform:
       // 1. Inject official YouTube Playables SDK script BEFORE any game script tags.
       // 2. Strip external Google Fonts CDN links so zero unauthorized network calls occur.

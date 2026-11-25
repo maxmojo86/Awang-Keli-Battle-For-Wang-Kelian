@@ -824,12 +824,28 @@ async function bootstrap() {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(
       express.static(distDir, {
-        setHeaders: (res) => {
+        setHeaders: (res, filePath) => {
           res.setHeader('Content-Disposition', 'inline');
+          const normalized = filePath.replace(/\\/g, '/');
+          if (normalized.endsWith('/sw.js')) {
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Service-Worker-Allowed', '/');
+          } else if (normalized.endsWith('/manifest.webmanifest')) {
+            res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (normalized.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
         },
       })
     );
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

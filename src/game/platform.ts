@@ -17,12 +17,15 @@ export interface PlatformCapabilities {
   readonly scoreSubmissionEnabled: boolean;
   readonly localStorageAllowed: boolean;
   readonly mobileControlsSupported: boolean;
+  readonly pwaEnabled: boolean;
   readonly modeDisplayLabel: string;
 }
 
 declare global {
   const __BUILD_TARGET__: BuildTarget | undefined;
   const __CORE_VERSION__: string | undefined;
+  const __PWA_ENABLED__: boolean | undefined;
+  const __PWA_CACHE_VERSION__: string | undefined;
 }
 
 export function getBuildTarget(): BuildTarget {
@@ -58,6 +61,26 @@ export interface PlatformRuntimeSignals {
   buildTarget?: BuildTarget;
   inYouTubePlayablesEnv?: boolean;
   isNativeAndroid?: boolean;
+  isProdBuild?: boolean;
+}
+
+function detectProductionBuild(): boolean {
+  try {
+    if (typeof __PWA_ENABLED__ === 'boolean') {
+      return __PWA_ENABLED__;
+    }
+  } catch {
+    // Running outside Vite bundle
+  }
+  try {
+    const env = (
+      import.meta as ImportMeta & { env?: { PROD?: boolean; DEV?: boolean } }
+    ).env;
+    if (typeof env?.PROD === 'boolean') return env.PROD && !env.DEV;
+  } catch {
+    // Ignore
+  }
+  return false;
 }
 
 function detectRuntimeYouTubeEnv(): boolean {
@@ -97,6 +120,11 @@ export function resolvePlatformCapabilities(
       ? signals.isNativeAndroid
       : detectRuntimeNativeAndroid();
 
+  const isProdBuild =
+    signals?.isProdBuild !== undefined
+      ? signals.isProdBuild
+      : detectProductionBuild();
+
   if (buildTarget === 'youtube' || inYtEnv) {
     return {
       platform: 'YOUTUBE_PLAYABLES',
@@ -113,6 +141,7 @@ export function resolvePlatformCapabilities(
       scoreSubmissionEnabled: true,
       localStorageAllowed: false,
       mobileControlsSupported: true,
+      pwaEnabled: false,
       modeDisplayLabel: 'AI Battle Royale',
     };
   }
@@ -133,6 +162,7 @@ export function resolvePlatformCapabilities(
       scoreSubmissionEnabled: false,
       localStorageAllowed: true,
       mobileControlsSupported: true,
+      pwaEnabled: false,
       modeDisplayLabel: 'Solo Royale',
     };
   }
@@ -152,6 +182,7 @@ export function resolvePlatformCapabilities(
     scoreSubmissionEnabled: false,
     localStorageAllowed: true,
     mobileControlsSupported: true,
+    pwaEnabled: isProdBuild,
     modeDisplayLabel: 'Solo Royale',
   };
 }

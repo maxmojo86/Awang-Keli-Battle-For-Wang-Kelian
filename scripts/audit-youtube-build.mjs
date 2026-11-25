@@ -99,6 +99,16 @@ export function auditYouTubeBuild(distDir = DIST_YT) {
     }
   }
 
+  // 2b. Verify zero standalone PWA artifacts or manifest links leaked into dist-youtube/
+  if (/rel=["']manifest["']/i.test(indexHtml)) {
+    errors.push('YouTube Playables index.html must not include a PWA manifest link');
+  }
+  for (const forbiddenPwaPath of ['manifest.webmanifest', 'sw.js', 'offline.html', 'pwa']) {
+    if (fs.existsSync(path.join(distDir, forbiddenPwaPath))) {
+      errors.push(`Standalone PWA artifact leaked into dist-youtube/: ${forbiddenPwaPath}`);
+    }
+  }
+
   // 3. Walk all built files, check size caps, inspect JS/CSS bundles for unauthorized URLs
   const allFiles = walkFiles(distDir);
   let totalBytes = 0;
