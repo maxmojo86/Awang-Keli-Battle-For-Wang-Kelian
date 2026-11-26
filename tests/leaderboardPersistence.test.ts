@@ -15,6 +15,7 @@ import {
   type LeaderboardStore,
   parseLegacyLeaderboardJson,
   PostgresLeaderboardStore,
+  resolvePgSslConfig,
   type SqlQueryExecutor,
 } from '../server/leaderboardStore.ts';
 import { attachMultiplayerServer, type MultiplayerHub } from '../server/multiplayerServer.ts';
@@ -147,6 +148,19 @@ async function startFullTestServer(
     tickIntervalMs: 16,
     leaderboardStore,
     logger: (line) => logs.push(line),
+  });
+
+  app.get('/api/health', async (_req, res) => {
+    const stats = hub.getHealthStats();
+    const leaderboardAvailable = await leaderboardStore.isAvailable();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      rooms: stats.rooms,
+      clients: stats.clients,
+      leaderboardStorage: leaderboardStore.storageKind,
+      leaderboardAvailable,
+    });
   });
 
   app.get('/api/leaderboard', async (req, res) => {
@@ -954,5 +968,136 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
     const swSource = fs.readFileSync(swPath, 'utf-8');
     assert.match(swSource, /url\.pathname\.startsWith\(['"]\/api\/['"]\)/, 'SW must exclude /api/* paths from cache');
     assert.match(swSource, /request\.method\s*!==\s*['"]GET['"]/, 'SW must ignore non-GET requests');
+  });
+
+  it('10. preserves Neon pooled TLS verification, reports live /api/health accurately, and migrates Render PG -> Neon losslessly without duplicates', async () => {
+    // 10a. Neon pooled URL TLS preservation
+    const neonUrl =
+      'postgresql://user:pass@ep-cool-forest-1234-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
+    assert.deepEqual(resolvePgSslConfig(neonUrl), { rejectUnauthorized: true });
+    assert.deepEqual(resolvePgSslConfig(neonUrl, undefined, 'false'), { rejectUnauthorized: false });
+    assert.equal(resolvePgSslConfig('postgresql://user:pass@localhost:5432/awangkeli'), false);
+
+    // 10b. Live /api/health check reflects real DB availability (true when healthy, false when failing)
+    const sourcePg = new PGlite();
+    const sourceStore = new PostgresLeaderboardStore({
+      executor: createPGliteExecutor(sourcePg),
+      retryBaseDelayMs: 10,
+    });
+    await sourceStore.init();
+
+    const targetPg = new PGlite();
+    const targetStore = new PostgresLeaderboardStore({
+      executor: createPGliteExecutor(targetPg),
+      retryBaseDelayMs: 10,
+    });
+    await targetStore.init();
+
+    const healthySrv = await startFullTestServer(sourceStore);
+    const brokenExecutor: SqlQueryExecutor = {
+      query: async () => {
+        throw new Error('database unreachable');
+      },
+    };
+    const brokenStore = new PostgresLeaderboardStore({ executor: brokenExecutor, retryBaseDelayMs: 5 });
+    const brokenSrv = await startFullTestServer(brokenStore);
+
+    try {
+      const okHealthRes = await fetch(`${healthySrv.baseUrl}/api/health`);
+      assert.equal(okHealthRes.status, 200);
+      const okHealth = (await okHealthRes.json()) as {
+        leaderboardStorage: string;
+        leaderboardAvailable: boolean;
+      };
+      assert.equal(okHealth.leaderboardStorage, 'postgres');
+      assert.equal(okHealth.leaderboardAvailable, true);
+
+      const badHealthRes = await fetch(`${brokenSrv.baseUrl}/api/health`);
+      assert.equal(badHealthRes.status, 200);
+      const badHealth = (await badHealthRes.json()) as {
+        leaderboardStorage: string;
+        leaderboardAvailable: boolean;
+      };
+      assert.equal(badHealth.leaderboardStorage, 'postgres');
+      assert.equal(badHealth.leaderboardAvailable, false);
+
+      // 10c. Render Postgres -> Neon Postgres lossless export & duplicate-free import
+      await sourceStore.recordMultiplayerResult({
+        matchId: 'match-render-01',
+        playerId: 'player-mujahid',
+        playerName: 'Mujahid',
+        region: 'SEA',
+        survivalTime: 192.4,
+        finalLevel: 100,
+        kills: 9,
+        victory: true,
+        lobbySize: 20,
+      });
+      await sourceStore.submitSolo({
+        submissionId: 'solo-render-01',
+        playerName: 'NordicKeli',
+        region: 'EU',
+        survivalTime: 134.8,
+        finalLevel: 68,
+        kills: 5,
+        victory: false,
+        lobbySize: 20,
+        mode: 'royale',
+      });
+
+      const exported = await sourceStore.exportRecords();
+      assert.equal(exported.length, 2);
+
+      // Source DB remains untouched
+      assert.equal((await sourceStore.query('ALL', 'longest', 100)).totalGlobal, 2);
+
+      // First import into target (Neon) DB preserves exact matchId, playerId, resultKey, region
+      const importPass1 = await targetStore.importLegacyRecords(exported);
+      assert.deepEqual(importPass1, {
+        totalRead: 2,
+        imported: 2,
+        skippedDuplicates: 0,
+        invalid: 0,
+      });
+
+      // Re-running import produces ZERO duplicates
+      const importPass2 = await targetStore.importLegacyRecords(exported);
+      assert.deepEqual(importPass2, {
+        totalRead: 2,
+        imported: 0,
+        skippedDuplicates: 2,
+        invalid: 0,
+      });
+
+      // Re-recording the same multiplayer matchId+playerId in Neon also deduplicates!
+      const postMigDup = await targetStore.recordMultiplayerResult({
+        matchId: 'match-render-01',
+        playerId: 'player-mujahid',
+        playerName: 'Mujahid',
+        region: 'SEA',
+        survivalTime: 192.4,
+        finalLevel: 100,
+        kills: 9,
+        victory: true,
+        lobbySize: 20,
+      });
+      assert.equal(postMigDup.ok, true);
+      if (postMigDup.ok) {
+        assert.equal(postMigDup.deduplicated, true);
+      }
+
+      const targetBoard = await targetStore.query('ALL', 'longest', 100);
+      assert.equal(targetBoard.totalGlobal, 2);
+      const migratedMp = targetBoard.entries.find((e) => e.playerName === 'Mujahid');
+      assert.ok(migratedMp);
+      assert.equal(migratedMp.matchId, 'match-render-01');
+      assert.equal(migratedMp.playerId, 'player-mujahid');
+      assert.equal(migratedMp.region, 'SEA');
+    } finally {
+      await healthySrv.shutdown();
+      await brokenSrv.shutdown();
+      await sourceStore.close();
+      await targetStore.close();
+    }
   });
 });

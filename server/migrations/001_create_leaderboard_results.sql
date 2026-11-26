@@ -19,12 +19,6 @@ CREATE TABLE IF NOT EXISTS leaderboard_results (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Ensure region constraint matches canonical RegionCode values even on existing tables
-ALTER TABLE leaderboard_results DROP CONSTRAINT IF EXISTS leaderboard_results_region_check;
-ALTER TABLE leaderboard_results
-  ADD CONSTRAINT leaderboard_results_region_check
-  CHECK (region IN ('SEA', 'APAC', 'NA', 'EU', 'SA', 'MEA'));
-
 -- Enforce strict idempotency for server-authoritative multiplayer results (one row per match + player)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_match_player
   ON leaderboard_results (match_id, player_id)

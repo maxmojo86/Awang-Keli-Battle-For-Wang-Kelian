@@ -16,6 +16,7 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "db:migrate": "node scripts/migrate-leaderboard.ts",
+    "db:export-leaderboard": "node scripts/export-leaderboard-json.ts",
     "db:import-leaderboard": "node scripts/import-leaderboard-json.ts",
     "cap:copy": "cap copy android",
     "cap:sync": "cap sync android",

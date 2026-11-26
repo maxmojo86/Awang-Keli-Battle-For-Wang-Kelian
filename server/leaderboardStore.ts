@@ -141,6 +141,7 @@ export interface LeaderboardStore {
     input: AuthoritativeMultiplayerResultInput
   ) => Promise<LeaderboardWriteOutcome>;
   importLegacyRecords: (rawRecords: unknown[]) => Promise<LegacyImportSummary>;
+  exportRecords: () => Promise<StoredLeaderboardRecord[]>;
   close: () => Promise<void>;
 }
 
@@ -278,20 +279,35 @@ function normalizeLegacyRecord(raw: unknown): StoredLeaderboardRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const id = typeof r.id === 'string' && r.id.trim() ? r.id.trim().slice(0, 96) : '';
+  const rawSubmissionId = r.submissionId ?? r.submission_id;
   const submissionId =
-    typeof r.submissionId === 'string' && r.submissionId.trim()
-      ? r.submissionId.trim().slice(0, 96)
+    typeof rawSubmissionId === 'string' && rawSubmissionId.trim()
+      ? rawSubmissionId.trim().slice(0, 96)
       : id;
   if (!id && !submissionId) return null;
+
+  const rawResultKey = r.resultKey ?? r.result_key;
+  const explicitResultKey =
+    typeof rawResultKey === 'string' && rawResultKey.trim()
+      ? rawResultKey.trim().slice(0, 140)
+      : '';
+
+  const rawMatchId = r.matchId ?? r.match_id;
+  const matchId =
+    typeof rawMatchId === 'string' && rawMatchId.trim() ? rawMatchId.trim().slice(0, 64) : null;
+
+  const rawPlayerId = r.playerId ?? r.player_id;
+  const playerId =
+    typeof rawPlayerId === 'string' && rawPlayerId.trim() ? rawPlayerId.trim().slice(0, 64) : null;
 
   const regionRaw = typeof r.region === 'string' ? r.region.trim().toUpperCase() : '';
   if (!VALID_REGION_CODES.has(regionRaw as RegionCode)) return null;
 
-  const survivalTimeRaw = Number(r.survivalTime);
+  const survivalTimeRaw = Number(r.survivalTime ?? r.survival_time);
   if (!Number.isFinite(survivalTimeRaw) || survivalTimeRaw < 1 || survivalTimeRaw > 7200) return null;
   const survivalTime = Math.round(survivalTimeRaw * 100) / 100;
 
-  const finalLevelRaw = Number(r.finalLevel);
+  const finalLevelRaw = Number(r.finalLevel ?? r.final_level);
   if (!Number.isFinite(finalLevelRaw)) return null;
   const finalLevel = Math.max(1, Math.min(100, Math.round(finalLevelRaw)));
 
@@ -302,26 +318,33 @@ function normalizeLegacyRecord(raw: unknown): StoredLeaderboardRecord | null {
   if (typeof r.victory !== 'boolean') return null;
   if (r.mode !== 'royale' && r.mode !== 'multiplayer') return null;
 
-  const achievedAtRaw = typeof r.achievedAt === 'string' ? r.achievedAt : '';
+  const rawAchievedAt = r.achievedAt ?? r.achieved_at;
+  const achievedAtRaw = typeof rawAchievedAt === 'string' ? rawAchievedAt : '';
   const achievedDate = new Date(achievedAtRaw);
   const achievedAt = Number.isNaN(achievedDate.getTime())
     ? new Date().toISOString()
     : achievedDate.toISOString();
 
   const stableKeySource = submissionId || id;
+  const resultKey =
+    explicitResultKey ||
+    (r.mode === 'multiplayer' && matchId && playerId
+      ? buildMultiplayerResultKey(matchId, playerId)
+      : buildLegacyResultKey(stableKeySource));
+
   return {
     id: id || `imp-${stableKeySource}`,
-    resultKey: buildLegacyResultKey(stableKeySource),
+    resultKey,
     submissionId: stableKeySource,
-    matchId: null,
-    playerId: null,
-    playerName: sanitizeName(r.playerName),
+    matchId,
+    playerId,
+    playerName: sanitizeName(r.playerName ?? r.player_name),
     region: regionRaw as RegionCode,
     survivalTime,
     finalLevel,
     kills,
     victory: r.victory,
-    lobbySize: sanitizeLobbySize(r.lobbySize, r.mode === 'multiplayer'),
+    lobbySize: sanitizeLobbySize(r.lobbySize ?? r.lobby_size, r.mode === 'multiplayer'),
     mode: r.mode,
     achievedAt,
   };
@@ -366,6 +389,7 @@ export function resolvePgSslConfig(
 
   const isLocalHost =
     parsedHost === 'localhost' || parsedHost === '127.0.0.1' || parsedHost === '::1';
+  const isNeonHost = parsedHost.endsWith('.neon.tech');
   const isRemoteFqdn = Boolean(parsedHost && !isLocalHost && parsedHost.includes('.'));
   const wantsSsl =
     normalized === 'true' ||
@@ -375,6 +399,7 @@ export function resolvePgSslConfig(
     sslModeParam === 'prefer' ||
     sslModeParam === 'verify-full' ||
     sslModeParam === 'verify-ca' ||
+    isNeonHost ||
     isRemoteFqdn ||
     (!isLocalHost && process.env.NODE_ENV === 'production');
 
@@ -386,7 +411,7 @@ export function resolvePgSslConfig(
       ? false
       : rejectFlag === 'true' || rejectFlag === '1'
         ? true
-        : sslModeParam === 'verify-full' || sslModeParam === 'verify-ca';
+        : isNeonHost || sslModeParam === 'verify-full' || sslModeParam === 'verify-ca';
 
   return { rejectUnauthorized };
 }
@@ -460,7 +485,9 @@ export class PostgresLeaderboardStore implements LeaderboardStore {
         ssl: options.ssl,
         max: 10,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 8000,
+        connectionTimeoutMillis: 15000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
       });
       pool.on('error', (err) => {
         this.logger(`[LEADERBOARD] event=pool_error reason=${sanitizeErrorReason(err)}`);
@@ -485,12 +512,40 @@ export class PostgresLeaderboardStore implements LeaderboardStore {
     for (const stmt of statements) {
       await this.executor.query(stmt);
     }
+    await this.ensureCanonicalRegionConstraint();
     this.initialized = true;
+  }
+
+  private async ensureCanonicalRegionConstraint(): Promise<void> {
+    try {
+      const checkRes = await this.executor.query<{ condef: string }>(`
+        SELECT pg_get_constraintdef(c.oid) AS condef
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'leaderboard_results'
+          AND c.conname = 'leaderboard_results_region_check'
+        LIMIT 1
+      `);
+      const existingDef = checkRes.rows[0]?.condef ?? '';
+      if (existingDef && existingDef.includes('APAC')) {
+        return;
+      }
+      if (existingDef) {
+        await this.executor.query(
+          'ALTER TABLE leaderboard_results DROP CONSTRAINT IF EXISTS leaderboard_results_region_check'
+        );
+        await this.executor.query(
+          "ALTER TABLE leaderboard_results ADD CONSTRAINT leaderboard_results_region_check CHECK (region IN ('SEA', 'APAC', 'NA', 'EU', 'SA', 'MEA'))"
+        );
+      }
+    } catch {
+      // Ignore catalog check errors on restricted/mocked executors; canonical table constraint already applies on new tables.
+    }
   }
 
   public async isAvailable(): Promise<boolean> {
     try {
-      await this.executor.query('SELECT 1 AS ok');
+      await this.executor.query('SELECT 1 FROM leaderboard_results LIMIT 0');
       return true;
     } catch {
       return false;
@@ -950,6 +1005,52 @@ export class PostgresLeaderboardStore implements LeaderboardStore {
     return summary;
   }
 
+  public async exportRecords(): Promise<StoredLeaderboardRecord[]> {
+    await this.ensureInitialized();
+    const res = await this.executor.query<{
+      id: string;
+      result_key: string;
+      submission_id: string;
+      match_id: string | null;
+      player_id: string | null;
+      player_name: string;
+      region: string;
+      survival_time: number | string;
+      final_level: number | string;
+      kills: number | string;
+      victory: boolean;
+      lobby_size: number | string;
+      mode: string;
+      achieved_at: Date | string;
+    }>(`
+      SELECT
+        id, result_key, submission_id, match_id, player_id,
+        player_name, region, survival_time, final_level, kills,
+        victory, lobby_size, mode, achieved_at
+      FROM leaderboard_results
+      ORDER BY achieved_at ASC, id ASC
+    `);
+    return res.rows.map((row) => ({
+      id: String(row.id),
+      resultKey: String(row.result_key),
+      submissionId: String(row.submission_id),
+      matchId: row.match_id ? String(row.match_id) : null,
+      playerId: row.player_id ? String(row.player_id) : null,
+      playerName: String(row.player_name),
+      region: String(row.region) as RegionCode,
+      survivalTime: Math.round(Number(row.survival_time) * 100) / 100,
+      finalLevel: Number(row.final_level),
+      kills: Number(row.kills),
+      victory: Boolean(row.victory),
+      lobbySize: Number(row.lobby_size) as LobbySize,
+      mode: row.mode === 'multiplayer' ? 'multiplayer' : 'royale',
+      achievedAt:
+        row.achieved_at instanceof Date
+          ? row.achieved_at.toISOString()
+          : new Date(String(row.achieved_at)).toISOString(),
+    }));
+  }
+
   public async close(): Promise<void> {
     if (this.executor.close) {
       await this.executor.close();
@@ -1225,6 +1326,10 @@ export class DevJsonLeaderboardStore implements LeaderboardStore {
     return summary;
   }
 
+  public async exportRecords(): Promise<StoredLeaderboardRecord[]> {
+    return [...this.records];
+  }
+
   public async close(): Promise<void> {}
 }
 
@@ -1278,6 +1383,10 @@ export class UnavailableLeaderboardStore implements LeaderboardStore {
   }
 
   public async importLegacyRecords(): Promise<LegacyImportSummary> {
+    throw new LeaderboardStorageUnavailableError(this.reason);
+  }
+
+  public async exportRecords(): Promise<StoredLeaderboardRecord[]> {
     throw new LeaderboardStorageUnavailableError(this.reason);
   }
 
