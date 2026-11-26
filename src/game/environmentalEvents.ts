@@ -690,7 +690,19 @@ export class EnvironmentalEventDirector {
     this.lobbySize = options.lobbySize;
     this.matchSeed = options.matchSeed;
     this.enabled = options.enabled ?? true;
-    this.profile = LOBBY_EVENT_SCHEDULES[options.lobbySize];
+    this.profile =
+      LOBBY_EVENT_SCHEDULES[options.lobbySize] ??
+      (options.lobbySize <= 5
+        ? LOBBY_EVENT_SCHEDULES[5]
+        : options.lobbySize <= 10
+          ? LOBBY_EVENT_SCHEDULES[10]
+          : options.lobbySize <= 20
+            ? LOBBY_EVENT_SCHEDULES[20]
+            : options.lobbySize <= 25
+              ? LOBBY_EVENT_SCHEDULES[25]
+              : options.lobbySize <= 50
+                ? LOBBY_EVENT_SCHEDULES[50]
+                : LOBBY_EVENT_SCHEDULES[100]);
     this.rng = createEventRng((options.matchSeed ^ 0x51a7e08) >>> 0);
     this.nextEventTime = this.randRange(
       this.profile.firstEventMinSec,

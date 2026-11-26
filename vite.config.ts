@@ -36,6 +36,10 @@ export default defineConfig(({ command, mode }) => {
   if (!isStandalone && 'VITE_SUPPORT_URL' in process.env) {
     delete process.env.VITE_SUPPORT_URL;
   }
+  if (isYouTube) {
+    delete process.env.VITE_API_BASE_URL;
+    delete process.env.VITE_WS_URL;
+  }
 
   return {
     base: './',
@@ -48,6 +52,12 @@ export default defineConfig(({ command, mode }) => {
       __DEFAULT_SUPPORT_URL__: JSON.stringify(isStandalone ? DEFAULT_STANDALONE_SUPPORT_URL : ''),
       __SUPPORT_URL_OVERRIDE__: JSON.stringify(rawSupportOverride),
       ...(!isStandalone ? { 'import.meta.env.VITE_SUPPORT_URL': JSON.stringify('') } : {}),
+      ...(isYouTube
+        ? {
+            'import.meta.env.VITE_API_BASE_URL': JSON.stringify(''),
+            'import.meta.env.VITE_WS_URL': JSON.stringify(''),
+          }
+        : {}),
     },
     build: {
       outDir,
@@ -71,6 +81,10 @@ export default defineConfig(({ command, mode }) => {
         configResolved(resolvedConfig) {
           if (!isStandalone && resolvedConfig.env && 'VITE_SUPPORT_URL' in resolvedConfig.env) {
             delete resolvedConfig.env.VITE_SUPPORT_URL;
+          }
+          if (isYouTube && resolvedConfig.env) {
+            delete resolvedConfig.env.VITE_API_BASE_URL;
+            delete resolvedConfig.env.VITE_WS_URL;
           }
         },
       },

@@ -341,8 +341,16 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         const spoofBody = (await spoofRes.json()) as { code: string };
         assert.equal(spoofBody.code, 'MULTIPLAYER_CLIENT_REJECTED');
 
-        const w1P = c1.waitFor((m): m is Extract<ServerMessage, { type: 'welcome' }> => m.type === 'welcome');
-        const w2P = c2.waitFor((m): m is Extract<ServerMessage, { type: 'welcome' }> => m.type === 'welcome');
+        const w1P = c1.waitFor(
+          (m): m is Extract<ServerMessage, { type: 'welcome' }> => m.type === 'welcome',
+          8000,
+          true
+        );
+        const w2P = c2.waitFor(
+          (m): m is Extract<ServerMessage, { type: 'welcome' }> => m.type === 'welcome',
+          8000,
+          true
+        );
         await Promise.all([c1.waitForOpen(), c2.waitForOpen()]);
         const [w1, w2] = await Promise.all([w1P, w2P]);
 
@@ -966,7 +974,8 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
   it('9. PWA service worker excludes /api/leaderboard from caching', () => {
     const swPath = path.resolve(process.cwd(), 'pwa', 'sw.js');
     const swSource = fs.readFileSync(swPath, 'utf-8');
-    assert.match(swSource, /url\.pathname\.startsWith\(['"]\/api\/['"]\)/, 'SW must exclude /api/* paths from cache');
+    assert.match(swSource, /pathname\.startsWith\(['"]\/api\/['"]\)/, 'SW must exclude /api/* paths from cache');
+    assert.match(swSource, /isExcludedPath\(url\.pathname\)/, 'SW fetch handler must call isExcludedPath');
     assert.match(swSource, /request\.method\s*!==\s*['"]GET['"]/, 'SW must ignore non-GET requests');
   });
 
