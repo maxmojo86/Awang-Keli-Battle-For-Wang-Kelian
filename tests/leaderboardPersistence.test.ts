@@ -349,7 +349,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
           type: 'room:join',
           code: roomCode,
           playerName: 'Tester',
-          region: 'EUR',
+          region: 'EU',
         });
         await joined2P;
 
@@ -381,7 +381,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         assert.equal(lb1.regionalRank, 1);
 
         assert.equal(lb2.status, 'saved');
-        assert.equal(lb2.region, 'EUR');
+        assert.equal(lb2.region, 'EU');
         assert.equal(lb2.regionalRank, 1);
       } finally {
         await c1.close();
@@ -430,7 +430,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         assert.equal(mujahid.mode, 'multiplayer');
         assert.equal(mujahid.matchId, matchId);
 
-        assert.equal(tester.region, 'EUR');
+        assert.equal(tester.region, 'EU');
         assert.equal(tester.victory, false);
         assert.equal(tester.mode, 'multiplayer');
         assert.equal(tester.matchId, matchId);
@@ -465,16 +465,16 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       const roomCode = (await joined1P).room.code;
 
       const joined2P = c2.waitFor((m): m is Extract<ServerMessage, { type: 'room:joined' }> => m.type === 'room:joined');
-      c2.send({ type: 'room:join', code: roomCode, playerName: 'Tester', region: 'NAM' });
+      c2.send({ type: 'room:join', code: roomCode, playerName: 'Tester', region: 'NA' });
       await joined2P;
 
       // Update Tester's region in lobby before match 1 to EUR via room:region
       const regionUpdatedP = c1.waitFor(
         (m): m is Extract<ServerMessage, { type: 'room:state' }> =>
           m.type === 'room:state' &&
-          m.room.participants.some((p) => p.id === w2.clientId && p.region === 'EUR')
+          m.room.participants.some((p) => p.id === w2.clientId && p.region === 'EU')
       );
-      c2.send({ type: 'room:region', region: 'EUR' });
+      c2.send({ type: 'room:region', region: 'EU' });
       await regionUpdatedP;
 
       // --- MATCH 1 ---
@@ -523,7 +523,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         c2Re.send({
           type: 'room:join',
           code: roomCode,
-          playerName: 'Awang', // Client fallback — server must preserve 'Tester' & 'EUR'
+          playerName: 'Awang', // Client fallback — server must preserve 'Tester' & 'EU'
           clientId: w2.clientId,
         });
         await reStartP;
@@ -540,13 +540,13 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       assert.equal(match1Rows.length, 2);
       assert.equal(match2Rows.length, 2);
       assert.equal(match2Rows.find((e) => e.playerId === w2.clientId)?.playerName, 'Tester');
-      assert.equal(match2Rows.find((e) => e.playerId === w2.clientId)?.region, 'EUR');
+      assert.equal(match2Rows.find((e) => e.playerId === w2.clientId)?.region, 'EU');
 
       // Also verify solo POST idempotency on repeated submissionId
       const soloPayload = {
         submissionId: 'solo-retry-idempotent-1',
         playerName: 'SoloFisher',
-        region: 'EAS',
+        region: 'APAC',
         survivalTime: 45.5,
         finalLevel: 72,
         kills: 6,
@@ -598,7 +598,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       const roomCode = (await joined1P).room.code;
 
       const joined2P = c2.waitFor((m): m is Extract<ServerMessage, { type: 'room:joined' }> => m.type === 'room:joined');
-      c2.send({ type: 'room:join', code: roomCode, playerName: 'EarlyLeaver', region: 'OCE' });
+      c2.send({ type: 'room:join', code: roomCode, playerName: 'EarlyLeaver', region: 'APAC' });
       await joined2P;
 
       const startP = c1.waitFor((m): m is Extract<ServerMessage, { type: 'match:started' }> => m.type === 'match:started');
@@ -613,7 +613,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       const leaver = board.entries.find((e) => e.playerName === 'EarlyLeaver');
       const winner = board.entries.find((e) => e.playerName === 'Mujahid');
       assert.ok(leaver, 'Eliminated player who disconnected early must still be persisted');
-      assert.equal(leaver.region, 'OCE');
+      assert.equal(leaver.region, 'APAC');
       assert.equal(leaver.victory, false);
       assert.ok(leaver.survivalTime >= 18);
       assert.ok(winner);
@@ -649,11 +649,11 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         // Longest survival (300s), slower king
         { matchId: 'm-1', playerId: 'p-1', playerName: 'AlphaSEA', region: 'SEA', survivalTime: 300, finalLevel: 100, kills: 7, victory: true },
         // Second longest (250s), EUR #1 longest, not a king
-        { matchId: 'm-2', playerId: 'p-2', playerName: 'BetaEUR', region: 'EUR', survivalTime: 250, finalLevel: 85, kills: 15, victory: false },
+        { matchId: 'm-2', playerId: 'p-2', playerName: 'BetaEUR', region: 'EU', survivalTime: 250, finalLevel: 85, kills: 15, victory: false },
         // Fastest Keli King (95s), EUR #2 longest, EUR #1 fastest_king
-        { matchId: 'm-3', playerId: 'p-3', playerName: 'FastKingEUR', region: 'EUR', survivalTime: 95, finalLevel: 100, kills: 10, victory: true },
+        { matchId: 'm-3', playerId: 'p-3', playerName: 'FastKingEUR', region: 'EU', survivalTime: 95, finalLevel: 100, kills: 10, victory: true },
         // Second fastest Keli King (140s), NAM #1
-        { matchId: 'm-4', playerId: 'p-4', playerName: 'SpeedNAM', region: 'NAM', survivalTime: 140, finalLevel: 100, kills: 12, victory: true },
+        { matchId: 'm-4', playerId: 'p-4', playerName: 'SpeedNAM', region: 'NA', survivalTime: 140, finalLevel: 100, kills: 12, victory: true },
         // Most kills (22), SEA #2 longest
         { matchId: 'm-5', playerId: 'p-5', playerName: 'HunterSEA', region: 'SEA', survivalTime: 180, finalLevel: 90, kills: 22, victory: false },
       ];
@@ -675,7 +675,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       );
 
       // --- Sort: longest filtered by EUR -> globalRank stays 2 & 5 while regionalRank is 1 & 2 ---
-      const longestEur = await store.query('EUR', 'longest', 100);
+      const longestEur = await store.query('EU', 'longest', 100);
       assert.equal(longestEur.totalGlobal, 5);
       assert.equal(longestEur.totalMatching, 2);
       assert.deepEqual(
@@ -716,7 +716,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
         killsAll.entries.map((e) => e.playerName),
         ['HunterSEA', 'BetaEUR', 'SpeedNAM', 'FastKingEUR', 'AlphaSEA']
       );
-      const killsEur = await store.query('EUR', 'kills', 100);
+      const killsEur = await store.query('EU', 'kills', 100);
       assert.deepEqual(
         killsEur.entries.map((e) => ({
           name: e.playerName,
@@ -735,7 +735,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
           matchId: `bulk-${i}`,
           playerId: `p-bulk-${i}`,
           playerName: `Swimmer${i}`,
-          region: i % 2 === 0 ? 'SEA' : 'EUR',
+          region: i % 2 === 0 ? 'SEA' : 'EU',
           survivalTime: 10 + (i % 50),
           finalLevel: 20,
           kills: 1,
@@ -827,7 +827,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       const roomCode = (await joined1P).room.code;
 
       const joined2P = c2.waitFor((m): m is Extract<ServerMessage, { type: 'room:joined' }> => m.type === 'room:joined');
-      c2.send({ type: 'room:join', code: roomCode, playerName: 'Tester', region: 'EUR' });
+      c2.send({ type: 'room:join', code: roomCode, playerName: 'Tester', region: 'EU' });
       await joined2P;
 
       const startP = c1.waitFor((m): m is Extract<ServerMessage, { type: 'match:started' }> => m.type === 'match:started');
@@ -892,7 +892,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
           id: 'gl-legacy-2',
           submissionId: 'sub-legacy-2',
           playerName: 'OldScout',
-          region: 'EUR',
+          region: 'EU',
           survivalTime: 88.2,
           finalLevel: 45,
           kills: 3,
@@ -943,7 +943,7 @@ describe('Durable PostgreSQL global & regional leaderboard persistence', () => {
       assert.equal(board.entries[0].playerName, 'OldChampion');
       assert.equal(board.entries[0].region, 'SEA');
       assert.equal(board.entries[1].playerName, 'OldScout');
-      assert.equal(board.entries[1].region, 'EUR');
+      assert.equal(board.entries[1].region, 'EU');
     } finally {
       await store.close();
     }

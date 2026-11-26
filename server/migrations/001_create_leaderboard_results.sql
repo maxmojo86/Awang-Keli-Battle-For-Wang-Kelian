@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS leaderboard_results (
   match_id TEXT NULL,
   player_id TEXT NULL,
   player_name TEXT NOT NULL,
-  region TEXT NOT NULL CHECK (region IN ('SEA', 'EAS', 'SAS', 'EUR', 'NAM', 'SAM', 'OCE', 'MEA')),
+  region TEXT NOT NULL CONSTRAINT leaderboard_results_region_check CHECK (region IN ('SEA', 'APAC', 'NA', 'EU', 'SA', 'MEA')),
   survival_time DOUBLE PRECISION NOT NULL CHECK (survival_time >= 0 AND survival_time <= 7200),
   final_level INTEGER NOT NULL CHECK (final_level >= 1 AND final_level <= 100),
   kills INTEGER NOT NULL CHECK (kills >= 0 AND kills <= 99),
@@ -18,6 +18,12 @@ CREATE TABLE IF NOT EXISTS leaderboard_results (
   achieved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Ensure region constraint matches canonical RegionCode values even on existing tables
+ALTER TABLE leaderboard_results DROP CONSTRAINT IF EXISTS leaderboard_results_region_check;
+ALTER TABLE leaderboard_results
+  ADD CONSTRAINT leaderboard_results_region_check
+  CHECK (region IN ('SEA', 'APAC', 'NA', 'EU', 'SA', 'MEA'));
 
 -- Enforce strict idempotency for server-authoritative multiplayer results (one row per match + player)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_match_player

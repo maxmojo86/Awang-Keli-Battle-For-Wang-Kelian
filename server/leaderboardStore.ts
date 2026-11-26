@@ -366,13 +366,16 @@ export function resolvePgSslConfig(
 
   const isLocalHost =
     parsedHost === 'localhost' || parsedHost === '127.0.0.1' || parsedHost === '::1';
+  const isRemoteFqdn = Boolean(parsedHost && !isLocalHost && parsedHost.includes('.'));
   const wantsSsl =
     normalized === 'true' ||
     normalized === '1' ||
     normalized === 'require' ||
     sslModeParam === 'require' ||
+    sslModeParam === 'prefer' ||
     sslModeParam === 'verify-full' ||
     sslModeParam === 'verify-ca' ||
+    isRemoteFqdn ||
     (!isLocalHost && process.env.NODE_ENV === 'production');
 
   if (!wantsSsl) return false;
