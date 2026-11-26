@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { VALID_EMOTE_IDS } from '../src/data/emotes.ts';
+import { type RegionCode, VALID_REGION_CODES } from '../src/data/regions.ts';
 import {
   normalizeRoomCode,
   type ClientMessage,
@@ -13,6 +14,7 @@ import {
 } from '../src/game/multiplayerTypes.ts';
 import { GameSimulation } from '../src/game/simulation.ts';
 import type { AbilityId, LobbySize } from '../src/game/types.ts';
+import type { LeaderboardStore } from './leaderboardStore.ts';
 
 const VALID_LOBBY_SIZES = new Set<LobbySize>([5, 10, 20, 25, 50, 100]);
 const VALID_ABILITIES = new Set<AbilityId>([
@@ -28,6 +30,7 @@ const VALID_ABILITIES = new Set<AbilityId>([
 interface ConnectedClient {
   id: string;
   name: string;
+  region: RegionCode;
   ws: WebSocket;
   roomCode: string | null;
   lastAbilityAtByType: Partial<Record<AbilityId, number>>;
@@ -36,10 +39,19 @@ interface ConnectedClient {
 interface RoomMember {
   id: string;
   name: string;
+  region: RegionCode;
   ready: boolean;
   connected: boolean;
   voiceEnabled: boolean;
   voiceMuted: boolean;
+}
+
+interface MatchParticipantRun {
+  id: string;
+  name: string;
+  region: RegionCode;
+  persistedOrSettled: boolean;
+  persistInFlight: boolean;
 }
 
 interface RoomRecord {
@@ -51,6 +63,7 @@ interface RoomRecord {
   status: RoomStatus;
   matchId: string | null;
   members: Map<string, RoomMember>;
+  matchParticipants: Map<string, MatchParticipantRun>;
   chat: RoomChatMessage[];
   sim: GameSimulation | null;
   tick: number;
@@ -65,6 +78,7 @@ export interface MultiplayerServerOptions {
   silentLogs?: boolean;
   logger?: (line: string) => void;
   tickIntervalMs?: number;
+  leaderboardStore?: LeaderboardStore;
 }
 
 export interface MultiplayerHub {
@@ -72,6 +86,7 @@ export interface MultiplayerHub {
   getRoomSummaries: () => RoomSummary[];
   getHealthStats: () => { rooms: number; clients: number };
   getRoomSimulation: (code: string) => GameSimulation | null;
+  waitForPendingPersistence: () => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -88,6 +103,12 @@ function sanitizeName(raw: unknown, fallback = 'Awang'): string {
   return cleaned || fallback;
 }
 
+function sanitizeRegion(raw: unknown, fallback: RegionCode = 'SEA'): RegionCode {
+  if (typeof raw !== 'string') return fallback;
+  const upper = raw.trim().toUpperCase();
+  return VALID_REGION_CODES.has(upper as RegionCode) ? (upper as RegionCode) : fallback;
+}
+
 function isDefaultPlaceholderName(raw: unknown): boolean {
   if (typeof raw !== 'string') return true;
   const cleaned = raw.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -101,10 +122,12 @@ export function attachMultiplayerServer(
   const clients = new Map<WebSocket, ConnectedClient>();
   const clientsById = new Map<string, ConnectedClient>();
   const rooms = new Map<string, RoomRecord>();
+  const pendingPersistPromises = new Set<Promise<void>>();
 
   const wsPath = options.path ?? '/ws';
   const simDt = 1 / 30;
   const tickIntervalMs = options.tickIntervalMs ?? Math.round(simDt * 1000);
+  const leaderboardStore = options.leaderboardStore;
   const logFn = options.silentLogs
     ? () => {}
     : options.logger ?? ((line: string) => console.log(line));
@@ -193,6 +216,7 @@ export function attachMultiplayerServer(
       participants.push({
         id: member.id,
         name: member.name,
+        region: member.region,
         isHost: member.id === room.hostId,
         ready: member.ready,
         connected: member.connected,
@@ -264,6 +288,119 @@ export function attachMultiplayerServer(
     }, 30000);
   }
 
+  /**
+   * Authoritatively persists finalized multiplayer participant results on the server.
+   * Fires once per participant as soon as they are eliminated or when the match concludes,
+   * independently of whether the player remains connected or reaches the summary screen.
+   */
+  function persistFinalizedParticipants(room: RoomRecord, matchEnded: boolean) {
+    if (!leaderboardStore || !room.sim || !room.matchId) return;
+    const sim = room.sim;
+    const matchId = room.matchId;
+    const roomCode = room.code;
+    const effectiveLobbySize = sim.kelis.length;
+
+    for (const run of room.matchParticipants.values()) {
+      if (run.persistedOrSettled || run.persistInFlight) continue;
+
+      const keli = sim.kelis.find((k) => k.id === run.id);
+      const isFinalized = matchEnded || !keli || !keli.alive;
+      if (!isFinalized) continue;
+
+      const hud = sim.getHudSnapshot(run.id);
+      const victory =
+        hud.matchResult.status === 'victory' && Math.round(hud.matchResult.finalLevel) >= 100;
+      const survivalTime = Math.max(0, Number(hud.matchResult.survivalTime.toFixed(2)));
+      const finalLevel = Math.max(1, Math.min(100, Math.round(hud.matchResult.finalLevel)));
+      const kills = Math.max(0, Math.floor(hud.matchResult.kills));
+
+      run.persistInFlight = true;
+      const task = (async () => {
+        try {
+          const outcome = await leaderboardStore.recordMultiplayerResult({
+            matchId,
+            playerId: run.id,
+            playerName: run.name,
+            region: run.region,
+            survivalTime,
+            finalLevel,
+            kills,
+            victory,
+            lobbySize: effectiveLobbySize,
+          });
+          run.persistedOrSettled = true;
+          run.persistInFlight = false;
+
+          const recipient = clientsById.get(run.id);
+          if (outcome.ok) {
+            logEvent('leaderboard_saved', {
+              room: roomCode,
+              match: matchId,
+              player: run.id,
+              detail: `region=${outcome.result.entry.region},gRank=${outcome.result.globalRank ?? '-'},rRank=${outcome.result.regionalRank ?? '-'}`,
+            });
+            sendToClient(recipient, {
+              type: 'leaderboard:result',
+              matchId,
+              playerId: run.id,
+              status: 'saved',
+              globalRank: outcome.result.globalRank,
+              regionalRank: outcome.result.regionalRank,
+              region: outcome.result.entry.region,
+            });
+          } else {
+            const status =
+              outcome.code === 'INELIGIBLE_RUN'
+                ? 'ineligible'
+                : outcome.code === 'DB_UNAVAILABLE'
+                  ? 'unavailable'
+                  : 'failed';
+            logEvent('leaderboard_not_saved', {
+              room: roomCode,
+              match: matchId,
+              player: run.id,
+              detail: `status=${status},code=${outcome.code}`,
+            });
+            sendToClient(recipient, {
+              type: 'leaderboard:result',
+              matchId,
+              playerId: run.id,
+              status,
+              globalRank: null,
+              regionalRank: null,
+              region: run.region,
+              error: outcome.error,
+            });
+          }
+        } catch {
+          run.persistedOrSettled = true;
+          run.persistInFlight = false;
+          logEvent('leaderboard_not_saved', {
+            room: roomCode,
+            match: matchId,
+            player: run.id,
+            detail: 'status=failed,code=UNEXPECTED_ERROR',
+          });
+          sendToClient(clientsById.get(run.id), {
+            type: 'leaderboard:result',
+            matchId,
+            playerId: run.id,
+            status: 'failed',
+            globalRank: null,
+            regionalRank: null,
+            region: run.region,
+            error: 'Unable to save multiplayer leaderboard result.',
+          });
+        }
+      })();
+
+      pendingPersistPromises.add(task);
+      void task.finally(() => {
+        pendingPersistPromises.delete(task);
+      });
+    }
+  }
+
   function leaveCurrentRoom(client: ConnectedClient, permanent: boolean) {
     if (!client.roomCode) return;
     const room = rooms.get(client.roomCode);
@@ -276,8 +413,10 @@ export function attachMultiplayerServer(
 
     if (permanent) {
       if (room.status === 'playing' && room.sim) {
-        // AI takes over so 100-fragment conservation never breaks
+        // AI takes over so 100-fragment conservation never breaks;
+        // matchParticipants retains participant metadata so final result still persists!
         room.sim.setHumanConnected(client.id, false);
+        persistFinalizedParticipants(room, false);
       }
       room.members.delete(client.id);
       pushSystemChat(room, `${member.name} left the basin.`);
@@ -301,6 +440,7 @@ export function attachMultiplayerServer(
       member.voiceEnabled = false;
       if (room.status === 'playing' && room.sim) {
         room.sim.setHumanConnected(client.id, false);
+        persistFinalizedParticipants(room, false);
       }
       logEvent('room_disconnect_slot_held', {
         room: oldCode,
@@ -367,6 +507,18 @@ export function attachMultiplayerServer(
     room.tick = 0;
     room.broadcastCounter = 0;
     room.matchEndedSent = false;
+    room.matchParticipants = new Map(
+      connectedMembers.map((m) => [
+        m.id,
+        {
+          id: m.id,
+          name: m.name,
+          region: m.region,
+          persistedOrSettled: false,
+          persistInFlight: false,
+        },
+      ])
+    );
 
     logEvent('match_start', {
       room: room.code,
@@ -411,8 +563,11 @@ export function attachMultiplayerServer(
       room.tick += 1;
       room.broadcastCounter += 1;
 
-      // Broadcast world state at ~20 Hz (ticks 0, 2, 3, 5... or every tick when ending)
       const finished = room.sim.status !== 'playing';
+      // Persist any eliminated participant immediately (and all remaining participants on finish)
+      persistFinalizedParticipants(room, finished);
+
+      // Broadcast world state at ~20 Hz (ticks 0, 2, 3, 5... or every tick when ending)
       const shouldBroadcast = finished || room.tick % 2 === 0 || room.tick % 3 === 0;
       const activeMatchId = room.matchId;
 
@@ -483,6 +638,7 @@ export function attachMultiplayerServer(
       case 'room:create': {
         leaveCurrentRoom(client, true);
         client.name = sanitizeName(msg.playerName, client.name);
+        client.region = sanitizeRegion(msg.region, client.region);
         const code = generateRoomCode();
         const lobbySize: LobbySize = VALID_LOBBY_SIZES.has(msg.lobbySize) ? msg.lobbySize : 20;
         const roomName =
@@ -504,6 +660,7 @@ export function attachMultiplayerServer(
               {
                 id: client.id,
                 name: client.name,
+                region: client.region,
                 ready: true,
                 connected: true,
                 voiceEnabled: false,
@@ -511,6 +668,7 @@ export function attachMultiplayerServer(
               },
             ],
           ]),
+          matchParticipants: new Map(),
           chat: [],
           sim: null,
           tick: 0,
@@ -526,7 +684,7 @@ export function attachMultiplayerServer(
         logEvent('room_create', {
           room: code,
           player: client.id,
-          detail: `lobbySize=${lobbySize},bots=${room.fillWithBots}`,
+          detail: `lobbySize=${lobbySize},bots=${room.fillWithBots},region=${client.region}`,
         });
 
         sendToClient(client, {
@@ -565,14 +723,21 @@ export function attachMultiplayerServer(
         const existingMember = room.members.get(client.id);
 
         if (existingMember) {
-          // Preserve custom member name on reconnect — never overwrite a valid name with default placeholder
+          // Preserve custom member name & region on reconnect — never overwrite with fallback
           if (room.status === 'playing') {
             client.name = existingMember.name;
-          } else if (isDefaultPlaceholderName(msg.playerName) && !isDefaultPlaceholderName(existingMember.name)) {
-            client.name = existingMember.name;
+            client.region = existingMember.region;
           } else {
-            client.name = sanitizeName(msg.playerName, existingMember.name);
-            existingMember.name = client.name;
+            if (isDefaultPlaceholderName(msg.playerName) && !isDefaultPlaceholderName(existingMember.name)) {
+              client.name = existingMember.name;
+            } else {
+              client.name = sanitizeName(msg.playerName, existingMember.name);
+              existingMember.name = client.name;
+            }
+            if (msg.region !== undefined) {
+              existingMember.region = sanitizeRegion(msg.region, existingMember.region);
+            }
+            client.region = existingMember.region;
           }
           existingMember.connected = true;
           client.roomCode = room.code;
@@ -634,6 +799,7 @@ export function attachMultiplayerServer(
         }
 
         client.name = sanitizeName(msg.playerName, client.name);
+        client.region = sanitizeRegion(msg.region, client.region);
         leaveCurrentRoom(client, true);
         if (room.status === 'finished') {
           room.status = 'waiting';
@@ -648,6 +814,7 @@ export function attachMultiplayerServer(
         room.members.set(client.id, {
           id: client.id,
           name: client.name,
+          region: client.region,
           ready: false,
           connected: true,
           voiceEnabled: false,
@@ -659,7 +826,7 @@ export function attachMultiplayerServer(
         logEvent('room_join', {
           room: room.code,
           player: client.id,
-          detail: `members=${room.members.size}`,
+          detail: `members=${room.members.size},region=${client.region}`,
         });
 
         sendToClient(client, {
@@ -680,19 +847,36 @@ export function attachMultiplayerServer(
         if (!member) return;
         const prevName = member.name;
         const nextName = sanitizeName(msg.playerName, prevName);
-        if (nextName === prevName) return;
+        const nextRegion = msg.region !== undefined ? sanitizeRegion(msg.region, member.region) : member.region;
+        if (nextName === prevName && nextRegion === member.region) return;
 
         member.name = nextName;
+        member.region = nextRegion;
         client.name = nextName;
+        client.region = nextRegion;
         if (room.hostId === client.id && room.name === `${prevName}'s Basin`) {
           room.name = `${nextName}'s Basin`;
         }
         logEvent('room_rename', {
           room: room.code,
           player: client.id,
+          detail: `region=${nextRegion}`,
         });
         broadcastRoomState(room);
         broadcastRoomsList();
+        break;
+      }
+
+      case 'room:region': {
+        const nextRegion = sanitizeRegion(msg.region, client.region);
+        client.region = nextRegion;
+        if (!client.roomCode) return;
+        const room = rooms.get(client.roomCode);
+        if (!room || room.status === 'playing') return;
+        const member = room.members.get(client.id);
+        if (!member || member.region === nextRegion) return;
+        member.region = nextRegion;
+        broadcastRoomState(room);
         break;
       }
 
@@ -796,7 +980,6 @@ export function attachMultiplayerServer(
         const room = rooms.get(client.roomCode);
         if (!room || room.status !== 'playing' || !room.sim || room.sim.status !== 'playing') return;
         if (!VALID_ABILITIES.has(msg.ability)) return;
-        // Network duplicate-packet deduplication (prevents duplicate packet bursts from double-triggering)
         const nowMs = Date.now();
         const lastAt = client.lastAbilityAtByType[msg.ability] ?? 0;
         if (nowMs - lastAt < 40) return;
@@ -887,6 +1070,7 @@ export function attachMultiplayerServer(
     const client: ConnectedClient = {
       id: nextSeq('keli'),
       name: 'Awang',
+      region: 'SEA',
       ws,
       roomCode: null,
       lastAbilityAtByType: {},
@@ -932,6 +1116,11 @@ export function attachMultiplayerServer(
     getRoomSummaries,
     getHealthStats: () => ({ rooms: rooms.size, clients: clients.size }),
     getRoomSimulation: (code: string) => rooms.get(normalizeRoomCode(code))?.sim ?? null,
+    waitForPendingPersistence: async () => {
+      while (pendingPersistPromises.size > 0) {
+        await Promise.allSettled(Array.from(pendingPersistPromises));
+      }
+    },
     close: async () => {
       for (const room of rooms.values()) {
         stopRoomLoop(room);
@@ -939,6 +1128,9 @@ export function attachMultiplayerServer(
           clearTimeout(room.cleanupTimer);
           room.cleanupTimer = null;
         }
+      }
+      while (pendingPersistPromises.size > 0) {
+        await Promise.allSettled(Array.from(pendingPersistPromises));
       }
       rooms.clear();
       for (const ws of clients.keys()) {

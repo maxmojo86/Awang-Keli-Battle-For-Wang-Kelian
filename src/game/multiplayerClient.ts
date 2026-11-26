@@ -1,4 +1,5 @@
 import type { EmoteId } from '../data/emotes';
+import type { RegionCode } from '../data/regions';
 import { resolveArenaCollision } from './arena';
 import { soundEngine } from './audio';
 import { getMultiplayerWsUrl, getResolvedWsHost } from './backendConfig';
@@ -676,6 +677,16 @@ export interface MultiplayerSnapshot {
   latestSnapshotTick: number | null;
 }
 
+export interface LeaderboardResultEvent {
+  matchId: string;
+  playerId: string;
+  status: 'saved' | 'failed' | 'ineligible' | 'unavailable';
+  globalRank: number | null;
+  regionalRank: number | null;
+  region: RegionCode;
+  error?: string;
+}
+
 const CLIENT_ID_STORAGE_KEY = 'awang_keli_ws_client_id';
 
 export class MultiplayerClient {
@@ -691,6 +702,8 @@ export class MultiplayerClient {
   private latestWorldState: WorldStatePacket | null = null;
   private lastTickEmitAt = 0;
   private lastPlayerName: string | null = null;
+  private lastPlayerRegion: RegionCode | null = null;
+  private latestLeaderboardResultByMatch = new Map<string, LeaderboardResultEvent>();
 
   private state: MultiplayerSnapshot = {
     status: getMultiplayerWsUrl() ? 'disconnected' : 'unavailable',
@@ -714,6 +727,7 @@ export class MultiplayerClient {
   private matchEndListeners = new Set<
     (hud: HudSnapshot, meta?: { matchId: string; roomCode: string }) => void
   >();
+  private leaderboardResultListeners = new Set<(event: LeaderboardResultEvent) => void>();
   private voiceSignalListeners = new Set<
     (msg: { fromId: string; fromName: string; signal: VoiceSignalPayload }) => void
   >();
@@ -795,6 +809,24 @@ export class MultiplayerClient {
     return () => {
       this.matchEndListeners.delete(cb);
     };
+  }
+
+  public onLeaderboardResult(cb: (event: LeaderboardResultEvent) => void): () => void {
+    this.leaderboardResultListeners.add(cb);
+    if (this.state.activeMatchId) {
+      const cached = this.latestLeaderboardResultByMatch.get(this.state.activeMatchId);
+      if (cached) {
+        cb(cached);
+      }
+    }
+    return () => {
+      this.leaderboardResultListeners.delete(cb);
+    };
+  }
+
+  public getLeaderboardResultForMatch(matchId: string | null | undefined): LeaderboardResultEvent | null {
+    if (!matchId) return null;
+    return this.latestLeaderboardResultByMatch.get(matchId) ?? null;
   }
 
   public onVoiceSignal(
@@ -931,16 +963,16 @@ export class MultiplayerClient {
           const activeRoomCode = this.state.currentRoom?.code ?? this.state.activeRoomCode;
           this.state.clientId = msg.clientId;
           this.state.rooms = msg.rooms;
-          // If reconnecting while previously inside a room, re-join automatically using old clientId & custom name
+          // If reconnecting while previously inside a room, re-join automatically using old clientId, custom name, and region
           if (activeRoomCode && prevId) {
-            const localName =
-              this.state.currentRoom?.participants.find((p) => p.id === prevId)?.name ||
-              this.lastPlayerName ||
-              'Awang';
+            const prevMember = this.state.currentRoom?.participants.find((p) => p.id === prevId);
+            const localName = prevMember?.name || this.lastPlayerName || 'Awang';
+            const localRegion = prevMember?.region || this.lastPlayerRegion || undefined;
             this.send({
               type: 'room:join',
               code: activeRoomCode,
               playerName: localName,
+              region: localRegion,
               clientId: prevId,
             });
           } else {
@@ -968,6 +1000,9 @@ export class MultiplayerClient {
           if (selfMember?.name) {
             this.lastPlayerName = selfMember.name;
           }
+          if (selfMember?.region) {
+            this.lastPlayerRegion = selfMember.region;
+          }
           if (msg.room.status !== 'playing') {
             this.state.activeMatchId = msg.room.activeMatchId ?? null;
           }
@@ -981,6 +1016,9 @@ export class MultiplayerClient {
           const selfMember = msg.room.participants.find((p) => p.id === this.state.clientId);
           if (selfMember?.name) {
             this.lastPlayerName = selfMember.name;
+          }
+          if (selfMember?.region) {
+            this.lastPlayerRegion = selfMember.region;
           }
           this.emitState();
           break;
@@ -1037,6 +1075,24 @@ export class MultiplayerClient {
           this.matchEndListeners.forEach((cb) =>
             cb(msg.hud, { matchId: msg.matchId, roomCode: msg.roomCode })
           );
+          break;
+        }
+        case 'leaderboard:result': {
+          const event: LeaderboardResultEvent = {
+            matchId: msg.matchId,
+            playerId: msg.playerId,
+            status: msg.status,
+            globalRank: msg.globalRank,
+            regionalRank: msg.regionalRank,
+            region: msg.region,
+            error: msg.error,
+          };
+          this.latestLeaderboardResultByMatch.set(msg.matchId, event);
+          if (this.latestLeaderboardResultByMatch.size > 10) {
+            const oldestKey = this.latestLeaderboardResultByMatch.keys().next().value;
+            if (oldestKey) this.latestLeaderboardResultByMatch.delete(oldestKey);
+          }
+          this.leaderboardResultListeners.forEach((cb) => cb(event));
           break;
         }
         case 'voice:signal': {
@@ -1142,36 +1198,58 @@ export class MultiplayerClient {
     this.send({ type: 'rooms:list' });
   }
 
-  public createRoom(playerName: string, lobbySize: LobbySize, fillWithBots: boolean, roomName?: string) {
+  public createRoom(
+    playerName: string,
+    lobbySize: LobbySize,
+    fillWithBots: boolean,
+    roomName?: string,
+    region?: RegionCode
+  ) {
     const clean = playerName.trim().slice(0, 18);
     if (clean) this.lastPlayerName = clean;
+    if (region) this.lastPlayerRegion = region;
     this.send({
       type: 'room:create',
       playerName: clean || playerName,
+      region: region ?? this.lastPlayerRegion ?? undefined,
       lobbySize,
       fillWithBots,
       roomName,
     });
   }
 
-  public joinRoom(code: string, playerName: string) {
+  public joinRoom(code: string, playerName: string, region?: RegionCode) {
     const normalizedCode = normalizeRoomCode(code);
     const clean = playerName.trim().slice(0, 18);
     if (clean) this.lastPlayerName = clean;
+    if (region) this.lastPlayerRegion = region;
     this.send({
       type: 'room:join',
       code: normalizedCode,
       playerName: clean || playerName,
+      region: region ?? this.lastPlayerRegion ?? undefined,
       clientId: this.state.clientId ?? undefined,
     });
   }
 
-  public renamePlayer(playerName: string) {
+  public renamePlayer(playerName: string, region?: RegionCode) {
     const clean = playerName.replace(/\s+/g, ' ').trim().slice(0, 18);
     if (!clean) return;
     this.lastPlayerName = clean;
+    if (region) this.lastPlayerRegion = region;
     if (this.state.currentRoom && this.state.currentRoom.status !== 'playing') {
-      this.send({ type: 'room:rename', playerName: clean });
+      this.send({
+        type: 'room:rename',
+        playerName: clean,
+        region: region ?? this.lastPlayerRegion ?? undefined,
+      });
+    }
+  }
+
+  public updateRegion(region: RegionCode) {
+    this.lastPlayerRegion = region;
+    if (this.state.currentRoom && this.state.currentRoom.status !== 'playing') {
+      this.send({ type: 'room:region', region });
     }
   }
 

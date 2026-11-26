@@ -251,10 +251,52 @@ export interface GlobalSubmissionResult {
   totalRegional: number;
 }
 
+export type LeaderboardSaveStatus =
+  | 'idle'
+  | 'saving'
+  | 'saved'
+  | 'failed'
+  | 'unavailable'
+  | 'ineligible';
+
+export interface LeaderboardSaveState {
+  status: LeaderboardSaveStatus;
+  globalRank: number | null;
+  regionalRank: number | null;
+  region: RegionCode | null;
+  message?: string | null;
+  retryable?: boolean;
+}
+
+export type GlobalSubmissionOutcome =
+  | { ok: true; result: GlobalSubmissionResult }
+  | {
+      ok: false;
+      status: 'failed' | 'unavailable' | 'ineligible';
+      error: string;
+      retryable: boolean;
+    };
+
 export class LeaderboardUnavailableError extends Error {
   constructor(message = 'Global leaderboard backend is not configured for this build.') {
     super(message);
     this.name = 'LeaderboardUnavailableError';
+  }
+}
+
+async function tryParseErrorBody(
+  res: Response
+): Promise<{ error?: string; code?: string } | null> {
+  try {
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return null;
+    const parsed = (await res.json()) as { error?: unknown; code?: unknown };
+    return {
+      error: typeof parsed?.error === 'string' ? parsed.error : undefined,
+      code: typeof parsed?.code === 'string' ? parsed.code : undefined,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -285,10 +327,17 @@ export async function fetchGlobalLeaderboard(
 
   try {
     const res = await fetch(`${endpoint}?${params.toString()}`, {
+      cache: 'no-store',
       signal: controller?.signal,
     });
     if (!res.ok) {
-      throw new Error(`Leaderboard service responded with HTTP ${res.status}.`);
+      const body = await tryParseErrorBody(res);
+      if (res.status === 503 || body?.code === 'LEADERBOARD_DB_UNAVAILABLE') {
+        throw new LeaderboardUnavailableError(
+          body?.error || 'Global rankings database is currently unavailable.'
+        );
+      }
+      throw new Error(body?.error || `Leaderboard service responded with HTTP ${res.status}.`);
     }
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
@@ -318,19 +367,52 @@ export async function fetchGlobalLeaderboard(
   }
 }
 
+/**
+ * Submits a Solo Royale run to the global leaderboard.
+ * Multiplayer results are NEVER submitted by the browser — they are recorded authoritatively by the server.
+ */
 export async function submitGlobalSurvivalTime(
   snap: HudSnapshot,
   playerName: string,
   region: RegionCode,
-  isMultiplayer: boolean,
   submissionId: string
-): Promise<GlobalSubmissionResult | null> {
-  if (snap.mode === 'tutorial') return null;
+): Promise<GlobalSubmissionOutcome> {
+  if (snap.mode === 'tutorial') {
+    return {
+      ok: false,
+      status: 'ineligible',
+      error: 'Guide mode matches are not ranked on the global leaderboard.',
+      retryable: false,
+    };
+  }
   const endpoint = buildApiUrl('/api/leaderboard');
-  if (!endpoint) return null;
+  if (!endpoint) {
+    return {
+      ok: false,
+      status: 'unavailable',
+      error: 'Global leaderboard service is not configured for this build.',
+      retryable: false,
+    };
+  }
 
   const survivalTime = Math.max(0, Number(snap.matchResult.survivalTime.toFixed(2)));
-  if (survivalTime < 1) return null;
+  if (survivalTime < 1) {
+    return {
+      ok: false,
+      status: 'ineligible',
+      error: 'Survive at least 1 second to qualify for global rankings.',
+      retryable: false,
+    };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      ok: false,
+      status: 'failed',
+      error: 'Device is offline. Ranking was not saved to Global Rankings.',
+      retryable: true,
+    };
+  }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeoutId =
@@ -341,6 +423,7 @@ export async function submitGlobalSurvivalTime(
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
+      cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       signal: controller?.signal,
       body: JSON.stringify({
@@ -352,19 +435,60 @@ export async function submitGlobalSurvivalTime(
         kills: Math.max(0, Math.floor(snap.matchResult.kills)),
         victory: snap.matchResult.status === 'victory',
         lobbySize: snap.lobbySize,
-        mode: isMultiplayer ? 'multiplayer' : 'royale',
+        mode: 'royale',
       }),
     });
     if (!res.ok) {
-      return null;
+      const body = await tryParseErrorBody(res);
+      if (res.status === 503 || body?.code === 'LEADERBOARD_DB_UNAVAILABLE') {
+        return {
+          ok: false,
+          status: 'unavailable',
+          error: body?.error || 'Global rankings database is currently unavailable.',
+          retryable: true,
+        };
+      }
+      return {
+        ok: false,
+        status: 'failed',
+        error: body?.error || `Failed to save ranking (HTTP ${res.status}).`,
+        retryable: res.status >= 500 || res.status === 429,
+      };
     }
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
-      return null;
+      return {
+        ok: false,
+        status: 'failed',
+        error: 'Leaderboard server returned an invalid confirmation response.',
+        retryable: true,
+      };
     }
-    return (await res.json()) as GlobalSubmissionResult;
-  } catch {
-    return null;
+    const result = (await res.json()) as GlobalSubmissionResult;
+    if (!result || !result.entry) {
+      return {
+        ok: false,
+        status: 'failed',
+        error: 'Leaderboard server confirmation was incomplete.',
+        retryable: true,
+      };
+    }
+    return { ok: true, result };
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return {
+        ok: false,
+        status: 'failed',
+        error: 'Ranking save request timed out. Tap Retry to try again.',
+        retryable: true,
+      };
+    }
+    return {
+      ok: false,
+      status: 'failed',
+      error: 'Unable to reach Global Rankings to save your run. Tap Retry to try again.',
+      retryable: true,
+    };
   } finally {
     if (timeoutId !== null && typeof window !== 'undefined') {
       window.clearTimeout(timeoutId);

@@ -54,6 +54,7 @@ interface LobbyScreenProps {
   leaderboard: SurvivalLeaderboardEntry[];
   globalLeaderboard: GlobalLeaderboardResponse | null;
   globalLeaderboardLoading: boolean;
+  globalLeaderboardUnavailable?: boolean;
   globalLeaderboardError: string | null;
   onlineLeaderboardAvailable?: boolean;
   onlineMultiplayerAvailable?: boolean;
@@ -102,6 +103,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   leaderboard,
   globalLeaderboard,
   globalLeaderboardLoading,
+  globalLeaderboardUnavailable = false,
   globalLeaderboardError,
   onlineLeaderboardAvailable = true,
   onlineMultiplayerAvailable = true,
@@ -158,7 +160,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
     const trimmed = nameDraft.replace(/\s+/g, ' ').trim() || DEFAULT_PLAYER_NAME;
     onChangePlayerName(trimmed);
     if (mode === 'multiplayer' && mpSnapshot.currentRoom && mpSnapshot.currentRoom.status !== 'playing') {
-      multiplayerClient.renamePlayer(trimmed);
+      multiplayerClient.renamePlayer(trimmed, playerRegion);
     }
     return trimmed;
   };
@@ -177,7 +179,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           multiplayerClient.startRoomMatch();
         }
       } else {
-        multiplayerClient.createRoom(cleanName, lobbySize, fillWithBots);
+        multiplayerClient.createRoom(cleanName, lobbySize, fillWithBots, undefined, playerRegion);
       }
       return;
     }
@@ -235,7 +237,15 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#b5c2c9]">
             {showExternalLeaderboard && (
-              <a href="#leaderboard" className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0">
+              <a
+                href="#leaderboard"
+                onClick={() => {
+                  if (boardScope === 'global' && onlineLeaderboardAvailable) {
+                    onRefreshGlobalLeaderboard();
+                  }
+                }}
+                className="hover:text-[#f3d285] transition-colors whitespace-nowrap shrink-0"
+              >
                 Leaderboard
               </a>
             )}
@@ -566,7 +576,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                               const code = normalizeRoomCode(joinCodeDraft);
                               if (e.key === 'Enter' && code && mpSnapshot.status === 'connected') {
                                 const clean = commitName();
-                                multiplayerClient.joinRoom(code, clean);
+                                multiplayerClient.joinRoom(code, clean, playerRegion);
                               }
                             }}
                             className="flex-1 px-2.5 py-1.5 text-xs font-mono-num uppercase rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] placeholder-[#5a6c75] focus:outline-none focus:border-[#c99c4a]"
@@ -578,7 +588,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                               const code = normalizeRoomCode(joinCodeDraft);
                               if (!code) return;
                               const clean = commitName();
-                              multiplayerClient.joinRoom(code, clean);
+                              multiplayerClient.joinRoom(code, clean, playerRegion);
                             }}
                             className="px-3 py-1.5 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] disabled:opacity-45"
                           >
@@ -615,7 +625,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                                   disabled={rm.status === 'playing'}
                                   onClick={() => {
                                     const clean = commitName();
-                                    multiplayerClient.joinRoom(rm.code, clean);
+                                    multiplayerClient.joinRoom(rm.code, clean, playerRegion);
                                   }}
                                   className="px-2.5 py-1 text-[11px] font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] disabled:opacity-40 shrink-0"
                                 >
@@ -1056,7 +1066,12 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
               <div className="flex items-center gap-1 p-1 rounded-[2px] bg-[#0b1218] border border-[#2a3b47]">
                 <button
                   type="button"
-                  onClick={() => setBoardScope('global')}
+                  onClick={() => {
+                    setBoardScope('global');
+                    if (onlineLeaderboardAvailable) {
+                      onRefreshGlobalLeaderboard();
+                    }
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium rounded-[2px] transition-colors whitespace-nowrap shrink-0 ${
                     boardScope === 'global'
                       ? 'bg-[#c99c4a] text-[#0b1218] font-semibold'
@@ -1270,7 +1285,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
 
               {/* Global Top 100 Table */}
               <div className="compendium-plaque rounded-sm overflow-hidden">
-                {!onlineLeaderboardAvailable ? (
+                {!onlineLeaderboardAvailable || (globalLeaderboardUnavailable && !globalLeaderboard) ? (
                   <div
                     data-testid="leaderboard-unavailable-notice"
                     className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
@@ -1284,20 +1299,44 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                           Global &amp; Regional Rankings Unavailable
                         </div>
                         <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
-                          Online Top 100 rankings require a hosted backend API. Your Solo Royale victories are still recorded locally on this device in Local Top 10 Records.
+                          {onlineLeaderboardAvailable && globalLeaderboardError
+                            ? globalLeaderboardError
+                            : 'Online Top 100 rankings require a hosted backend API and persistent database. Your Solo Royale victories are still recorded locally on this device in Local Top 10 Records.'}
                         </p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setBoardScope('local')}
-                      className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
-                    >
-                      View Local Top 10
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                      {onlineLeaderboardAvailable && (
+                        <button
+                          type="button"
+                          onClick={onRefreshGlobalLeaderboard}
+                          disabled={globalLeaderboardLoading}
+                          className="px-3.5 py-2 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] disabled:opacity-50 transition-colors whitespace-nowrap"
+                        >
+                          Retry
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setBoardScope('local')}
+                        className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap"
+                      >
+                        View Local Top 10
+                      </button>
+                    </div>
                   </div>
-                ) : globalLeaderboardError ? (
-                  <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                ) : globalLeaderboardLoading && !globalLeaderboard ? (
+                  <div
+                    data-testid="leaderboard-loading-state"
+                    className="px-6 py-8 text-sm text-[#9cb0ba]"
+                  >
+                    Fetching global top 100 survival rankings...
+                  </div>
+                ) : globalLeaderboardError && !globalLeaderboard ? (
+                  <div
+                    data-testid="leaderboard-error-state"
+                    className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                  >
                     <div>
                       <div className="text-sm font-semibold text-[#fca5a5]">
                         Unable to Load Global Rankings
@@ -1321,38 +1360,79 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                       </button>
                     </div>
                   </div>
-                ) : globalLeaderboardLoading && !globalLeaderboard ? (
-                  <div className="px-6 py-8 text-sm text-[#9cb0ba]">
-                    Fetching global top 100 survival rankings...
-                  </div>
-                ) : !globalLeaderboard || globalLeaderboard.entries.length === 0 ? (
-                  <div className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="flex items-start gap-3">
-                      <div className="p-2.5 rounded-[2px] border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
-                        <Globe className="w-5 h-5" />
+                ) : globalLeaderboard && globalLeaderboard.entries.length === 0 ? (
+                  <>
+                    {globalLeaderboardError && (
+                      <div
+                        data-testid="leaderboard-stale-error-banner"
+                        className="px-4 py-2.5 bg-[#3b1216]/85 border-b border-[#ef4444]/40 flex flex-wrap items-center justify-between gap-2 text-xs text-[#fecaca]"
+                      >
+                        <span>
+                          {globalLeaderboardUnavailable
+                            ? 'Leaderboard database unavailable — showing last loaded view.'
+                            : `Refresh failed: ${globalLeaderboardError}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onRefreshGlobalLeaderboard}
+                          className="px-2.5 py-1 text-[11px] font-semibold rounded-[2px] border border-[#fca5a5]/50 text-[#fee2e2] hover:bg-[#5c1c22]"
+                        >
+                          Retry
+                        </button>
                       </div>
-                      <div>
-                        <div className="text-sm font-semibold text-[#f7f2e7]">
-                          {globalRegionFilter === 'ALL'
-                            ? 'No Global Survival Records Yet'
-                            : `No ${getRegionInfo(globalRegionFilter).name} (${globalRegionFilter}) Records Yet`}
-                        </div>
-                        <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
-                          Complete a Solo Royale or Multiplayer match to submit your survival time to the global top 100 and claim the top spot for {getRegionInfo(playerRegion).name}.
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={commitNameAndStart}
-                      className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                    )}
+                    <div
+                      data-testid="leaderboard-empty-state"
+                      className="px-6 py-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                     >
-                      Claim #1 Record
-                    </button>
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
-                    <table className="w-full text-left border-collapse text-sm">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2.5 rounded-[2px] border border-[#4a3c22] bg-[#0b1218] text-[#d9b25f] shrink-0">
+                          <Globe className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-[#f7f2e7]">
+                            {globalRegionFilter === 'ALL'
+                              ? 'No Global Survival Records Yet'
+                              : `No ${getRegionInfo(globalRegionFilter).name} (${globalRegionFilter}) Records Yet`}
+                          </div>
+                          <p className="text-xs text-[#9cb0ba] mt-1 max-w-xl leading-relaxed">
+                            Complete a Solo Royale or Multiplayer match to submit your survival time to the global top 100 and claim the top spot for {getRegionInfo(playerRegion).name}.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={commitNameAndStart}
+                        className="px-4 py-2 text-xs font-semibold rounded-[2px] bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap self-start sm:self-center shrink-0"
+                      >
+                        Claim #1 Record
+                      </button>
+                    </div>
+                  </>
+                ) : globalLeaderboard ? (
+                  <div>
+                    {globalLeaderboardError && (
+                      <div
+                        data-testid="leaderboard-stale-error-banner"
+                        className="px-4 py-2.5 bg-[#3b1216]/85 border-b border-[#ef4444]/40 flex flex-wrap items-center justify-between gap-2 text-xs text-[#fecaca]"
+                      >
+                        <span>
+                          {globalLeaderboardUnavailable
+                            ? `Leaderboard database unavailable (${globalLeaderboardError}) — showing previously loaded rankings.`
+                            : `Unable to refresh rankings (${globalLeaderboardError}) — showing previously loaded rankings.`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onRefreshGlobalLeaderboard}
+                          disabled={globalLeaderboardLoading}
+                          className="px-2.5 py-1 text-[11px] font-semibold rounded-[2px] border border-[#fca5a5]/50 text-[#fee2e2] hover:bg-[#5c1c22] disabled:opacity-50"
+                        >
+                          Retry Refresh
+                        </button>
+                      </div>
+                    )}
+                    <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                      <table className="w-full text-left border-collapse text-sm">
                       <thead className="bg-[#0b1218] text-xs text-[#9cb0ba] sticky top-0 z-10 border-b border-[#22313d]">
                         <tr>
                           <th className="py-3 px-4 font-medium whitespace-nowrap">
@@ -1438,8 +1518,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                         })}
                       </tbody>
                     </table>
+                    </div>
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
           ) : (

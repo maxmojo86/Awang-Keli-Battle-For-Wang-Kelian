@@ -1,7 +1,18 @@
 import React from 'react';
-import { BookOpen, RotateCcw, ArrowLeft, Crown, Globe, Trophy } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  BookOpen,
+  CheckCircle2,
+  Crown,
+  Globe,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+  Trophy,
+} from 'lucide-react';
 import { RegionCode } from '../data/regions';
-import { formatSurvivalDuration } from '../game/leaderboard';
+import { formatSurvivalDuration, LeaderboardSaveState } from '../game/leaderboard';
 import { MatchReplayData } from '../game/replay';
 import { computeMatchScoreFromHud, MatchScoreBreakdown } from '../game/scoring';
 import { HudSnapshot } from '../game/types';
@@ -21,6 +32,8 @@ interface PostMatchScreenProps {
     regionalRank: number | null;
     region: RegionCode;
   } | null;
+  leaderboardSaveState?: LeaderboardSaveState | null;
+  onRetryLeaderboardSave?: () => void;
   isMultiplayer?: boolean;
   isMultiplayerHost?: boolean;
   reducedMotion?: boolean;
@@ -42,6 +55,8 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
   bestScore = 0,
   leaderboardRank = null,
   globalRankInfo = null,
+  leaderboardSaveState = null,
+  onRetryLeaderboardSave,
   isMultiplayer = false,
   isMultiplayerHost = false,
   reducedMotion = false,
@@ -143,7 +158,35 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                     <span>Local Top 10 #{leaderboardRank}</span>
                   </div>
                 )}
-                {globalRankInfo && (globalRankInfo.globalRank !== null || globalRankInfo.regionalRank !== null) && (
+                {leaderboardSaveState?.status === 'saved' &&
+                (leaderboardSaveState.globalRank !== null ||
+                  leaderboardSaveState.regionalRank !== null) ? (
+                  <div
+                    data-testid="leaderboard-save-saved"
+                    className="mt-1 flex items-center gap-1 text-[11px] font-mono-num font-medium text-[#7dd3fc]"
+                  >
+                    <CheckCircle2 className="w-3 h-3 shrink-0 text-[#4ade80]" />
+                    <span>
+                      Saved ·{' '}
+                      {leaderboardSaveState.globalRank !== null
+                        ? `Global #${leaderboardSaveState.globalRank}`
+                        : 'Recorded'}
+                      {leaderboardSaveState.regionalRank !== null && leaderboardSaveState.region
+                        ? ` · #${leaderboardSaveState.regionalRank} ${leaderboardSaveState.region}`
+                        : ''}
+                    </span>
+                  </div>
+                ) : leaderboardSaveState?.status === 'saving' ? (
+                  <div
+                    data-testid="leaderboard-save-saving"
+                    className="mt-1 flex items-center gap-1 text-[11px] font-medium text-[#f3d285]"
+                  >
+                    <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
+                    <span>Saving ranking…</span>
+                  </div>
+                ) : !leaderboardSaveState &&
+                  globalRankInfo &&
+                  (globalRankInfo.globalRank !== null || globalRankInfo.regionalRank !== null) ? (
                   <div className="mt-1 flex items-center gap-1 text-[11px] font-mono-num font-medium text-[#7dd3fc]">
                     <Globe className="w-3 h-3 shrink-0" />
                     <span>
@@ -153,7 +196,7 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                         : ''}
                     </span>
                   </div>
-                )}
+                ) : null}
               </div>
               <div className="compendium-plaque-subtle rounded-[2px] p-3">
                 <div className="text-xs text-[#9cb0ba]">Mass Conservation</div>
@@ -162,6 +205,48 @@ export const PostMatchScreen: React.FC<PostMatchScreenProps> = ({
                 </div>
               </div>
             </div>
+
+            {hud.mode !== 'tutorial' &&
+              leaderboardSaveState &&
+              (leaderboardSaveState.status === 'failed' ||
+                leaderboardSaveState.status === 'unavailable' ||
+                leaderboardSaveState.status === 'ineligible') && (
+                <div
+                  data-testid={`leaderboard-save-${leaderboardSaveState.status}`}
+                  className={`mt-4 rounded-[2px] px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs border ${
+                    leaderboardSaveState.status === 'failed'
+                      ? 'border-[#ef4444]/50 bg-[#3b1216]/75 text-[#fecaca]'
+                      : leaderboardSaveState.status === 'unavailable'
+                        ? 'border-[#5b4724] bg-[#142029] text-[#f3e6c8]'
+                        : 'border-[#263642] bg-[#0e171f] text-[#9cb0ba]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {leaderboardSaveState.status === 'failed' ? (
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-[#f87171]" />
+                    ) : (
+                      <Globe className="w-4 h-4 shrink-0 text-[#d9b25f]" />
+                    )}
+                    <span>
+                      {leaderboardSaveState.status === 'failed'
+                        ? `Global ranking not saved: ${leaderboardSaveState.message || 'Please retry.'}`
+                        : leaderboardSaveState.status === 'unavailable'
+                          ? `Global leaderboard unavailable: ${leaderboardSaveState.message || 'Local record kept.'}`
+                          : leaderboardSaveState.message || 'Run did not qualify for global rankings.'}
+                    </span>
+                  </div>
+                  {leaderboardSaveState.retryable && onRetryLeaderboardSave && (
+                    <button
+                      type="button"
+                      onClick={onRetryLeaderboardSave}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold rounded-[2px] border border-[#f3d285]/50 bg-[#1a2630] text-[#f3d285] hover:border-[#f3d285] transition-colors whitespace-nowrap"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      Retry Save
+                    </button>
+                  )}
+                </div>
+              )}
 
             {hud.mode !== 'tutorial' && (
               <div

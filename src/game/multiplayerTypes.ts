@@ -1,4 +1,5 @@
 import type { EmoteId } from '../data/emotes.ts';
+import type { RegionCode } from '../data/regions.ts';
 import type {
   AbilityCooldowns,
   AbilityId,
@@ -33,6 +34,7 @@ export function normalizeRoomCode(raw: unknown): string {
 export interface RoomParticipant {
   id: string;
   name: string;
+  region?: RegionCode;
   isHost: boolean;
   ready: boolean;
   connected: boolean;
@@ -235,6 +237,7 @@ export type ClientMessage =
   | {
       type: 'room:create';
       playerName: string;
+      region?: RegionCode;
       roomName?: string;
       lobbySize: LobbySize;
       fillWithBots: boolean;
@@ -243,10 +246,12 @@ export type ClientMessage =
       type: 'room:join';
       code: string;
       playerName: string;
+      region?: RegionCode;
       clientId?: string;
     }
   | { type: 'room:leave' }
-  | { type: 'room:rename'; playerName: string }
+  | { type: 'room:rename'; playerName: string; region?: RegionCode }
+  | { type: 'room:region'; region: RegionCode }
   | { type: 'room:config'; lobbySize?: LobbySize; fillWithBots?: boolean }
   | { type: 'room:ready'; ready: boolean }
   | { type: 'room:chat'; text: string }
@@ -276,6 +281,16 @@ export type ServerMessage =
   | { type: 'match:started'; playerId: string; roomCode: string; matchId: string }
   | { type: 'world:state'; state: WorldStatePacket }
   | { type: 'match:ended'; hud: HudSnapshot; matchId: string; roomCode: string }
+  | {
+      type: 'leaderboard:result';
+      matchId: string;
+      playerId: string;
+      status: 'saved' | 'failed' | 'ineligible' | 'unavailable';
+      globalRank: number | null;
+      regionalRank: number | null;
+      region: RegionCode;
+      error?: string;
+    }
   | { type: 'voice:signal'; fromId: string; fromName: string; signal: VoiceSignalPayload }
   | { type: 'voice:speaking'; peerId: string; speaking: boolean }
   | { type: 'voice:peer_left'; peerId: string }

@@ -26,13 +26,19 @@ import {
   getTopSurvivalTimes,
   GlobalLeaderboardResponse,
   GlobalLeaderboardSort,
+  LeaderboardSaveState,
+  LeaderboardUnavailableError,
   recordKeliKingSurvivalTime,
   savePlayerName,
   savePlayerRegion,
   submitGlobalSurvivalTime,
   SurvivalLeaderboardEntry,
 } from './game/leaderboard';
-import { multiplayerClient, MultiplayerSnapshot } from './game/multiplayerClient';
+import {
+  LeaderboardResultEvent,
+  multiplayerClient,
+  MultiplayerSnapshot,
+} from './game/multiplayerClient';
 import { normalizeRoomCode } from './game/multiplayerTypes';
 import { MatchReplayData } from './game/replay';
 import { spatialVoice } from './game/spatialVoice';
@@ -81,6 +87,9 @@ export default function App() {
   const [globalLeaderboardLoading, setGlobalLeaderboardLoading] = useState<boolean>(
     onlineLeaderboardAvailable
   );
+  const [globalLeaderboardUnavailable, setGlobalLeaderboardUnavailable] = useState<boolean>(
+    !onlineLeaderboardAvailable
+  );
   const [globalLeaderboardError, setGlobalLeaderboardError] = useState<string | null>(null);
   const [globalRegionFilter, setGlobalRegionFilter] = useState<RegionFilter>('ALL');
   const [globalSort, setGlobalSort] = useState<GlobalLeaderboardSort>('longest');
@@ -89,6 +98,12 @@ export default function App() {
     regionalRank: number | null;
     region: RegionCode;
   } | null>(null);
+  const [leaderboardSaveState, setLeaderboardSaveState] = useState<LeaderboardSaveState>({
+    status: 'idle',
+    globalRank: null,
+    regionalRank: null,
+    region: null,
+  });
 
   const [mpSnapshot, setMpSnapshot] = useState<MultiplayerSnapshot>(() =>
     multiplayerClient.getSnapshot()
@@ -106,6 +121,13 @@ export default function App() {
     matchId: string;
   } | null>(activeMpSession);
   activeMpSessionRef.current = activeMpSession;
+  const lastMpMatchIdRef = useRef<string | null>(null);
+  const pendingSoloSubmissionRef = useRef<{
+    snap: HudSnapshot;
+    playerName: string;
+    region: RegionCode;
+    submissionId: string;
+  } | null>(null);
 
   const [epilogueUnlocked, setEpilogueUnlocked] = useState<boolean>(() => {
     if (!platformCapabilities.localStorageAllowed) return false;
@@ -229,11 +251,107 @@ export default function App() {
     soundEngine.setMenuMusicWanted(wantsMenuSoundtrack, 0.85);
   }, [screen, ytPaused]);
 
+  const refreshGlobalLeaderboard = useCallback(
+    async (regionFilter: RegionFilter = globalRegionFilter, sort: GlobalLeaderboardSort = globalSort) => {
+      if (!onlineLeaderboardAvailable) {
+        setGlobalLeaderboardLoading(false);
+        setGlobalLeaderboardUnavailable(true);
+        setGlobalLeaderboardError(null);
+        return;
+      }
+      setGlobalLeaderboardLoading(true);
+      setGlobalLeaderboardError(null);
+      try {
+        const data = await fetchGlobalLeaderboard(regionFilter, sort, 100);
+        setGlobalLeaderboard(data);
+        setGlobalLeaderboardUnavailable(false);
+        setGlobalLeaderboardError(null);
+      } catch (err) {
+        // Keep any previously loaded leaderboard intact rather than wiping it to empty
+        if (err instanceof LeaderboardUnavailableError) {
+          setGlobalLeaderboardUnavailable(true);
+          setGlobalLeaderboardError(err.message);
+        } else {
+          setGlobalLeaderboardUnavailable(false);
+          setGlobalLeaderboardError(
+            err instanceof Error ? err.message : 'Unable to reach global rankings service.'
+          );
+        }
+      } finally {
+        setGlobalLeaderboardLoading(false);
+      }
+    },
+    [globalRegionFilter, globalSort, onlineLeaderboardAvailable]
+  );
+
+  const refreshGlobalLeaderboardRef = useRef(refreshGlobalLeaderboard);
+  refreshGlobalLeaderboardRef.current = refreshGlobalLeaderboard;
+
+  const applyMultiplayerLeaderboardResult = useCallback((event: LeaderboardResultEvent) => {
+    const relevantMatchId = activeMpSessionRef.current?.matchId ?? lastMpMatchIdRef.current;
+    if (relevantMatchId && event.matchId !== relevantMatchId) {
+      return;
+    }
+
+    if (event.status === 'saved') {
+      setLastGlobalRank({
+        globalRank: event.globalRank,
+        regionalRank: event.regionalRank,
+        region: event.region,
+      });
+      setLeaderboardSaveState({
+        status: 'saved',
+        globalRank: event.globalRank,
+        regionalRank: event.regionalRank,
+        region: event.region,
+        message: null,
+        retryable: false,
+      });
+      void refreshGlobalLeaderboardRef.current();
+      return;
+    }
+
+    setLastGlobalRank(null);
+    if (event.status === 'unavailable') {
+      setLeaderboardSaveState({
+        status: 'unavailable',
+        globalRank: null,
+        regionalRank: null,
+        region: event.region,
+        message: event.error || 'Global rankings database is currently unavailable.',
+        retryable: false,
+      });
+      return;
+    }
+    if (event.status === 'ineligible') {
+      setLeaderboardSaveState({
+        status: 'ineligible',
+        globalRank: null,
+        regionalRank: null,
+        region: event.region,
+        message: event.error || 'Run did not qualify for global rankings.',
+        retryable: false,
+      });
+      return;
+    }
+    setLeaderboardSaveState({
+      status: 'failed',
+      globalRank: null,
+      regionalRank: null,
+      region: event.region,
+      message: event.error || 'Server could not save your multiplayer ranking after retrying.',
+      retryable: false,
+    });
+  }, []);
+
   useEffect(() => {
     if (!platformCapabilities.onlineMultiplayerEnabled) {
       return;
     }
     const unsubState = multiplayerClient.subscribe(setMpSnapshot);
+    const unsubLeaderboardResult = multiplayerClient.onLeaderboardResult(
+      applyMultiplayerLeaderboardResult
+    );
     const unsubStart = multiplayerClient.onMatchStarted((info) => {
       const currentSession = activeMpSessionRef.current;
       const isDuplicateActiveMatch =
@@ -248,11 +366,19 @@ export default function App() {
       }
 
       soundEngine.setMenuMusicWanted(false, 0.75);
+      pendingSoloSubmissionRef.current = null;
+      lastMpMatchIdRef.current = info.matchId;
       setFinalHud(null);
       setFinalReplay(null);
       setLastMatchScore(null);
       setLastLeaderboardRank(null);
       setLastGlobalRank(null);
+      setLeaderboardSaveState({
+        status: 'idle',
+        globalRank: null,
+        regionalRank: null,
+        region: null,
+      });
       setActiveMpSession(info);
       setMode('multiplayer');
       setMatchKey((k) => k + 1);
@@ -276,7 +402,7 @@ export default function App() {
             if (!joinedInitial && snap.status === 'connected' && !snap.currentRoom) {
               joinedInitial = true;
               setMode('multiplayer');
-              multiplayerClient.joinRoom(roomParam, getSavedPlayerName());
+              multiplayerClient.joinRoom(roomParam, getSavedPlayerName(), getSavedPlayerRegion());
             }
           })
         : () => {};
@@ -284,9 +410,11 @@ export default function App() {
     return () => {
       unsubWelcome();
       unsubStart();
+      unsubLeaderboardResult();
       unsubState();
     };
   }, [
+    applyMultiplayerLeaderboardResult,
     onlineMultiplayerAvailable,
     platformCapabilities.onlineMultiplayerEnabled,
     platformCapabilities.spatialVoiceEnabled,
@@ -316,29 +444,6 @@ export default function App() {
     []
   );
 
-  const refreshGlobalLeaderboard = useCallback(
-    async (regionFilter: RegionFilter = globalRegionFilter, sort: GlobalLeaderboardSort = globalSort) => {
-      if (!onlineLeaderboardAvailable) {
-        setGlobalLeaderboardLoading(false);
-        setGlobalLeaderboardError(null);
-        return;
-      }
-      setGlobalLeaderboardLoading(true);
-      setGlobalLeaderboardError(null);
-      try {
-        const data = await fetchGlobalLeaderboard(regionFilter, sort, 100);
-        setGlobalLeaderboard(data);
-      } catch (err) {
-        setGlobalLeaderboardError(
-          err instanceof Error ? err.message : 'Unable to reach global rankings service.'
-        );
-      } finally {
-        setGlobalLeaderboardLoading(false);
-      }
-    },
-    [globalRegionFilter, globalSort, onlineLeaderboardAvailable]
-  );
-
   useEffect(() => {
     if (!onlineLeaderboardAvailable) return;
     void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
@@ -349,31 +454,106 @@ export default function App() {
       const saved = savePlayerName(nextName);
       setPlayerName(saved);
       if (platformCapabilities.onlineMultiplayerEnabled) {
-        multiplayerClient.renamePlayer(saved);
+        multiplayerClient.renamePlayer(saved, playerRegion);
+      }
+    },
+    [platformCapabilities.onlineMultiplayerEnabled, playerRegion]
+  );
+
+  const handlePlayerRegionChange = useCallback(
+    (nextRegion: RegionCode) => {
+      const saved = savePlayerRegion(nextRegion);
+      setPlayerRegion(saved);
+      if (platformCapabilities.onlineMultiplayerEnabled) {
+        multiplayerClient.updateRegion(saved);
       }
     },
     [platformCapabilities.onlineMultiplayerEnabled]
   );
-
-  const handlePlayerRegionChange = useCallback((nextRegion: RegionCode) => {
-    const saved = savePlayerRegion(nextRegion);
-    setPlayerRegion(saved);
-  }, []);
 
   const handleClearLeaderboard = useCallback(() => {
     setLeaderboard(clearTopSurvivalTimes());
     setLastLeaderboardRank(null);
   }, []);
 
+  const executeSoloLeaderboardSubmission = useCallback(
+    async (payload: {
+      snap: HudSnapshot;
+      playerName: string;
+      region: RegionCode;
+      submissionId: string;
+    }) => {
+      setLeaderboardSaveState({
+        status: 'saving',
+        globalRank: null,
+        regionalRank: null,
+        region: payload.region,
+        message: 'Saving solo ranking to Global Leaderboard...',
+        retryable: false,
+      });
+
+      const outcome = await submitGlobalSurvivalTime(
+        payload.snap,
+        payload.playerName,
+        payload.region,
+        payload.submissionId
+      );
+
+      if (outcome.ok) {
+        pendingSoloSubmissionRef.current = null;
+        setLastGlobalRank({
+          globalRank: outcome.result.globalRank,
+          regionalRank: outcome.result.regionalRank,
+          region: outcome.result.entry.region,
+        });
+        setLeaderboardSaveState({
+          status: 'saved',
+          globalRank: outcome.result.globalRank,
+          regionalRank: outcome.result.regionalRank,
+          region: outcome.result.entry.region,
+          message: null,
+          retryable: false,
+        });
+        void refreshGlobalLeaderboardRef.current();
+        return;
+      }
+
+      setLastGlobalRank(null);
+      setLeaderboardSaveState({
+        status: outcome.status,
+        globalRank: null,
+        regionalRank: null,
+        region: payload.region,
+        message: outcome.error,
+        retryable: outcome.retryable,
+      });
+    },
+    []
+  );
+
+  const handleRetrySoloLeaderboardSave = useCallback(() => {
+    const pending = pendingSoloSubmissionRef.current;
+    if (!pending) return;
+    void executeSoloLeaderboardSubmission(pending);
+  }, [executeSoloLeaderboardSubmission]);
+
   const handleStartMatch = useCallback(() => {
     if (mode === 'multiplayer') return;
     soundEngine.setMenuMusicWanted(false, 0.75);
+    pendingSoloSubmissionRef.current = null;
+    lastMpMatchIdRef.current = null;
     setActiveMpSession(null);
     setFinalHud(null);
     setFinalReplay(null);
     setLastMatchScore(null);
     setLastLeaderboardRank(null);
     setLastGlobalRank(null);
+    setLeaderboardSaveState({
+      status: 'idle',
+      globalRank: null,
+      regionalRank: null,
+      region: null,
+    });
     setMatchKey((k) => k + 1);
     setScreen('playing');
   }, [mode]);
@@ -440,30 +620,87 @@ export default function App() {
           }
         }
 
-        if (onlineLeaderboardAvailable && snap.mode !== 'tutorial' && snap.matchResult.survivalTime >= 1) {
-          const subId = `run-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-          void submitGlobalSurvivalTime(
+        if (activeMpSession) {
+          // Multiplayer results are persisted exclusively by the authoritative server — never POST from the browser.
+          pendingSoloSubmissionRef.current = null;
+          lastMpMatchIdRef.current = activeMpSession.matchId;
+          const serverResult = multiplayerClient.getLeaderboardResultForMatch(
+            activeMpSession.matchId
+          );
+          if (serverResult) {
+            applyMultiplayerLeaderboardResult(serverResult);
+          } else if (!onlineLeaderboardAvailable) {
+            setLastGlobalRank(null);
+            setLeaderboardSaveState({
+              status: 'unavailable',
+              globalRank: null,
+              regionalRank: null,
+              region: playerRegion,
+              message: 'Global rankings are not configured for this build.',
+              retryable: false,
+            });
+          } else if (snap.matchResult.survivalTime < 1) {
+            setLastGlobalRank(null);
+            setLeaderboardSaveState({
+              status: 'ineligible',
+              globalRank: null,
+              regionalRank: null,
+              region: playerRegion,
+              message: 'Survive at least 1 second to qualify for global rankings.',
+              retryable: false,
+            });
+          } else {
+            setLastGlobalRank(null);
+            setLeaderboardSaveState({
+              status: 'saving',
+              globalRank: null,
+              regionalRank: null,
+              region: playerRegion,
+              message: 'Confirming server-authoritative multiplayer ranking...',
+              retryable: false,
+            });
+          }
+        } else if (snap.mode === 'tutorial') {
+          pendingSoloSubmissionRef.current = null;
+          setLastGlobalRank(null);
+          setLeaderboardSaveState({
+            status: 'idle',
+            globalRank: null,
+            regionalRank: null,
+            region: null,
+          });
+        } else if (!onlineLeaderboardAvailable) {
+          pendingSoloSubmissionRef.current = null;
+          setLastGlobalRank(null);
+          setLeaderboardSaveState({
+            status: 'unavailable',
+            globalRank: null,
+            regionalRank: null,
+            region: playerRegion,
+            message: 'Global rankings require a hosted backend API.',
+            retryable: false,
+          });
+        } else if (snap.matchResult.survivalTime < 1) {
+          pendingSoloSubmissionRef.current = null;
+          setLastGlobalRank(null);
+          setLeaderboardSaveState({
+            status: 'ineligible',
+            globalRank: null,
+            regionalRank: null,
+            region: playerRegion,
+            message: 'Survive at least 1 second to qualify for global rankings.',
+            retryable: false,
+          });
+        } else {
+          const subId = `solo-${matchKey}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          const payload = {
             snap,
             playerName,
-            playerRegion,
-            Boolean(activeMpSession),
-            subId
-          )
-            .then((res) => {
-              if (res) {
-                setLastGlobalRank({
-                  globalRank: res.globalRank,
-                  regionalRank: res.regionalRank,
-                  region: res.entry.region,
-                });
-                void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
-              }
-            })
-            .catch(() => {
-              // Keep solo summary unaffected if global leaderboard submission fails
-            });
-        } else {
-          setLastGlobalRank(null);
+            region: playerRegion,
+            submissionId: subId,
+          };
+          pendingSoloSubmissionRef.current = payload;
+          void executeSoloLeaderboardSubmission(payload);
         }
       }
 
@@ -471,15 +708,14 @@ export default function App() {
     },
     [
       activeMpSession,
-      globalRegionFilter,
-      globalSort,
+      applyMultiplayerLeaderboardResult,
+      executeSoloLeaderboardSubmission,
       matchKey,
       onlineLeaderboardAvailable,
       platformCapabilities.localStorageAllowed,
       platformCapabilities.scoreSubmissionEnabled,
       playerName,
       playerRegion,
-      refreshGlobalLeaderboard,
     ]
   );
 
@@ -489,13 +725,19 @@ export default function App() {
       setActiveMpSession(null);
     }
     setScreen('lobby');
-  }, [activeMpSession]);
+    if (onlineLeaderboardAvailable) {
+      void refreshGlobalLeaderboardRef.current();
+    }
+  }, [activeMpSession, onlineLeaderboardAvailable]);
 
   const handleReturnFromSummary = useCallback(() => {
     // Keep player inside their Basin Room if still connected, so they can rematch or chat
     setActiveMpSession(null);
     setScreen('lobby');
-  }, []);
+    if (onlineLeaderboardAvailable) {
+      void refreshGlobalLeaderboardRef.current();
+    }
+  }, [onlineLeaderboardAvailable]);
 
   const handleRematch = useCallback(() => {
     if (activeMpSession) {
@@ -586,6 +828,7 @@ export default function App() {
           leaderboard={leaderboard}
           globalLeaderboard={globalLeaderboard}
           globalLeaderboardLoading={globalLeaderboardLoading}
+          globalLeaderboardUnavailable={globalLeaderboardUnavailable}
           globalLeaderboardError={globalLeaderboardError}
           onlineLeaderboardAvailable={onlineLeaderboardAvailable}
           onlineMultiplayerAvailable={onlineMultiplayerAvailable}
@@ -640,6 +883,8 @@ export default function App() {
           bestScore={bestScore}
           leaderboardRank={lastLeaderboardRank}
           globalRankInfo={lastGlobalRank}
+          leaderboardSaveState={leaderboardSaveState}
+          onRetryLeaderboardSave={handleRetrySoloLeaderboardSave}
           isMultiplayer={Boolean(activeMpSession)}
           isMultiplayerHost={isMpHost}
           reducedMotion={settings.reducedMotion}

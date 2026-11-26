@@ -2,7 +2,11 @@ import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
-import { type GlobalLeaderboardSort, GlobalLeaderboardStore } from './server/leaderboardStore.ts';
+import {
+  createLeaderboardStoreFromEnv,
+  type GlobalLeaderboardSort,
+  LeaderboardStorageUnavailableError,
+} from './server/leaderboardStore.ts';
 import { attachMultiplayerServer } from './server/multiplayerServer.ts';
 import { type RegionCode, type RegionFilter, VALID_REGION_CODES } from './src/data/regions.ts';
 
@@ -25,20 +29,44 @@ async function bootstrap() {
     next();
   });
   app.use(express.json());
-  const leaderboardStore = new GlobalLeaderboardStore();
-  const httpServer = createServer(app);
-  const mpHub = attachMultiplayerServer(httpServer, { path: '/ws' });
 
-  app.get('/api/health', (_req, res) => {
+  const leaderboardStore = createLeaderboardStoreFromEnv();
+  try {
+    await leaderboardStore.init();
+  } catch (err) {
+    const safeMsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      '[LEADERBOARD] Startup database initialization failed (leaderboard API will return 503 until DB is reachable):',
+      safeMsg.replace(/postgres(?:ql)?:\/\/[^\s]+/gi, '[REDACTED_DB_URL]')
+    );
+  }
+
+  const httpServer = createServer(app);
+  const mpHub = attachMultiplayerServer(httpServer, {
+    path: '/ws',
+    leaderboardStore,
+  });
+
+  app.get('/api/health', async (_req, res) => {
     const stats = mpHub.getHealthStats();
-    res.json({ ok: true, rooms: stats.rooms, clients: stats.clients });
+    const leaderboardAvailable = await leaderboardStore.isAvailable();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      rooms: stats.rooms,
+      clients: stats.clients,
+      leaderboardStorage: leaderboardStore.storageKind,
+      leaderboardAvailable,
+    });
   });
 
   app.get('/api/rooms', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.json({ rooms: mpHub.getRoomSummaries() });
   });
 
-  app.get('/api/leaderboard', (req, res) => {
+  app.get('/api/leaderboard', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     const rawRegion = String(req.query.region || 'ALL').toUpperCase();
     const region: RegionFilter =
       rawRegion === 'ALL' || VALID_REGION_CODES.has(rawRegion as RegionCode)
@@ -48,13 +76,36 @@ async function bootstrap() {
     const sort: GlobalLeaderboardSort =
       rawSort === 'fastest_king' || rawSort === 'kills' ? rawSort : 'longest';
     const limit = Number(req.query.limit || 100);
-    res.json(leaderboardStore.query(region, sort, limit));
+    try {
+      const result = await leaderboardStore.query(region, sort, limit);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof LeaderboardStorageUnavailableError) {
+        res.status(503).json({ error: err.message, code: err.code });
+        return;
+      }
+      res.status(503).json({
+        error: 'Global rankings database is currently unavailable.',
+        code: 'LEADERBOARD_DB_UNAVAILABLE',
+      });
+    }
   });
 
-  app.post('/api/leaderboard', (req, res) => {
-    const outcome = leaderboardStore.submit(req.body ?? {});
+  app.post('/api/leaderboard', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const outcome = await leaderboardStore.submitSolo(req.body ?? {});
     if (outcome.ok === false) {
-      res.status(400).json({ error: outcome.error });
+      const statusCode =
+        outcome.code === 'MULTIPLAYER_CLIENT_REJECTED'
+          ? 403
+          : outcome.code === 'VALIDATION_ERROR' || outcome.code === 'INELIGIBLE_RUN'
+            ? 400
+            : 503;
+      res.status(statusCode).json({
+        error: outcome.error,
+        code: outcome.code,
+        retryable: outcome.retryable,
+      });
       return;
     }
     res.status(201).json(outcome.result);
