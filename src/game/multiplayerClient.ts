@@ -1,21 +1,22 @@
 import type { EmoteId } from '../data/emotes';
 import { resolveArenaCollision } from './arena';
 import { soundEngine } from './audio';
-import { getMultiplayerWsUrl } from './backendConfig';
+import { getMultiplayerWsUrl, getResolvedWsHost } from './backendConfig';
 import {
   createInitialEndgameState,
   EndgamePresentationGuard,
 } from './endgameDirector';
 import { EvolutionPresentationGuard } from './evolutionExperience';
-import type {
-  ClientMessage,
-  ClientSfxEvent,
-  RemoteKeliState,
-  RoomState,
-  RoomSummary,
-  ServerMessage,
-  VoiceSignalPayload,
-  WorldStatePacket,
+import {
+  normalizeRoomCode,
+  type ClientMessage,
+  type ClientSfxEvent,
+  type RemoteKeliState,
+  type RoomState,
+  type RoomSummary,
+  type ServerMessage,
+  type VoiceSignalPayload,
+  type WorldStatePacket,
 } from './multiplayerTypes';
 import type { RenderableSimulation } from './scene3d';
 import type {
@@ -36,11 +37,17 @@ import type {
   ZoneState,
 } from './types';
 
-function makeDefaultEntity(r?: RemoteKeliState): KeliEntity {
+function makeDefaultEntity(r?: RemoteKeliState, localPlayerId?: string): KeliEntity {
+  const entityId = r?.id ?? localPlayerId ?? 'player';
+  const isLocalPlayer = r
+    ? localPlayerId
+      ? r.id === localPlayerId
+      : false
+    : true;
   return {
-    id: r?.id ?? 'player',
-    name: r?.name ?? 'Awang',
-    isPlayer: r?.isPlayer ?? true,
+    id: entityId,
+    name: r?.name ?? 'Awang Keli',
+    isPlayer: isLocalPlayer,
     x: r?.x ?? 1000,
     z: r?.z ?? 1000,
     vx: r?.vx ?? 0,
@@ -179,26 +186,40 @@ export class RemoteSimulationView implements RenderableSimulation {
   private targetsById = new Map<string, RemoteKeliState>();
   private entityById = new Map<string, KeliEntity>();
   private localPlayerId: string;
+  private expectedMatchId: string | null;
   private latestHud: HudSnapshot | null = null;
   private lastPacketTime = 0;
   private speakingPeers = new Set<string>();
   private seenDamageHitIds = new Set<string>();
   private evolutionGuard = new EvolutionPresentationGuard();
   private endgameGuard = new EndgamePresentationGuard();
+  public hasReceivedSnapshot = false;
+  public latestTick: number | null = null;
 
-  constructor(localPlayerId: string) {
+  constructor(localPlayerId: string, expectedMatchId: string | null = null) {
     this.localPlayerId = localPlayerId;
+    this.expectedMatchId = expectedMatchId;
   }
 
   public setSpeakingPeers(ids: Set<string>) {
     this.speakingPeers = ids;
   }
 
-  public applyServerState(packet: WorldStatePacket) {
+  public getExpectedMatchId(): string | null {
+    return this.expectedMatchId;
+  }
+
+  public applyServerState(packet: WorldStatePacket): boolean {
+    // Reject packets belonging to another match/round so stale snapshots can never contaminate state
+    if (this.expectedMatchId && packet.matchId && packet.matchId !== this.expectedMatchId) {
+      return false;
+    }
     // Discard stale out-of-order packets so levels, forms, sprites & audio can never regress or double-fire
     if (this.evolutionGuard.isPacketStale(packet.tick)) {
-      return;
+      return false;
     }
+    this.hasReceivedSnapshot = true;
+    this.latestTick = packet.tick;
 
     const wasAlreadyConcluded = this.status !== 'playing';
     const incomingEndgame = packet.endgame ?? packet.hud.endgame;
@@ -273,9 +294,11 @@ export class RemoteSimulationView implements RenderableSimulation {
         remote.alive,
         packet.status
       );
+      const isLocalEntity = remote.id === this.localPlayerId;
       const effectiveRemote = matchFrozen
         ? {
             ...remote,
+            isPlayer: isLocalEntity,
             level: evoCheck.effectiveLevel,
             highestFormReached: evoCheck.effectiveForm,
             evolutionSeq: evoCheck.effectiveEvoSeq,
@@ -286,6 +309,7 @@ export class RemoteSimulationView implements RenderableSimulation {
           }
         : {
             ...remote,
+            isPlayer: isLocalEntity,
             level: evoCheck.effectiveLevel,
             highestFormReached: evoCheck.effectiveForm,
             evolutionSeq: evoCheck.effectiveEvoSeq,
@@ -293,7 +317,7 @@ export class RemoteSimulationView implements RenderableSimulation {
       this.targetsById.set(remote.id, effectiveRemote);
       let ent = this.entityById.get(remote.id);
       if (!ent) {
-        ent = makeDefaultEntity(effectiveRemote);
+        ent = makeDefaultEntity(effectiveRemote, this.localPlayerId);
         this.entityById.set(remote.id, ent);
       } else {
         // Snap if teleported/large jump, otherwise reconcile smoothly in advance()
@@ -304,7 +328,7 @@ export class RemoteSimulationView implements RenderableSimulation {
           ent.facingAngle = effectiveRemote.facingAngle;
         }
         ent.name = effectiveRemote.name;
-        ent.isPlayer = effectiveRemote.id === this.localPlayerId;
+        ent.isPlayer = isLocalEntity;
         ent.vx = effectiveRemote.vx;
         ent.vz = effectiveRemote.vz;
         ent.level = effectiveRemote.level;
@@ -381,6 +405,7 @@ export class RemoteSimulationView implements RenderableSimulation {
         this.playSfx(sfx);
       }
     }
+    return true;
   }
 
   private playSfx(sfx: ClientSfxEvent) {
@@ -597,7 +622,7 @@ export class RemoteSimulationView implements RenderableSimulation {
     if (found) return found;
     if (this.latestHud) {
       const hp = this.latestHud.player;
-      const fallback = makeDefaultEntity();
+      const fallback = makeDefaultEntity(undefined, this.localPlayerId);
       fallback.id = this.localPlayerId;
       fallback.name = hp.name;
       fallback.alive = hp.alive;
@@ -607,7 +632,7 @@ export class RemoteSimulationView implements RenderableSimulation {
       fallback.facingAngle = hp.facingAngle;
       return fallback;
     }
-    return makeDefaultEntity();
+    return makeDefaultEntity(undefined, this.localPlayerId);
   }
 
   public getSpectateTarget(): KeliEntity | null {
@@ -639,12 +664,16 @@ export type ConnectionStatus =
 
 export interface MultiplayerSnapshot {
   status: ConnectionStatus;
+  wsHost: string | null;
   clientId: string | null;
   latencyMs: number | null;
   rooms: RoomSummary[];
   currentRoom: RoomState | null;
   error: string | null;
   activeMatchPlayerId: string | null;
+  activeMatchId: string | null;
+  activeRoomCode: string | null;
+  latestSnapshotTick: number | null;
 }
 
 const CLIENT_ID_STORAGE_KEY = 'awang_keli_ws_client_id';
@@ -659,21 +688,32 @@ export class MultiplayerClient {
 
   private lastInputSentAt = 0;
   private lastSentInput = { moveX: 0, moveZ: 0, aimAngle: 0, biteHeld: false };
+  private latestWorldState: WorldStatePacket | null = null;
+  private lastTickEmitAt = 0;
+  private lastPlayerName: string | null = null;
 
   private state: MultiplayerSnapshot = {
     status: getMultiplayerWsUrl() ? 'disconnected' : 'unavailable',
+    wsHost: getResolvedWsHost(),
     clientId: this.readStoredClientId(),
     latencyMs: null,
     rooms: [],
     currentRoom: null,
     error: null,
     activeMatchPlayerId: null,
+    activeMatchId: null,
+    activeRoomCode: null,
+    latestSnapshotTick: null,
   };
 
   private listeners = new Set<(snap: MultiplayerSnapshot) => void>();
   private worldListeners = new Set<(packet: WorldStatePacket) => void>();
-  private matchStartListeners = new Set<(info: { playerId: string; roomCode: string }) => void>();
-  private matchEndListeners = new Set<(hud: HudSnapshot) => void>();
+  private matchStartListeners = new Set<
+    (info: { playerId: string; roomCode: string; matchId: string }) => void
+  >();
+  private matchEndListeners = new Set<
+    (hud: HudSnapshot, meta?: { matchId: string; roomCode: string }) => void
+  >();
   private voiceSignalListeners = new Set<
     (msg: { fromId: string; fromName: string; signal: VoiceSignalPayload }) => void
   >();
@@ -713,21 +753,44 @@ export class MultiplayerClient {
     };
   }
 
-  public onWorldState(cb: (packet: WorldStatePacket) => void): () => void {
+  public onWorldState(
+    cb: (packet: WorldStatePacket) => void,
+    expectedMatchId?: string | null
+  ): () => void {
     this.worldListeners.add(cb);
+    // Replay latest valid buffered snapshot so subscribers mounted after tick 0 never miss initial state
+    const cached = this.latestWorldState;
+    if (
+      cached &&
+      (!expectedMatchId || !cached.matchId || cached.matchId === expectedMatchId) &&
+      (!this.state.activeMatchId || !cached.matchId || cached.matchId === this.state.activeMatchId)
+    ) {
+      cb(cached);
+    }
     return () => {
       this.worldListeners.delete(cb);
     };
   }
 
-  public onMatchStarted(cb: (info: { playerId: string; roomCode: string }) => void): () => void {
+  public getLatestWorldState(expectedMatchId?: string | null): WorldStatePacket | null {
+    const cached = this.latestWorldState;
+    if (!cached) return null;
+    if (expectedMatchId && cached.matchId && cached.matchId !== expectedMatchId) return null;
+    return cached;
+  }
+
+  public onMatchStarted(
+    cb: (info: { playerId: string; roomCode: string; matchId: string }) => void
+  ): () => void {
     this.matchStartListeners.add(cb);
     return () => {
       this.matchStartListeners.delete(cb);
     };
   }
 
-  public onMatchEnded(cb: (hud: HudSnapshot) => void): () => void {
+  public onMatchEnded(
+    cb: (hud: HudSnapshot, meta?: { matchId: string; roomCode: string }) => void
+  ): () => void {
     this.matchEndListeners.add(cb);
     return () => {
       this.matchEndListeners.delete(cb);
@@ -784,6 +847,7 @@ export class MultiplayerClient {
 
   public connect() {
     const url = getMultiplayerWsUrl();
+    this.state.wsHost = getResolvedWsHost();
     if (!url) {
       this.shouldStayConnected = false;
       this.state.status = 'unavailable';
@@ -791,6 +855,10 @@ export class MultiplayerClient {
       this.state.latencyMs = null;
       this.state.rooms = [];
       this.state.currentRoom = null;
+      this.state.activeMatchId = null;
+      this.state.activeRoomCode = null;
+      this.state.latestSnapshotTick = null;
+      this.latestWorldState = null;
       this.emitState();
       return;
     }
@@ -860,13 +928,15 @@ export class MultiplayerClient {
       switch (msg.type) {
         case 'welcome': {
           const prevId = this.state.clientId;
-          const activeRoomCode = this.state.currentRoom?.code;
+          const activeRoomCode = this.state.currentRoom?.code ?? this.state.activeRoomCode;
           this.state.clientId = msg.clientId;
           this.state.rooms = msg.rooms;
-          // If reconnecting while previously inside a room, re-join automatically using old clientId
+          // If reconnecting while previously inside a room, re-join automatically using old clientId & custom name
           if (activeRoomCode && prevId) {
             const localName =
-              this.state.currentRoom?.participants.find((p) => p.id === prevId)?.name || 'Awang';
+              this.state.currentRoom?.participants.find((p) => p.id === prevId)?.name ||
+              this.lastPlayerName ||
+              'Awang';
             this.send({
               type: 'room:join',
               code: activeRoomCode,
@@ -893,12 +963,25 @@ export class MultiplayerClient {
           this.state.clientId = msg.clientId;
           this.saveClientId(msg.clientId);
           this.state.currentRoom = msg.room;
+          this.state.activeRoomCode = msg.room.code;
+          const selfMember = msg.room.participants.find((p) => p.id === msg.clientId);
+          if (selfMember?.name) {
+            this.lastPlayerName = selfMember.name;
+          }
+          if (msg.room.status !== 'playing') {
+            this.state.activeMatchId = msg.room.activeMatchId ?? null;
+          }
           this.state.error = null;
           this.emitState();
           break;
         }
         case 'room:state': {
           this.state.currentRoom = msg.room;
+          this.state.activeRoomCode = msg.room.code;
+          const selfMember = msg.room.participants.find((p) => p.id === this.state.clientId);
+          if (selfMember?.name) {
+            this.lastPlayerName = selfMember.name;
+          }
           this.emitState();
           break;
         }
@@ -908,20 +991,52 @@ export class MultiplayerClient {
           break;
         }
         case 'match:started': {
+          const isNewMatch = this.state.activeMatchId !== msg.matchId;
+          if (isNewMatch) {
+            this.latestWorldState = null;
+            this.state.latestSnapshotTick = null;
+          }
           this.state.activeMatchPlayerId = msg.playerId;
+          this.state.activeMatchId = msg.matchId;
+          this.state.activeRoomCode = msg.roomCode;
           this.state.error = null;
           this.emitState();
           this.matchStartListeners.forEach((cb) =>
-            cb({ playerId: msg.playerId, roomCode: msg.roomCode })
+            cb({ playerId: msg.playerId, roomCode: msg.roomCode, matchId: msg.matchId })
           );
           break;
         }
         case 'world:state': {
+          // Drop stale packets from a previous match/round
+          if (
+            this.state.activeMatchId &&
+            msg.state.matchId &&
+            msg.state.matchId !== this.state.activeMatchId
+          ) {
+            break;
+          }
+          const hadTick = this.state.latestSnapshotTick !== null;
+          this.latestWorldState = msg.state;
+          this.state.latestSnapshotTick = msg.state.tick;
+          const now = Date.now();
+          if (!hadTick || now - this.lastTickEmitAt >= 500 || msg.state.status !== 'playing') {
+            this.lastTickEmitAt = now;
+            this.emitState();
+          }
           this.worldListeners.forEach((cb) => cb(msg.state));
           break;
         }
         case 'match:ended': {
-          this.matchEndListeners.forEach((cb) => cb(msg.hud));
+          if (
+            this.state.activeMatchId &&
+            msg.matchId &&
+            msg.matchId !== this.state.activeMatchId
+          ) {
+            break;
+          }
+          this.matchEndListeners.forEach((cb) =>
+            cb(msg.hud, { matchId: msg.matchId, roomCode: msg.roomCode })
+          );
           break;
         }
         case 'voice:signal': {
@@ -1006,6 +1121,10 @@ export class MultiplayerClient {
     this.state.status = 'disconnected';
     this.state.currentRoom = null;
     this.state.activeMatchPlayerId = null;
+    this.state.activeMatchId = null;
+    this.state.activeRoomCode = null;
+    this.state.latestSnapshotTick = null;
+    this.latestWorldState = null;
     this.emitState();
   }
 
@@ -1024,9 +1143,11 @@ export class MultiplayerClient {
   }
 
   public createRoom(playerName: string, lobbySize: LobbySize, fillWithBots: boolean, roomName?: string) {
+    const clean = playerName.trim().slice(0, 18);
+    if (clean) this.lastPlayerName = clean;
     this.send({
       type: 'room:create',
-      playerName,
+      playerName: clean || playerName,
       lobbySize,
       fillWithBots,
       roomName,
@@ -1034,17 +1155,33 @@ export class MultiplayerClient {
   }
 
   public joinRoom(code: string, playerName: string) {
+    const normalizedCode = normalizeRoomCode(code);
+    const clean = playerName.trim().slice(0, 18);
+    if (clean) this.lastPlayerName = clean;
     this.send({
       type: 'room:join',
-      code,
-      playerName,
+      code: normalizedCode,
+      playerName: clean || playerName,
       clientId: this.state.clientId ?? undefined,
     });
+  }
+
+  public renamePlayer(playerName: string) {
+    const clean = playerName.replace(/\s+/g, ' ').trim().slice(0, 18);
+    if (!clean) return;
+    this.lastPlayerName = clean;
+    if (this.state.currentRoom && this.state.currentRoom.status !== 'playing') {
+      this.send({ type: 'room:rename', playerName: clean });
+    }
   }
 
   public leaveRoom() {
     this.state.currentRoom = null;
     this.state.activeMatchPlayerId = null;
+    this.state.activeMatchId = null;
+    this.state.activeRoomCode = null;
+    this.state.latestSnapshotTick = null;
+    this.latestWorldState = null;
     this.send({ type: 'room:leave' });
     this.emitState();
   }

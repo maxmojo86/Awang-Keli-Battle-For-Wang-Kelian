@@ -18,6 +18,11 @@ import { getEmoteSpec } from '../data/emotes';
 import { AmbientHazardParticles } from './ambientParticles';
 import { resolveGraphicsQuality } from './graphicsQuality';
 import { getPlatformCapabilities } from './platform';
+import {
+  buildNameplateCacheKey,
+  formatEntityNameplateName,
+  formatOverheadNameplateLabel,
+} from './nameplate';
 import type { GraphicsQuality } from './types';
 import { ArenaTextureSet, createArenaTextureSet } from './arenaTextures';
 import {
@@ -1724,7 +1729,22 @@ export class ArenaScene3D {
             : k.stunResistTimer > 0
               ? 'IMMUNE'
               : '';
-    const key = `${k.level}-${hpBucket}-${k.isPlayer ? 1 : 0}-${k.level > playerLevel ? 'd' : 'p'}-${k.stunTimer > 0 ? 's' : ''}-${k.staggerTimer > 0 ? 'g' : ''}-${k.stunResistTimer > 0 ? 'r' : ''}-${k.evadeTimer > 0 ? 'e' : ''}-${k.venomTimer > 0 ? 'v' : ''}-${k.isSpeaking ? 'm' : ''}-${emoteId}-${bountyPts}`;
+    const resolvedName = formatEntityNameplateName(k.name, k.isPlayer);
+    const key = buildNameplateCacheKey({
+      level: k.level,
+      hpBucket,
+      isPlayer: k.isPlayer,
+      name: resolvedName,
+      isHigherLevel: k.level > playerLevel,
+      stunned: k.stunTimer > 0,
+      staggered: k.staggerTimer > 0,
+      stunResist: k.stunResistTimer > 0,
+      evading: k.evadeTimer > 0,
+      venom: k.venomTimer > 0,
+      speaking: Boolean(k.isSpeaking),
+      emoteId,
+      bountyPts,
+    });
     if (key === vis.lastBadgeKey) return;
     vis.lastBadgeKey = key;
 
@@ -1826,9 +1846,8 @@ export class ArenaScene3D {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = k.isPlayer ? '#f3d285' : k.level > playerLevel ? '#fca5a5' : '#e2e8f0';
-    const baseLabel = k.isPlayer ? `Lv.${k.level} Awang Keli` : `Lv.${k.level} ${k.name.slice(0, 9)}`;
-    const label = k.isSpeaking ? `(( )) ${baseLabel}` : baseLabel;
-    ctx.fillText(label, 80, yOff + 12);
+    const label = formatOverheadNameplateLabel(k.name, k.level, k.isPlayer, Boolean(k.isSpeaking));
+    ctx.fillText(label, 80, yOff + 12, 140);
 
     // HP bar
     ctx.fillStyle = '#0c1216';

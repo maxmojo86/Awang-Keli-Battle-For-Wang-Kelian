@@ -127,3 +127,13 @@ export function buildApiUrl(apiPath: string): string | null {
 export function getMultiplayerWsUrl(): string | null {
   return getBackendConfig().wsUrl;
 }
+
+export function getResolvedWsHost(): string | null {
+  const wsUrl = getMultiplayerWsUrl();
+  if (!wsUrl) return null;
+  try {
+    return new URL(wsUrl).host;
+  } catch {
+    return wsUrl;
+  }
+}

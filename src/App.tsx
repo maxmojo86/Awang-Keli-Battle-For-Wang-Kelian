@@ -33,6 +33,7 @@ import {
   SurvivalLeaderboardEntry,
 } from './game/leaderboard';
 import { multiplayerClient, MultiplayerSnapshot } from './game/multiplayerClient';
+import { normalizeRoomCode } from './game/multiplayerTypes';
 import { MatchReplayData } from './game/replay';
 import { spatialVoice } from './game/spatialVoice';
 import { AccessibilitySettings, HudSnapshot, LobbySize } from './game/types';
@@ -95,7 +96,16 @@ export default function App() {
   const [activeMpSession, setActiveMpSession] = useState<{
     playerId: string;
     roomCode: string;
+    matchId: string;
   } | null>(null);
+  const screenRef = useRef<ScreenState>(screen);
+  screenRef.current = screen;
+  const activeMpSessionRef = useRef<{
+    playerId: string;
+    roomCode: string;
+    matchId: string;
+  } | null>(activeMpSession);
+  activeMpSessionRef.current = activeMpSession;
 
   const [epilogueUnlocked, setEpilogueUnlocked] = useState<boolean>(() => {
     if (!platformCapabilities.localStorageAllowed) return false;
@@ -225,6 +235,18 @@ export default function App() {
     }
     const unsubState = multiplayerClient.subscribe(setMpSnapshot);
     const unsubStart = multiplayerClient.onMatchStarted((info) => {
+      const currentSession = activeMpSessionRef.current;
+      const isDuplicateActiveMatch =
+        screenRef.current === 'playing' &&
+        currentSession !== null &&
+        currentSession.matchId === info.matchId &&
+        currentSession.roomCode === info.roomCode &&
+        currentSession.playerId === info.playerId;
+
+      if (isDuplicateActiveMatch) {
+        return;
+      }
+
       soundEngine.setMenuMusicWanted(false, 0.75);
       setFinalHud(null);
       setFinalReplay(null);
@@ -246,7 +268,7 @@ export default function App() {
 
     // Auto-join Basin if ?room=CODE is present in the URL and multiplayer is available
     const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room')?.trim().toUpperCase();
+    const roomParam = normalizeRoomCode(params.get('room') ?? '');
     let joinedInitial = false;
     const unsubWelcome =
       roomParam && onlineMultiplayerAvailable
@@ -322,10 +344,16 @@ export default function App() {
     void refreshGlobalLeaderboard(globalRegionFilter, globalSort);
   }, [globalRegionFilter, globalSort, onlineLeaderboardAvailable, refreshGlobalLeaderboard]);
 
-  const handlePlayerNameChange = useCallback((nextName: string) => {
-    const saved = savePlayerName(nextName);
-    setPlayerName(saved);
-  }, []);
+  const handlePlayerNameChange = useCallback(
+    (nextName: string) => {
+      const saved = savePlayerName(nextName);
+      setPlayerName(saved);
+      if (platformCapabilities.onlineMultiplayerEnabled) {
+        multiplayerClient.renamePlayer(saved);
+      }
+    },
+    [platformCapabilities.onlineMultiplayerEnabled]
+  );
 
   const handlePlayerRegionChange = useCallback((nextRegion: RegionCode) => {
     const saved = savePlayerRegion(nextRegion);
@@ -591,8 +619,10 @@ export default function App() {
             playerName={playerName}
             isMultiplayer={Boolean(activeMpSession)}
             multiplayerPlayerId={activeMpSession?.playerId ?? null}
+            multiplayerMatchId={activeMpSession?.matchId ?? null}
             roomCode={activeMpSession?.roomCode ?? null}
             latencyMs={mpSnapshot.latencyMs}
+            mpSnapshot={mpSnapshot}
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
             onMatchFinished={handleMatchFinished}

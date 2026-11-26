@@ -50,7 +50,12 @@ import {
 } from '../game/androidNative';
 import { soundEngine } from '../game/audio';
 import { getEvolutionProgressInfo } from '../game/evolutionExperience';
-import { multiplayerClient, RemoteSimulationView } from '../game/multiplayerClient';
+import {
+  multiplayerClient,
+  type MultiplayerSnapshot,
+  RemoteSimulationView,
+} from '../game/multiplayerClient';
+import { resolveHudDisplayName } from '../game/nameplate';
 import { getPlatformCapabilities } from '../game/platform';
 import { MatchReplayData, MatchReplayRecorder } from '../game/replay';
 import { ArenaScene3D } from '../game/scene3d';
@@ -76,6 +81,7 @@ import { EvolutionFormToast, EvolutionToastEvent } from './EvolutionFormToast';
 import { EvolutionOverlay, EvolutionOverlayEvent } from './EvolutionOverlay';
 import { HudVisibilityControls } from './HudVisibilityControls';
 import { Minimap } from './Minimap';
+import { MultiplayerDebugPanel } from './MultiplayerDebugPanel';
 
 interface GameViewportProps {
   lobbySize: LobbySize;
@@ -83,8 +89,10 @@ interface GameViewportProps {
   playerName?: string;
   isMultiplayer?: boolean;
   multiplayerPlayerId?: string | null;
+  multiplayerMatchId?: string | null;
   roomCode?: string | null;
   latencyMs?: number | null;
+  mpSnapshot?: MultiplayerSnapshot;
   settings: AccessibilitySettings;
   onUpdateSettings: (patch: Partial<AccessibilitySettings>) => void;
   onMatchFinished: (finalHud: HudSnapshot, replay: MatchReplayData) => void;
@@ -209,8 +217,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   playerName,
   isMultiplayer = false,
   multiplayerPlayerId = null,
+  multiplayerMatchId = null,
   roomCode = null,
   latencyMs = null,
+  mpSnapshot,
   settings,
   onUpdateSettings,
   onMatchFinished,
@@ -232,10 +242,15 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const pausedRef = useRef(false);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  const onMatchFinishedRef = useRef(onMatchFinished);
+  onMatchFinishedRef.current = onMatchFinished;
+  const playerNameRef = useRef(playerName);
+  playerNameRef.current = playerName;
 
   const [paused, setPaused] = useState(false);
   const [contextLost, setContextLost] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
+  const [latestSnapshotTick, setLatestSnapshotTick] = useState<number | null>(null);
   const [spectateSpeed, setSpectateSpeed] = useState<1 | 2 | 4>(1);
   const spectateSpeedRef = useRef<1 | 2 | 4>(1);
   spectateSpeedRef.current = spectateSpeed;
@@ -349,7 +364,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       ? remoteRef.current?.getPlayer()
       : simRef.current?.getPlayer();
     const replayData = replayRecorderRef.current.finalize(finalHud, liveEntity);
-    onMatchFinished(finalHud, replayData);
+    onMatchFinishedRef.current(finalHud, replayData);
   };
 
   useEffect(() => {
@@ -463,13 +478,13 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const container = mountRef.current;
     if (!container) return;
 
-    const sim = isMultiplayer ? null : new GameSimulation(lobbySize, mode, playerName);
+    const sim = isMultiplayer ? null : new GameSimulation(lobbySize, mode, playerNameRef.current);
     if (sim && settingsRef.current.aiDifficulty) {
       sim.setAiDifficulty(settingsRef.current.aiDifficulty);
       setAiDifficulty(settingsRef.current.aiDifficulty);
     }
     const remoteView = isMultiplayer
-      ? new RemoteSimulationView(multiplayerPlayerId || 'player')
+      ? new RemoteSimulationView(multiplayerPlayerId || 'player', multiplayerMatchId ?? null)
       : null;
 
     simRef.current = sim;
@@ -488,6 +503,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     soundEngine.startAmbient();
     setEvolutionEvent(null);
     setEvolutionToast(null);
+    setLatestSnapshotTick(null);
     const replayRecorder = replayRecorderRef.current;
     replayRecorder.reset();
 
@@ -498,6 +514,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       setHud(initSnap);
     } else {
       prevPlayerFormRef.current = 1;
+      setHud(null);
     }
 
     const keysDown = new Set<string>();
@@ -532,8 +549,10 @@ export const GameViewport: React.FC<GameViewportProps> = ({
     const unsubWorld = isMultiplayer
       ? multiplayerClient.onWorldState((packet) => {
           if (!remoteView) return;
-          remoteView.applyServerState(packet);
+          const accepted = remoteView.applyServerState(packet);
+          if (!accepted) return;
           remoteStatus = packet.status;
+          setLatestSnapshotTick(packet.tick);
           const snap = packet.hud;
           replayRecorder.record(snap, remoteView.getPlayer());
           setHud(snap);
@@ -569,11 +588,14 @@ export const GameViewport: React.FC<GameViewportProps> = ({
           if (packet.status !== 'playing') {
             handleAuthoritativeFinish(snap);
           }
-        })
+        }, multiplayerMatchId ?? null)
       : () => {};
 
     const unsubMatchEnded = isMultiplayer
-      ? multiplayerClient.onMatchEnded((endHud) => {
+      ? multiplayerClient.onMatchEnded((endHud, meta) => {
+          if (multiplayerMatchId && meta?.matchId && meta.matchId !== multiplayerMatchId) {
+            return;
+          }
           remoteStatus = endHud.matchResult.status;
           setHud(endHud);
           handleAuthoritativeFinish(endHud);
@@ -996,7 +1018,7 @@ export const GameViewport: React.FC<GameViewportProps> = ({
       resizeObserver?.disconnect();
       arena.dispose();
     };
-  }, [lobbySize, mode, isMultiplayer, multiplayerPlayerId, onMatchFinished]);
+  }, [lobbySize, mode, isMultiplayer, multiplayerPlayerId, multiplayerMatchId]);
 
   const handleAbilityClick = (id: AbilityId) => {
     if (paused) return;
@@ -1125,7 +1147,12 @@ export const GameViewport: React.FC<GameViewportProps> = ({
   const displayMaxStamina = isSpectating && spec ? spec.targetMaxStamina : p?.maxStamina ?? 100;
   const displayFatigued = isSpectating && spec ? spec.targetFatigued : p?.fatigued ?? false;
   const displayHazard = isSpectating && spec ? spec.targetHazard : p?.activeHazard ?? null;
-  const displayName = isSpectating && spec ? spec.targetName ?? 'Final Kelis' : 'Awang Keli';
+  const displayName = resolveHudDisplayName({
+    isSpectating,
+    spectateTargetName: spec?.targetName,
+    authoritativePlayerName: p?.name,
+    fallbackPlayerName: playerName,
+  });
   const displayZone = isSpectating && spec ? spec.targetZoneName : p?.zoneName ?? 'Wang Kelian';
   const displayKills = isSpectating && spec ? spec.targetKills : p?.kills ?? 0;
 
@@ -1240,6 +1267,47 @@ export const GameViewport: React.FC<GameViewportProps> = ({
         </div>
       )}
 
+      {isMultiplayer && !hud && !contextLost && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="absolute inset-0 z-40 flex items-center justify-center bg-[#091117]/92 p-6 text-center"
+        >
+          <div className="compendium-plaque max-w-sm space-y-3 rounded-sm p-6">
+            <h2 className="font-display text-xl text-[#f7f2e7]">
+              {mpSnapshot?.status === 'unavailable' || mpSnapshot?.status === 'disconnected'
+                ? 'Multiplayer Connection Lost'
+                : 'Connecting to basin…'}
+            </h2>
+            <p className="text-sm text-[#a9b9c2]">
+              {mpSnapshot?.error
+                ? mpSnapshot.error
+                : roomCode
+                  ? `Synchronizing live match state for Basin ${roomCode}.`
+                  : 'Waiting for authoritative match snapshot from the basin server.'}
+            </p>
+            <div className="flex items-center justify-center gap-2 pt-1">
+              {(mpSnapshot?.status === 'disconnected' || mpSnapshot?.status === 'unavailable') && (
+                <button
+                  type="button"
+                  onClick={() => multiplayerClient.connect()}
+                  className="px-4 py-2 text-xs font-semibold rounded-[2px] border border-[#f3d285]/50 bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f]"
+                >
+                  Retry Connection
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onExitToLobby}
+                className="px-4 py-2 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3e6c8] hover:border-[#c99c4a]"
+              >
+                Return to Lobby
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {hud && p && (
         <div
           ref={hudJoltRef}
@@ -1280,7 +1348,9 @@ export const GameViewport: React.FC<GameViewportProps> = ({
               <div className="compendium-plaque w-32 sm:w-36 rounded-sm overflow-hidden">
                 <div className="compendium-ribbon flex items-center justify-between gap-1 px-1.5 py-0.5 text-[9.5px]">
                   <span className="font-mono-num font-semibold text-[#f7f0dc] truncate">
-                    {isSpectating ? `Spec · ${displayName.slice(0, 7)}` : `Lv.${displayLevel}`}
+                    {isSpectating
+                      ? `Spec · ${displayName.slice(0, 7)}`
+                      : `Lv.${displayLevel} ${displayName.slice(0, 8)}`}
                   </span>
                   <span className="inline-flex items-center gap-0.5 font-mono-num text-[#f3d285] shrink-0">
                     <Swords className="w-2.5 h-2.5 text-[#c99c4a]" />
@@ -3330,6 +3400,16 @@ export const GameViewport: React.FC<GameViewportProps> = ({
             setAiDifficulty(d);
           }}
           onClose={() => setShowAiDebug(false)}
+        />
+      )}
+      {isMultiplayer && mpSnapshot && (
+        <MultiplayerDebugPanel
+          snapshot={mpSnapshot}
+          roomCode={roomCode}
+          matchId={multiplayerMatchId}
+          localPlayerId={multiplayerPlayerId}
+          snapshotTick={latestSnapshotTick}
+          positionClassName="bottom-3 left-3"
         />
       )}
     </div>

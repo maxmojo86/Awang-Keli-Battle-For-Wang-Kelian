@@ -33,6 +33,7 @@ import {
   SurvivalLeaderboardEntry,
 } from '../game/leaderboard';
 import { multiplayerClient, MultiplayerSnapshot } from '../game/multiplayerClient';
+import { normalizeRoomCode } from '../game/multiplayerTypes';
 import { getPlatformCapabilities } from '../game/platform';
 import { DEFAULT_HUD_VISIBILITY } from '../game/settings';
 import { spatialVoice, SpatialVoiceSnapshot } from '../game/spatialVoice';
@@ -40,6 +41,7 @@ import { AccessibilitySettings, AiDifficulty, GraphicsQuality, LobbySize, MatchM
 import { resolveAssetUrl } from '../utils/assetUrl';
 import { DESIGN_PLATES } from './DesignCodexModal';
 import { HudVisibilityControls } from './HudVisibilityControls';
+import { MultiplayerDebugPanel } from './MultiplayerDebugPanel';
 
 export type LobbyPlayMode = MatchMode | 'multiplayer';
 
@@ -153,16 +155,25 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   }, [playerName]);
 
   const commitName = () => {
-    const trimmed = nameDraft.trim() || DEFAULT_PLAYER_NAME;
+    const trimmed = nameDraft.replace(/\s+/g, ' ').trim() || DEFAULT_PLAYER_NAME;
     onChangePlayerName(trimmed);
+    if (mode === 'multiplayer' && mpSnapshot.currentRoom && mpSnapshot.currentRoom.status !== 'playing') {
+      multiplayerClient.renamePlayer(trimmed);
+    }
     return trimmed;
   };
 
   const commitNameAndStart = () => {
     const cleanName = commitName();
     if (mode === 'multiplayer') {
+      if (!onlineMultiplayerAvailable || mpSnapshot.status !== 'connected') {
+        return;
+      }
       if (mpSnapshot.currentRoom) {
-        if (mpSnapshot.currentRoom.hostId === mpSnapshot.clientId) {
+        if (
+          mpSnapshot.currentRoom.hostId === mpSnapshot.clientId &&
+          mpSnapshot.currentRoom.status !== 'playing'
+        ) {
           multiplayerClient.startRoomMatch();
         }
       } else {
@@ -310,16 +321,19 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                     type="text"
                     value={nameDraft}
                     maxLength={18}
+                    disabled={mode === 'multiplayer' && currentRoom?.status === 'playing'}
                     placeholder={DEFAULT_PLAYER_NAME}
                     onChange={(e) => setNameDraft(e.target.value)}
-                    onBlur={() => onChangePlayerName(nameDraft)}
+                    onBlur={() => {
+                      commitName();
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
-                        onChangePlayerName(nameDraft);
+                        commitName();
                         (e.target as HTMLInputElement).blur();
                       }
                     }}
-                    className="w-48 px-3 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] placeholder-[#5a6c75] focus:outline-none focus:border-[#c99c4a]"
+                    className="w-48 px-3 py-1.5 text-xs font-medium rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] placeholder-[#5a6c75] focus:outline-none focus:border-[#c99c4a] disabled:opacity-60"
                   />
                 </div>
 
@@ -547,21 +561,24 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                             value={joinCodeDraft}
                             maxLength={8}
                             placeholder="Basin Code (e.g. WK842)"
-                            onChange={(e) => setJoinCodeDraft(e.target.value.toUpperCase())}
+                            onChange={(e) => setJoinCodeDraft(normalizeRoomCode(e.target.value))}
                             onKeyDown={(e) => {
-                              if (e.key === 'Enter' && joinCodeDraft.trim()) {
+                              const code = normalizeRoomCode(joinCodeDraft);
+                              if (e.key === 'Enter' && code && mpSnapshot.status === 'connected') {
                                 const clean = commitName();
-                                multiplayerClient.joinRoom(joinCodeDraft.trim(), clean);
+                                multiplayerClient.joinRoom(code, clean);
                               }
                             }}
                             className="flex-1 px-2.5 py-1.5 text-xs font-mono-num uppercase rounded-[2px] border border-[#4e3d21] bg-[#0b1218] text-[#f7f2e7] placeholder-[#5a6c75] focus:outline-none focus:border-[#c99c4a]"
                           />
                           <button
                             type="button"
-                            disabled={!joinCodeDraft.trim() || mpSnapshot.status !== 'connected'}
+                            disabled={!normalizeRoomCode(joinCodeDraft) || mpSnapshot.status !== 'connected'}
                             onClick={() => {
+                              const code = normalizeRoomCode(joinCodeDraft);
+                              if (!code) return;
                               const clean = commitName();
-                              multiplayerClient.joinRoom(joinCodeDraft.trim(), clean);
+                              multiplayerClient.joinRoom(code, clean);
                             }}
                             className="px-3 py-1.5 text-xs font-semibold rounded-[2px] border border-[#5b4724] bg-[#142029] text-[#f3d285] hover:border-[#c99c4a] disabled:opacity-45"
                           >
@@ -925,7 +942,10 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                     ) : isHost ? (
                       <button
                         type="button"
-                        onClick={() => multiplayerClient.startRoomMatch()}
+                        onClick={() => {
+                          commitName();
+                          multiplayerClient.startRoomMatch();
+                        }}
                         className="flex-1 flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-[2px] border border-[#f3d285]/40 bg-[#c99c4a] text-[#0b1218] hover:bg-[#dfb35f] transition-colors whitespace-nowrap"
                       >
                         <Play className="w-4 h-4 fill-current" />
@@ -1752,6 +1772,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </button>
         </div>
       </footer>
+      {mode === 'multiplayer' && (
+        <MultiplayerDebugPanel snapshot={mpSnapshot} positionClassName="bottom-3 right-3" />
+      )}
     </div>
   );
 };

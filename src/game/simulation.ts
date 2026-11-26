@@ -5257,7 +5257,12 @@ export class GameSimulation {
     };
   }
 
-  public getRemoteWorldStateFor(playerId: string, tick: number): WorldStatePacket {
+  public getRemoteWorldStateFor(
+    playerId: string,
+    tick: number,
+    matchId?: string,
+    roomCode?: string
+  ): WorldStatePacket {
     const hud = this.getHudSnapshot(playerId);
     const meta = this.playerMetaById.get(playerId);
     const sfx = meta ? meta.pendingSfx.splice(0, meta.pendingSfx.length) : [];
@@ -5334,6 +5339,8 @@ export class GameSimulation {
       }));
 
     return {
+      matchId,
+      roomCode,
       tick,
       serverTime: Date.now(),
       matchTime: this.matchTime,

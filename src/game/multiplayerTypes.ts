@@ -21,6 +21,15 @@ import type {
 
 export type RoomStatus = 'waiting' | 'playing' | 'finished';
 
+export function normalizeRoomCode(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 8);
+}
+
 export interface RoomParticipant {
   id: string;
   name: string;
@@ -74,6 +83,7 @@ export interface RoomState {
   lobbySize: LobbySize;
   fillWithBots: boolean;
   status: RoomStatus;
+  activeMatchId: string | null;
   participants: RoomParticipant[];
   chat: RoomChatMessage[];
 }
@@ -199,6 +209,8 @@ export interface ClientSfxEvent {
 }
 
 export interface WorldStatePacket {
+  matchId?: string;
+  roomCode?: string;
   tick: number;
   serverTime: number;
   matchTime: number;
@@ -234,6 +246,7 @@ export type ClientMessage =
       clientId?: string;
     }
   | { type: 'room:leave' }
+  | { type: 'room:rename'; playerName: string }
   | { type: 'room:config'; lobbySize?: LobbySize; fillWithBots?: boolean }
   | { type: 'room:ready'; ready: boolean }
   | { type: 'room:chat'; text: string }
@@ -260,9 +273,9 @@ export type ServerMessage =
   | { type: 'room:joined'; room: RoomState; clientId: string }
   | { type: 'room:state'; room: RoomState }
   | { type: 'room:error'; message: string }
-  | { type: 'match:started'; playerId: string; roomCode: string }
+  | { type: 'match:started'; playerId: string; roomCode: string; matchId: string }
   | { type: 'world:state'; state: WorldStatePacket }
-  | { type: 'match:ended'; hud: HudSnapshot }
+  | { type: 'match:ended'; hud: HudSnapshot; matchId: string; roomCode: string }
   | { type: 'voice:signal'; fromId: string; fromName: string; signal: VoiceSignalPayload }
   | { type: 'voice:speaking'; peerId: string; speaking: boolean }
   | { type: 'voice:peer_left'; peerId: string }
